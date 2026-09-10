@@ -10,7 +10,29 @@ def test_truncated_supplemental_suffix_still_matches():
 
 
 def test_bare_json_suffix_yields_the_filename():
+    """The no-counter half of the plain-`.json` pair below."""
     assert sidecar_target("IMG_1234.jpg.json") == "IMG_1234.jpg"
+
+
+def test_bare_json_suffix_with_counter_relocates_it_too():
+    """The counter half of the plain-`.json` pair above.
+
+    Measured on a real 24,250-sidecar export: this shape (a counter on a
+    plain `.json` sidecar with no `supplemental-metadata` infix) occurs
+    zero times - the only two plain `.json` files present are
+    `shared_album_comments.json` and `user-generated-memory-titles.json`,
+    neither of which carries a counter. So this is currently latent, not
+    live.
+
+    It is pinned anyway because the relocation logic runs unconditionally
+    here too, and that is a deliberate choice, not an accident: M0's old
+    implementation only stripped a trailing `.json` on this path, so it
+    would have left the counter glued after the extension
+    (`IMG_1234.jpg(1)`). This diverges from that - the counter is
+    relocated into the stem (`IMG_1234(1).jpg`) - because that is the more
+    sensible target name, consistent with the supplemental-metadata case.
+    """
+    assert sidecar_target("IMG_1234.jpg(1).json") == "IMG_1234(1).jpg"
 
 
 def test_counter_is_relocated_into_the_stem_not_stripped():
