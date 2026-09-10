@@ -6,13 +6,19 @@ rekindle finds the photos that belong together — a trip, an anniversary, a
 season in one place — and stitches them into a short narrated montage set to
 music. Ask for one in plain language, or let it surface them on its own.
 
-```
-rekindle index ~/Pictures
-rekindle memory "our trip to the coast, 2014"
-rekindle memory --auto          # anniversaries, "N years ago today"
+```bash
+uv run rekindle doctor ~/Pictures    # what metadata do you actually have?
+uv run rekindle index ~/Pictures     # build the local index
 ```
 
 Point it at a folder. That's the whole setup.
+
+Those two commands work today. The montage itself is what's being built next:
+
+```bash
+rekindle memory "our trip to the coast, 2014"   # planned
+rekindle memory --auto                          # planned
+```
 
 Runs entirely on your machine — the default configuration makes no network
 calls at all, and needs no API key.
@@ -34,11 +40,14 @@ Metadata comes from the files themselves:
 
 | Source | Gives you |
 |---|---|
-| **XMP sidecars** (Lightroom, digiKam, osxphotos) | Person names **and face regions**, keywords, ratings |
-| **EXIF / IPTC** | Date taken, GPS, camera, orientation, keywords |
+| **XMP sidecars** (Lightroom, digiKam, osxphotos) | Person names **and face regions**, keywords, descriptions |
+| **EXIF** | Date taken and UTC offset, GPS, camera make and model, dimensions |
 | **Filesystem** | Folder names as albums, mtime as a fallback date |
 
-`rekindle doctor` tells you what coverage you actually have before you index.
+Not read yet: IPTC, orientation, and ratings.
+
+`rekindle doctor` tells you the coverage you actually have — not what these
+formats could in principle hold — before you index.
 
 ### If your photos are in Google Photos
 
@@ -69,6 +78,8 @@ uv run rekindle doctor ~/Pictures    # what metadata do you actually have?
 uv run rekindle index ~/Pictures     # build the local index
 ```
 
+`doctor` writes nothing at all, so it is safe to point at anything.
+
 No `.env` needed unless you want the optional LLM narration.
 
 ## How it works
@@ -76,7 +87,7 @@ No `.env` needed unless you want the optional LLM narration.
 ```
 a folder of photos
         ↓
-  read metadata          XMP → EXIF/IPTC → filesystem
+  read metadata          XMP → EXIF → filesystem
         ↓
   local embeddings       SigLIP on your GPU, or CPU
         ↓

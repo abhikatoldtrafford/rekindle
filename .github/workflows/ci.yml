@@ -18,7 +18,17 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+          # Without this the matrix axis is inert: setup-uv gets no version,
+          # there is no .python-version file, and all six legs run whatever
+          # interpreter the runner ships - so the 3.12 floor in pyproject.toml
+          # was never actually verified. The input sets UV_PYTHON, which
+          # `uv sync` and `uv run` both honour.
+          python-version: ${{ matrix.python-version }}
       - run: uv sync --all-extras
+      # Proves the pin took effect. A silently-ignored python-version would
+      # otherwise leave this job green while testing the wrong interpreter.
+      - run: uv run python -c "import sys; assert sys.version.startswith('${{ matrix.python-version }}'), sys.version"
+      - run: uv run python -VV
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pytest -v
@@ -30,5 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"  # the floor, so the minimal job guards it too
       - run: uv sync
       - run: uv run pytest -v

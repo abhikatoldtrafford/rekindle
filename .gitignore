@@ -8,10 +8,16 @@ client_secret*.json
 token*.json
 
 # Personal data — never commit
-data/
-takeout/
-photos/
-thumbnails/
+# Case variants are spelled out: git matches these patterns case-SENSITIVELY
+# unless core.ignorecase is set (it is, on Windows and default macOS, which
+# is exactly why a lowercase-only `takeout/` looked fine here). On Linux or a
+# case-sensitive macOS volume a real `Takeout/` export is NOT ignored, and
+# one `git add .` publishes tens of thousands of personal photos to a public
+# repo. There is no undo for that.
+[Dd]ata/
+[Tt]akeout/
+[Pp]hotos/
+[Tt]humbnails/
 index/
 memories/
 *.mp4

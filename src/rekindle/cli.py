@@ -1,4 +1,3 @@
-# src/rekindle/cli.py
 """Command line interface."""
 
 from __future__ import annotations

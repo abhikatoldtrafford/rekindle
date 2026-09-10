@@ -32,7 +32,15 @@ The Years*, *Seasons In One Place*, *Everyone Who Came To Dinner*.
 ### 2. A new photo source
 
 `Source` normalises any library into `Photo` records. Apple Photos, Immich,
-Nextcloud, Synology Photos and PhotoPrism are all wanted.
+Nextcloud, Synology Photos and PhotoPrism are all wanted. One protocol, two
+members. Full guide: [writing-sources.md](docs/writing-sources.md).
+
+```python
+class Source(Protocol):
+    name: str
+
+    def scan(self, root: Path) -> tuple[list[Photo], SourceReport]: ...
+```
 
 ### 3. A new model backend
 
