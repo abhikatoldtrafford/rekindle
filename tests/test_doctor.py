@@ -1,4 +1,8 @@
-from rekindle.doctor import diagnose
+from pathlib import Path
+
+from rich.console import Console
+
+from rekindle.doctor import Diagnosis, diagnose, render
 from rekindle.models import SourceReport
 
 
@@ -76,3 +80,44 @@ def test_no_orphan_warning_when_export_is_complete():
 def test_excluded_trash_is_mentioned():
     d = diagnose(_report(media_indexed=100, with_date=100, with_people=1, excluded_dirs=12))
     assert any("trash" in w.lower() for w in d.warnings)
+
+
+def test_render_shows_unreadable_filenames_and_reasons():
+    """DoD: 'unreadable is both populated and rendered.' Nothing previously
+    tested the rendering half - a bug that dropped this block silently would
+    have passed the whole suite."""
+    report = _report(
+        media_indexed=5,
+        with_date=5,
+        unreadable=[
+            (Path("truncated.jpg"), "decompression bomb: too many pixels"),
+            (Path("broken.heic"), "UnidentifiedImageError: cannot identify image file"),
+        ],
+    )
+    diagnosis = Diagnosis(report=report)
+    console = Console(record=True, width=200)
+    render(diagnosis, console)
+    output = console.export_text()
+
+    assert "truncated.jpg" in output
+    assert "decompression bomb: too many pixels" in output
+    assert "broken.heic" in output
+    assert "UnidentifiedImageError" in output
+
+
+def test_render_caps_unreadable_list_and_shows_a_tail_count():
+    report = _report(
+        media_indexed=15,
+        with_date=15,
+        unreadable=[(Path(f"bad{i}.jpg"), "unreadable") for i in range(15)],
+    )
+    diagnosis = Diagnosis(report=report)
+    console = Console(record=True, width=200)
+    render(diagnosis, console)
+    output = console.export_text()
+
+    for i in range(10):
+        assert f"bad{i}.jpg" in output
+    for i in range(10, 15):
+        assert f"bad{i}.jpg" not in output
+    assert "... and 5 more" in output
