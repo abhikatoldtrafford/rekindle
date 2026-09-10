@@ -261,7 +261,31 @@ The v1 claim that this removes "30–50%" of a library is an unmeasured guess an
 
 Batched on GPU, smaller checkpoint on CPU, checkpointed and resumable, keyed by `file_hash`.
 
-**The bottleneck is JPEG decode and disk I/O, not the GPU.** A 6-core CPU decoding 12–24 MP JPEGs is the wall; the GPU can sustain far more. Design accordingly: multiprocess decode pool feeding batched GPU inference. HEIC decode is several times slower, so iPhone-heavy libraries will be slower. No throughput number is asserted until measured.
+**The bottleneck is JPEG decode and disk I/O, not the GPU** — confirmed by
+measurement on the reference machine. SigLIP base/16 sustains ~825 img/s there;
+naive single-threaded 12 MP JPEG decode manages 4.2.
+
+Three findings that shape the implementation:
+
+- **`Image.draft('RGB', (224, 224))` before decode is the single highest-leverage
+  optimisation in the pipeline** — it uses libjpeg's DCT scaling to decode
+  directly at 1/8 scale. Measured **4.2 → 34.1 img/s single-threaded**, a 6.4x
+  gain from one line.
+- **Use `ThreadPoolExecutor`, not `ProcessPoolExecutor`.** Pillow releases the
+  GIL, so threads scale well (34 → 276 img/s on 12 threads). A process pool on
+  Windows collapsed to 2.4 img/s because every child re-imports torch.
+- **Disk becomes the wall once decode is fixed.** Drafted decode wants ~1.1 GB/s;
+  a SATA SSD caps the pipeline near 90 img/s.
+
+GPU JPEG decode is not a fix on consumer/workstation Ampere — GA104 has no NVJPG
+engine, and `decode_jpeg(device='cuda')` measured *slower* than CPU threads.
+
+**HEIC has no `draft()` equivalent** (HEVC intra-frame must reconstruct full
+resolution); budget 1–3 img/s per core. Use libheif's native thumbnail *items*
+via pillow-heif as the analogue. Never embed from EXIF thumbnails — they are
+160×120 and would feed SigLIP an upscaled postage stamp.
+
+Realistic target for 40k photos: **10–20 minutes**, not the hour v1 implied.
 
 ### 5.4 Media types
 
@@ -269,7 +293,11 @@ v1 did not mention any of this.
 
 - **Video** (`.mp4`, `.mov`) — parsed, indexed by metadata, excluded from montages in v1. Must not crash the parser.
 - **Motion photos** (`.MP`, `.MV`, `MVIMG_*.jpg`) — treated as stills; embedded video ignored.
-- **Live Photos** — HEIC + MOV pairs that Takeout no longer associates; linked by filename stem and timestamp.
+- **Live Photos** — HEIC + MOV pairs that Takeout no longer associates. **Pair on
+  Apple's `ContentIdentifier` UUID** (MakerNote tag `0x0011` on the still,
+  `com.apple.quicktime.content.identifier` on the movie), **never on filename** —
+  Takeout produces cases like `IMG_1234(2).MOV` sitting beside an unrelated
+  `IMG_1234.MOV`, which filename matching pairs wrongly.
 - **HEIC** — via `pillow-heif`. **Never trust the extension**; Takeout is known to emit `.heic` files that are actually JPEG. Sniff magic bytes.
 
 ### 5.5 Storage
@@ -281,7 +309,10 @@ Arithmetic: 50k × 768 × fp32 = **154 MB**; 500k = 1.5 GB. On any modern machin
 **Design:**
 
 - **SQLite** is the source of truth — photos, albums, people, exclusions, memories, shot→photo joins. Real indices, real transactions, zero binary dependencies, identical on all three OSes.
-- **`numpy` memmap of `float16` embeddings** for brute-force similarity.
+- **`numpy` memmap of `float32` embeddings** for brute-force similarity.
+  **Not `float16`** — numpy has no BLAS path for half precision, so a measured
+  500k-vector search took **5.5 s in fp16 versus 188 ms in fp32**. Store fp32,
+  or move the matmul to the GPU where fp16 *is* faster.
 - Both sit behind a narrow `Index` façade, so a vector database can be reintroduced later if someone genuinely arrives with millions of photos.
 
 ### 5.6 Picker API — dropped from v1
@@ -463,7 +494,9 @@ harness.
 | Grounding verifier is itself imperfect | Eval set with regression gating; verifier is a floor, not a proof |
 | Sensitive detection misses relational pain | Feedback loop + onboarding + `--auto` off by default |
 | Face-tag coverage low or absent (IL/TX, opt-in) | Date/album exclusions lead; coverage reported by `doctor` |
-| Python 3.14 lacks CUDA wheels | Pin 3.12/3.13 via `uv`; do not let resolution float |
-| Decode-bound indexing misattributed to GPU | Multiprocess decode pool; measure before claiming throughput |
+| **Windows `pip install torch` silently gives a CPU build** — PyPI carries `nvidia-*` deps only for Linux | Install from `--index-url https://download.pytorch.org/whl/cu130`; `doctor` reports whether CUDA is actually available |
+| **`transformers` v5 changed the SigLIP API** — `get_image_features()` returns `BaseModelOutputWithPooling`, not a tensor, so old code silently embeds an object | Use `.pooler_output` explicitly; pin a tested `transformers` range |
+| **pillow-heif binary wheels are GPL-2.0** despite BSD metadata (they bundle x265), which conflicts with MIT if we ever ship a bundle | Optional extra, lazy import, graceful degradation, documented. A copyleft-free decode-only build exists via `-DWITH_X265=OFF` |
+| Decode-bound indexing misattributed to the GPU | Threaded decode pool + `draft()`; throughput measured, not asserted |
 | Windows `MAX_PATH` on deep Takeout trees | Detect, warn, document `LongPathsEnabled`, consider `\\?\` prefixing |
 | Recipe quality unverifiable by contributors | CC0 corpus + eval harness (M3) |
