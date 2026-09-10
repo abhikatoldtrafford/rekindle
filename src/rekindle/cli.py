@@ -100,7 +100,15 @@ def enrich(
 ) -> None:
     """Read Google Takeout JSON sidecars into an index that already exists."""
     _check_root(root)
-    with PhotoStore(data_dir / "rekindle.sqlite") as store:
+    # Same reasoning as `doctor --from-index`: PhotoStore creates its file on
+    # open, so without this check up front, running `enrich` before `index`
+    # would correctly still exit 2 (`TakeoutEnricher.enrich` raises on an
+    # empty store) but leave a stray, empty database file behind.
+    db_path = data_dir / "rekindle.sqlite"
+    if not db_path.is_file():
+        console.print(f"[red]No index at[/red] {db_path}. Run `rekindle index {root}` first.")
+        raise typer.Exit(code=2)
+    with PhotoStore(db_path) as store:
         try:
             report = TakeoutEnricher().enrich(root, store)
         except EmptyIndexError as exc:

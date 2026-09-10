@@ -164,3 +164,78 @@ def test_doctor_from_index_without_an_index_creates_nothing(tmp_path):
     assert result.exit_code == 2
     assert not data.exists()
     assert not any(tmp_path.rglob("*.sqlite"))
+
+
+def test_enrich_against_a_foreign_root_warns(tmp_path):
+    """Every other CLI test indexes and enriches the SAME root string, so the
+    `indexed_root != str(root)` branch in `cli.enrich` never fires without
+    this test - confirmed by deleting the block and re-running the full
+    suite unchanged (see task-12 review)."""
+    from tests.fixtures.takeout import build_takeout
+
+    root_a = build_takeout(tmp_path / "A")
+    root_b = tmp_path / "B"
+    root_b.mkdir()
+    data = str(tmp_path / "data")
+    assert runner.invoke(app, ["index", str(root_a), "--data-dir", data]).exit_code == 0
+    result = runner.invoke(app, ["enrich", str(root_b), "--data-dir", data])
+    assert result.exit_code == 0
+    # Rich soft-wraps long lines at whitespace to the terminal width CliRunner
+    # reports (~80 cols); the tmp_path fixture's username ("MY PC") itself
+    # contains a space, so a literal `str(root_a) in result.stdout` check is
+    # one wrap away from a false negative. Collapse whitespace runs first, as
+    # `test_render_shows_unreadable_filenames_and_reasons` sidesteps the same
+    # hazard by only ever asserting whitespace-free fragments.
+    flat = " ".join(result.stdout.split())
+    assert "index was built from" in flat
+    assert " ".join(str(root_a).split()) in flat
+
+
+def test_doctor_from_index_against_a_foreign_root_warns(tmp_path):
+    """Mirror of the above for `doctor --from-index`: the CLI-argument-vs-
+    stored-index_root comparison, not the store-vs-store one already covered
+    by test_diagnose_index_warns_about_a_foreign_enrich_root."""
+    from tests.fixtures.takeout import build_takeout
+
+    root_a = build_takeout(tmp_path / "A")
+    root_b = tmp_path / "B"
+    root_b.mkdir()
+    data = str(tmp_path / "data")
+    assert runner.invoke(app, ["index", str(root_a), "--data-dir", data]).exit_code == 0
+    result = runner.invoke(app, ["doctor", str(root_b), "--from-index", "--data-dir", data])
+    assert result.exit_code == 0
+    # See the comment in test_enrich_against_a_foreign_root_warns: normalise
+    # away Rich's soft-wrapping before matching a long path.
+    flat = " ".join(result.stdout.split())
+    assert "This index was built from" in flat
+    assert " ".join(str(root_a).split()) in flat
+
+
+def test_enrich_before_index_creates_no_stray_database(tmp_path):
+    """Mirror of `test_doctor_from_index_without_an_index_creates_nothing`:
+    `PhotoStore.__init__` creates its file unconditionally, so without an
+    explicit existence check up front, `rekindle enrich` before `rekindle
+    index` correctly exits 2 but used to leave a stray, empty
+    rekindle.sqlite behind (flagged in task-12 review)."""
+    from tests.fixtures.takeout import build_takeout
+
+    root = build_takeout(tmp_path / "Takeout")
+    data = tmp_path / "data"
+    result = runner.invoke(app, ["enrich", str(root), "--data-dir", str(data)])
+    assert result.exit_code == 2
+    assert not data.exists()
+    assert not any(tmp_path.rglob("*.sqlite"))
+
+
+def test_enrich_against_an_indexed_but_empty_folder_still_guards(tmp_path):
+    """The `db_path.is_file()` check above only catches "index never ran".
+    This exercises the other case `EmptyIndexError` guards: `index` DID run,
+    but against a folder with no media at all, so the database exists with
+    zero rows."""
+    empty_root = tmp_path / "Empty"
+    empty_root.mkdir()
+    data = str(tmp_path / "data")
+    assert runner.invoke(app, ["index", str(empty_root), "--data-dir", data]).exit_code == 0
+    result = runner.invoke(app, ["enrich", str(empty_root), "--data-dir", data])
+    assert result.exit_code == 2
+    assert "index is empty" in result.stdout.lower()
