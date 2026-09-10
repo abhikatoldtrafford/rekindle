@@ -1,9 +1,15 @@
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
 from rekindle.enrich.takeout import EnrichReport, build_index, resolve
 from rekindle.models import MediaType, Photo, PhotoMeta
 from tests.fixtures.takeout import build_takeout
+
+
+def _write_sidecar_json(path: Path, **payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def _photo(*paths: Path) -> Photo:
@@ -214,30 +220,19 @@ def test_same_directory_disagreement_is_refused_not_silently_first(tmp_path):
     the branch as dead - which is exactly how the predecessor's ambiguity
     refusal went unexercised and then silently vacuous.
     """
-    import json
-
     root = tmp_path / "Takeout"
     year = root / "Photos from 2011"
-    year.mkdir(parents=True)
-    (year / "TWIN.jpg.supplemental-metadata.json").write_text(
-        json.dumps(
-            {
-                "title": "TWIN.jpg",
-                "photoTakenTime": {"timestamp": "1000000000"},
-                "people": [{"name": "Ada"}],
-            }
-        ),
-        encoding="utf-8",
+    _write_sidecar_json(
+        year / "TWIN.jpg.supplemental-metadata.json",
+        title="TWIN.jpg",
+        photoTakenTime={"timestamp": "1000000000"},
+        people=[{"name": "Ada"}],
     )
-    (year / "TWIN.jpg.json").write_text(
-        json.dumps(
-            {
-                "title": "TWIN.jpg",
-                "photoTakenTime": {"timestamp": "2000000000"},
-                "people": [{"name": "Grace"}],
-            }
-        ),
-        encoding="utf-8",
+    _write_sidecar_json(
+        year / "TWIN.jpg.json",
+        title="TWIN.jpg",
+        photoTakenTime={"timestamp": "2000000000"},
+        people=[{"name": "Grace"}],
     )
     report = EnrichReport()
     index = build_index(root, report)
@@ -245,3 +240,93 @@ def test_same_directory_disagreement_is_refused_not_silently_first(tmp_path):
     assert match == "ambiguous"
     assert found is None
     assert tie is False
+
+
+def test_a_gps_only_disagreement_is_detected_not_silently_overridden(tmp_path):
+    """Important 4 residual: `_disagree` was widened to cover gps,
+    description and favorite, but nothing pinned it - reverting the
+    widening back to date+people alone passed the full suite unchanged.
+    9 real disagreeing candidate pairs on the reference export differ ONLY
+    on GPS (same capture time, same people, different coordinates); before
+    the widening, `tie` was silently `False` for every one of them and
+    `EnrichReport.gps_added` had no way to know a coordinate was ever
+    contested.
+
+    Same shape as `test_same_directory_wins_over_a_distant_candidate`: one
+    same-directory candidate wins by directory preference, one distant
+    candidate disagrees - but here the ONLY difference between them is GPS.
+    """
+    root = tmp_path / "Takeout"
+    year = root / "Photos from 2011"
+    _write_sidecar_json(
+        year / "GPS_TIE.jpg.supplemental-metadata.json",
+        title="GPS_TIE.jpg",
+        photoTakenTime={"timestamp": "1400000000"},
+        people=[{"name": "Ada"}],
+        geoData={"latitude": 12.9716, "longitude": 77.5946, "altitude": 900.0},
+        geoDataExif={"latitude": 12.9716, "longitude": 77.5946, "altitude": 900.0},
+    )
+    _write_sidecar_json(
+        root / "Elsewhere" / "GPS_TIE.jpg.supplemental-metadata.json",
+        title="GPS_TIE.jpg",
+        photoTakenTime={"timestamp": "1400000000"},
+        people=[{"name": "Ada"}],
+        geoData={"latitude": 48.8566, "longitude": 2.3522, "altitude": 35.0},
+        geoDataExif={"latitude": 48.8566, "longitude": 2.3522, "altitude": 35.0},
+    )
+    report = EnrichReport()
+    index = build_index(root, report)
+    found, match, tie = resolve(_photo(year / "GPS_TIE.jpg"), index)
+    assert match == "exact"
+    assert found.gps.lat == 12.9716
+    assert tie is True
+
+
+def test_a_description_only_disagreement_is_detected(tmp_path):
+    """Same mechanism as the GPS case above, for `description`."""
+    root = tmp_path / "Takeout"
+    year = root / "Photos from 2011"
+    _write_sidecar_json(
+        year / "DESC_TIE.jpg.supplemental-metadata.json",
+        title="DESC_TIE.jpg",
+        photoTakenTime={"timestamp": "1400000000"},
+        people=[{"name": "Ada"}],
+        description="Caption A",
+    )
+    _write_sidecar_json(
+        root / "Elsewhere" / "DESC_TIE.jpg.supplemental-metadata.json",
+        title="DESC_TIE.jpg",
+        photoTakenTime={"timestamp": "1400000000"},
+        people=[{"name": "Ada"}],
+        description="Caption B",
+    )
+    report = EnrichReport()
+    index = build_index(root, report)
+    _found, match, tie = resolve(_photo(year / "DESC_TIE.jpg"), index)
+    assert match == "exact"
+    assert tie is True
+
+
+def test_a_favourite_only_disagreement_is_detected(tmp_path):
+    """Same mechanism as the GPS case above, for `favorited`. 2 real
+    disagreeing pairs on the reference export differ only on this flag."""
+    root = tmp_path / "Takeout"
+    year = root / "Photos from 2011"
+    _write_sidecar_json(
+        year / "FAV_TIE.jpg.supplemental-metadata.json",
+        title="FAV_TIE.jpg",
+        photoTakenTime={"timestamp": "1400000000"},
+        people=[{"name": "Ada"}],
+        favorited=True,
+    )
+    _write_sidecar_json(
+        root / "Elsewhere" / "FAV_TIE.jpg.supplemental-metadata.json",
+        title="FAV_TIE.jpg",
+        photoTakenTime={"timestamp": "1400000000"},
+        people=[{"name": "Ada"}],
+    )
+    report = EnrichReport()
+    index = build_index(root, report)
+    _found, match, tie = resolve(_photo(year / "FAV_TIE.jpg"), index)
+    assert match == "exact"
+    assert tie is True
