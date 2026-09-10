@@ -265,8 +265,14 @@ def test_photo_meta_lists_are_independent_between_instances():
 
 def test_photo_defaults():
     now = datetime(2026, 1, 1, tzinfo=UTC)
-    p = Photo(file_hash="abc", paths=[], media_type=MediaType.IMAGE,
-              meta=PhotoMeta.empty(), first_seen=now, last_seen=now)
+    p = Photo(
+        file_hash="abc",
+        paths=[],
+        media_type=MediaType.IMAGE,
+        meta=PhotoMeta.empty(),
+        first_seen=now,
+        last_seen=now,
+    )
     assert p.albums == []
     assert p.edited_of is None
 
@@ -760,8 +766,7 @@ def test_upsert_same_hash_updates_last_seen_and_unions_albums(tmp_path):
     with PhotoStore(tmp_path / "db.sqlite") as s:
         s.upsert_many([_photo(albums=["Year 2014"], paths=[Path("/a/x.jpg")])])
         inserted, updated = s.upsert_many(
-            [_photo(albums=["Goa Trip"], paths=[Path("/b/x.jpg")],
-                    first_seen=T1, last_seen=T1)]
+            [_photo(albums=["Goa Trip"], paths=[Path("/b/x.jpg")], first_seen=T1, last_seen=T1)]
         )
         assert (inserted, updated) == (0, 1)
         got = s.get("abc123")
@@ -770,7 +775,7 @@ def test_upsert_same_hash_updates_last_seen_and_unions_albums(tmp_path):
     # Compare Paths, not strings: Path("/a/x.jpg") is "\a\x.jpg" on Windows.
     assert sorted(got.paths) == sorted([Path("/a/x.jpg"), Path("/b/x.jpg")])
     assert got.first_seen == T0  # earliest wins
-    assert got.last_seen == T1   # latest wins
+    assert got.last_seen == T1  # latest wins
 
 
 def test_get_returns_none_for_unknown_hash(tmp_path):
@@ -906,8 +911,12 @@ class PhotoStore:
     def __enter__(self) -> PhotoStore:
         return self
 
-    def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None,
-                 tb: TracebackType | None) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        tb: TracebackType | None,
+    ) -> None:
         self.close()
 
     def close(self) -> None:
@@ -991,8 +1000,10 @@ class PhotoStore:
                 "gps_alt": m.gps.alt if m.gps else None,
                 "people": json.dumps(m.people),
                 "face_regions": json.dumps(
-                    [{"name": r.name, "x": r.x, "y": r.y, "w": r.w, "h": r.h}
-                     for r in m.face_regions]
+                    [
+                        {"name": r.name, "x": r.x, "y": r.y, "w": r.w, "h": r.h}
+                        for r in m.face_regions
+                    ]
                 ),
                 "keywords": json.dumps(m.keywords),
                 "description": m.description,
@@ -1261,8 +1272,7 @@ def make_xmp_sidecar(
     if people:
         items = "".join(f"<rdf:li>{p}</rdf:li>" for p in people)
         persons = (
-            f"    <Iptc4xmpExt:PersonInImage><rdf:Bag>{items}"
-            "</rdf:Bag></Iptc4xmpExt:PersonInImage>"
+            f"    <Iptc4xmpExt:PersonInImage><rdf:Bag>{items}</rdf:Bag></Iptc4xmpExt:PersonInImage>"
         )
     regs = ""
     if regions:
@@ -1307,8 +1317,9 @@ def build_library(root: Path) -> Path:
     (album / "IMG_0001.jpg").write_bytes(beach.read_bytes())
 
     # An edited variant of the same original.
-    make_jpeg(year / "IMG_0001-edited.jpg", color=(20, 130, 210),
-              taken=datetime(2014, 3, 21, 17, 45))
+    make_jpeg(
+        year / "IMG_0001-edited.jpg", color=(20, 130, 210), taken=datetime(2014, 3, 21, 17, 45)
+    )
 
     # A Google-style JSON sidecar that must be ignored as media.
     (year / "IMG_0001.jpg.json").write_text(
@@ -1316,8 +1327,9 @@ def build_library(root: Path) -> Path:
     )
 
     # A photo with an XMP sidecar carrying people and face regions.
-    portrait = make_jpeg(album / "IMG_0002.jpg", color=(200, 160, 140),
-                         taken=datetime(2014, 3, 22, 9, 0))
+    portrait = make_jpeg(
+        album / "IMG_0002.jpg", color=(200, 160, 140), taken=datetime(2014, 3, 22, 9, 0)
+    )
     make_xmp_sidecar(
         portrait,
         people=["Alice", "Bob"],
@@ -1348,8 +1360,7 @@ def build_library(root: Path) -> Path:
 
     # A motion photo: Google exports the video component as a separate .MP file
     # (ISO-BMFF, ftyp:isom) beside the still.
-    make_jpeg(album / "PXL_0001.jpg", color=(70, 140, 90),
-              taken=datetime(2025, 9, 6, 13, 3))
+    make_jpeg(album / "PXL_0001.jpg", color=(70, 140, 90), taken=datetime(2025, 9, 6, 13, 3))
     (album / "PXL_0001.MP").write_bytes(
         b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2" + b"\x00" * 128
     )
@@ -1402,8 +1413,13 @@ from tests.fixtures.gen import make_jpeg
 
 
 def test_reads_datetime_offset_and_camera(tmp_path):
-    p = make_jpeg(tmp_path / "a.jpg", taken=datetime(2014, 3, 21, 17, 45),
-                  offset="+05:30", make="Canon", model="EOS R")
+    p = make_jpeg(
+        tmp_path / "a.jpg",
+        taken=datetime(2014, 3, 21, 17, 45),
+        offset="+05:30",
+        make="Canon",
+        model="EOS R",
+    )
     d = read_exif(p)
     assert d.taken_naive == datetime(2014, 3, 21, 17, 45)
     assert d.offset == "+05:30"
@@ -1639,9 +1655,12 @@ def test_returns_none_when_no_sidecar(tmp_path):
 
 def test_reads_people_description_and_keywords(tmp_path):
     img = make_jpeg(tmp_path / "d.jpg")
-    side = make_xmp_sidecar(img, people=["Alice", "Bob"],
-                            description="morning on the beach",
-                            keywords=("beach", "holiday"))
+    side = make_xmp_sidecar(
+        img,
+        people=["Alice", "Bob"],
+        description="morning on the beach",
+        keywords=("beach", "holiday"),
+    )
     d = read_xmp(side)
     assert sorted(d.people) == ["Alice", "Bob"]
     assert d.description == "morning on the beach"
@@ -1924,8 +1943,9 @@ def test_negative_offset_converts_correctly():
 
 
 def test_gps_lookup_used_when_offset_missing():
-    utc, local, src = resolve(NAIVE, None, Gps(15.3, 74.1), MTIME,
-                              tz_lookup=lambda _g: "Asia/Kolkata")
+    utc, local, src = resolve(
+        NAIVE, None, Gps(15.3, 74.1), MTIME, tz_lookup=lambda _g: "Asia/Kolkata"
+    )
     assert src is TzSource.GPS
     assert local.replace(tzinfo=None) == NAIVE
     assert utc == datetime(2014, 3, 21, 12, 15, tzinfo=UTC)
@@ -2305,8 +2325,16 @@ _SIDECAR_EXTS = {".json", ".xmp", ".aae", ".thm"}
 # Never index deleted photos. Verified present in a real Takeout export as
 # "Trash"; localised in other locales.
 EXCLUDED_DIRS = {
-    "trash", "bin", "papierkorb", "corbeille", "papelera", "cestino",
-    "prullenbak", "papperskorg", ".thumbnails", "@eadir",
+    "trash",
+    "bin",
+    "papierkorb",
+    "corbeille",
+    "papelera",
+    "cestino",
+    "prullenbak",
+    "papperskorg",
+    ".thumbnails",
+    "@eadir",
 }
 
 
@@ -2610,15 +2638,23 @@ def test_warns_about_unignored_json_sidecars():
 
 
 def test_healthy_library_has_no_warnings():
-    d = diagnose(_report(media_indexed=100, with_date=100, with_gps=80,
-                         with_people=50, with_xmp=50))
+    d = diagnose(
+        _report(media_indexed=100, with_date=100, with_gps=80, with_people=50, with_xmp=50)
+    )
     assert d.warnings == []
 
 
 def test_orphan_sidecars_produce_an_incomplete_export_warning():
     """The single most common way a library comes out half-empty."""
-    d = diagnose(_report(media_indexed=2802, with_date=2802, with_people=1,
-                         json_sidecars=5013, orphan_sidecars=2211))
+    d = diagnose(
+        _report(
+            media_indexed=2802,
+            with_date=2802,
+            with_people=1,
+            json_sidecars=5013,
+            orphan_sidecars=2211,
+        )
+    )
     hits = [w for w in d.warnings if "INCOMPLETE EXPORT" in w]
     assert len(hits) == 1
     assert "2211" in hits[0]
@@ -2626,14 +2662,16 @@ def test_orphan_sidecars_produce_an_incomplete_export_warning():
 
 
 def test_no_orphan_warning_when_export_is_complete():
-    d = diagnose(_report(media_indexed=100, with_date=100, with_people=5,
-                         json_sidecars=100, orphan_sidecars=0))
+    d = diagnose(
+        _report(
+            media_indexed=100, with_date=100, with_people=5, json_sidecars=100, orphan_sidecars=0
+        )
+    )
     assert not any("INCOMPLETE EXPORT" in w for w in d.warnings)
 
 
 def test_excluded_trash_is_mentioned():
-    d = diagnose(_report(media_indexed=100, with_date=100, with_people=1,
-                         excluded_dirs=12))
+    d = diagnose(_report(media_indexed=100, with_date=100, with_people=1, excluded_dirs=12))
     assert any("trash" in w.lower() for w in d.warnings)
 ```
 
@@ -2889,8 +2927,9 @@ def index(
         inserted, updated = store.upsert_many(photos)
         total = store.count()
     render(diagnose(report), console)
-    console.print(f"\n[green]Indexed[/green] {inserted} new, {updated} updated. "
-                  f"{total} photos in the index.")
+    console.print(
+        f"\n[green]Indexed[/green] {inserted} new, {updated} updated. {total} photos in the index."
+    )
 ```
 
 - [ ] **Step 5: Run tests to verify they pass**
