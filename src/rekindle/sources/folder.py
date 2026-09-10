@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import re
 import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
@@ -19,6 +18,7 @@ from rekindle.models import (
     TzSource,
     merge_meta,
 )
+from rekindle.sidecars import sidecar_target as _sidecar_target
 
 # Google localises the edited suffix, so this is a list, not a single string.
 # It also emits several derived-image suffixes beyond plain edits.
@@ -389,19 +389,3 @@ def _split_edited(stem: str) -> tuple[str, str | None]:
         if norm_cf.endswith(suffix_norm.casefold()):
             return norm[: len(norm) - len(suffix_norm)], suffix
     return norm, None
-
-
-def _sidecar_target(name: str) -> str:
-    """Media filename a Takeout sidecar refers to.
-
-    Verified against a real 5,006-sidecar export: the dominant form is
-    `IMG_1234.jpg.supplemental-metadata.json`, and when two photos share a
-    filename the counter lands INSIDE that suffix -
-    `DSC_0880.JPG.supplemental-metadata(1).json` - not after the extension.
-
-    That export contained no truncated suffixes (longest filename was 102
-    chars, intact). Truncation is well documented elsewhere though, and the
-    `met[a-z]*` wildcard costs nothing, so it stays.
-    """
-    stem = re.sub(r"\.supplemental-met[a-z]*(\(\d+\))?\.json$", "", name, flags=re.I)
-    return re.sub(r"\.json$", "", stem, flags=re.I)

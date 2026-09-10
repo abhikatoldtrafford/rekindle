@@ -174,7 +174,9 @@ def test_sidecar_target_strips_supplemental_metadata_and_counter():
     from rekindle.sources.folder import _sidecar_target
 
     assert _sidecar_target("IMG_1234.jpg.supplemental-metadata.json") == "IMG_1234.jpg"
-    assert _sidecar_target("DSC_0880.JPG.supplemental-metadata(1).json") == "DSC_0880.JPG"
+    # CHANGED from "DSC_0880.JPG". The counter belongs to the PHOTO's stem;
+    # stripping it made two sidecars claim one file. See tests/test_sidecars.py.
+    assert _sidecar_target("DSC_0880.JPG.supplemental-metadata(1).json") == "DSC_0880(1).JPG"
     assert _sidecar_target("IMG_1234.jpg.supplemental-metad.json") == "IMG_1234.jpg"
     assert _sidecar_target("IMG_1234.jpg.json") == "IMG_1234.jpg"
 
