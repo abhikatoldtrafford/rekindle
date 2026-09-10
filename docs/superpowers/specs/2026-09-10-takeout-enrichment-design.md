@@ -84,7 +84,7 @@ Every claim below is measured across the whole export, not sampled.
 | Descriptions | Present as a key on 100%, non-empty on 145 (0.60%). |
 | `favorited` | Absent when false; present on 7 sidecars, always `true`. |
 | `archived` / `trashed` | 162 archived, 12 trashed. **User intent, sitting unused.** |
-| Album `metadata.json` | 42 files; 4 titles differ from the folder name, 2 empty. Also present: `shared_album_comments.json` and `user-generated-memory-titles.json`, whose `title` is a **list**, and a root-level `metadata.json` with `title: null`. |
+| Album `metadata.json` | 42 files; 4 titles differ from the folder name, 2 empty. Also present: `shared_album_comments.json` and `user-generated-memory-titles.json`, whose `title` is a **list**, and — reported by an earlier review but **not present in the reference export** (verified: no root-level `metadata.json` exists, and no `title` is null; one is an empty string). A null title is handled defensively, not because it was observed. |
 | Album folders with zero media | **8**, holding hundreds of sidecars each. |
 | `photoTakenTime` clustering | 20 timestamps shared by ≥10 sidecars, covering 907 records — one value on 618. These are Google's *guesses*, not shutter times. |
 
