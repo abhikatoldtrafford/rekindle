@@ -55,7 +55,10 @@ def classify_json(path: Path) -> tuple[JsonKind, dict | None]:
     """Read and classify one .json file. Never raises."""
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, UnicodeDecodeError):
+    # UnicodeDecodeError is NOT listed separately - it is a ValueError
+    # subclass, so it is already covered here. Do not "helpfully" add it
+    # back: there is no separate branch for it to isolate.
+    except (OSError, ValueError):
         return JsonKind.UNPARSEABLE, None
     if not isinstance(payload, dict):
         # A top-level array is not something we know how to read.
