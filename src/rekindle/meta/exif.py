@@ -1,0 +1,114 @@
+"""EXIF extraction via Pillow. Never raises - a broken file yields empty data."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+
+from PIL import Image
+
+from rekindle.models import Gps
+
+# Without this, Image.open on a HEIC raises, read_exif swallows it, and every
+# iPhone photo indexes with no date, no GPS and no dimensions - silently.
+# The `heic` extra installs pillow-heif; absence is a supported configuration.
+try:
+    from pillow_heif import register_heif_opener
+
+    register_heif_opener()
+    HEIF_AVAILABLE = True
+except ImportError:  # pragma: no cover - depends on optional extra
+    HEIF_AVAILABLE = False
+
+_EXIF_IFD = 0x8769
+_GPS_IFD = 0x8825
+_MAKE, _MODEL = 0x010F, 0x0110
+_DATETIME_ORIGINAL, _OFFSET_ORIGINAL = 0x9003, 0x9011
+_DATETIME_DIGITIZED, _OFFSET_DIGITIZED = 0x9004, 0x9012
+
+
+@dataclass(frozen=True)
+class ExifData:
+    taken_naive: datetime | None = None
+    offset: str | None = None
+    gps: Gps | None = None
+    camera_make: str | None = None
+    camera_model: str | None = None
+    width: int | None = None
+    height: int | None = None
+    # False when the image could not be decoded at all. Without this, a
+    # truncated JPEG is indistinguishable from a photo that merely lacks EXIF,
+    # and doctor reports perfect health on a library of corrupt files.
+    decode_ok: bool = True
+    error: str | None = None
+
+
+def _rational(value: object) -> float:
+    if isinstance(value, tuple) and len(value) == 2:
+        num, den = value
+        return float(num) / float(den) if den else 0.0
+    return float(value)  # type: ignore[arg-type]
+
+
+def _dms_to_decimal(dms: object, ref: object) -> float | None:
+    try:
+        d, m, s = (_rational(x) for x in dms)  # type: ignore[misc]
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+    dec = d + m / 60.0 + s / 3600.0
+    if str(ref).upper().strip() in {"S", "W"}:
+        dec = -dec
+    return dec
+
+
+def _parse_dt(raw: object) -> datetime | None:
+    if not isinstance(raw, str):
+        return None
+    try:
+        return datetime.strptime(raw.strip(), "%Y:%m:%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def read_exif(path: Path) -> ExifData:
+    try:
+        with Image.open(path) as im:
+            width, height = im.size
+            exif = im.getexif()
+            sub = exif.get_ifd(_EXIF_IFD)
+            gps_ifd = exif.get_ifd(_GPS_IFD)
+    except Image.DecompressionBombError as exc:
+        return ExifData(decode_ok=False, error=f"decompression bomb: {exc}")
+    except Exception as exc:
+        return ExifData(decode_ok=False, error=f"{type(exc).__name__}: {exc}")
+
+    taken = _parse_dt(sub.get(_DATETIME_ORIGINAL)) or _parse_dt(sub.get(_DATETIME_DIGITIZED))
+    offset = sub.get(_OFFSET_ORIGINAL) or sub.get(_OFFSET_DIGITIZED)
+    offset = offset.strip() if isinstance(offset, str) else None
+
+    gps = None
+    if gps_ifd:
+        lat = _dms_to_decimal(gps_ifd.get(2), gps_ifd.get(1))
+        lon = _dms_to_decimal(gps_ifd.get(4), gps_ifd.get(3))
+        if lat is not None and lon is not None and not (lat == 0.0 and lon == 0.0):
+            alt = None
+            if gps_ifd.get(6) is not None:
+                try:
+                    alt = _rational(gps_ifd.get(6))
+                except (TypeError, ValueError, ZeroDivisionError):
+                    alt = None
+            gps = Gps(lat=lat, lon=lon, alt=alt)
+
+    def _clean(v: object) -> str | None:
+        return v.strip() or None if isinstance(v, str) else None
+
+    return ExifData(
+        taken_naive=taken,
+        offset=offset,
+        gps=gps,
+        camera_make=_clean(exif.get(_MAKE)),
+        camera_model=_clean(exif.get(_MODEL)),
+        width=width,
+        height=height,
+    )
