@@ -16,6 +16,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import NamedTuple
 
+from rekindle.db import PhotoStore
 from rekindle.meta.timestamps import TzLookup, from_takeout
 from rekindle.models import Gps, Photo, PhotoMeta, TzSource
 from rekindle.sidecars import is_album_metadata, sidecar_target
@@ -704,3 +705,87 @@ def retitle_albums(photo: Photo, renames: dict[str, str], report: EnrichReport) 
             1 for a, b in zip(photo.albums, updated, strict=True) if a != b
         )
         photo.albums = updated
+
+
+class EmptyIndexError(RuntimeError):
+    """`enrich` ran before `index`. Enriching nothing is not a success."""
+
+
+class TakeoutEnricher:
+    """Second pass over an already-indexed library.
+
+    Not a `Source`, deliberately - see the module docstring. It does honour
+    the contract that protocol existed to enforce: every JSON file lands in
+    exactly one counter, checked by EnrichReport's two identities.
+
+    Opens no media file. All timing information it needs was stored by M0, so
+    a re-run after extracting another archive part costs a JSON walk, not a
+    re-hash of 45,900 files.
+    """
+
+    name = "takeout"
+
+    def __init__(self, tz_lookup: TzLookup | None = None) -> None:
+        self._tz_lookup = tz_lookup
+
+    def enrich(self, root: Path, store: PhotoStore) -> EnrichReport:
+        if store.count() == 0:
+            raise EmptyIndexError(
+                f"The index is empty. Run `rekindle index {root}` before `rekindle enrich`."
+            )
+
+        report = EnrichReport()
+        index = build_index(root, report)
+        clustered = clustered_timestamps(index)
+        renames = album_renames(index, report)
+
+        # Materialised, not streamed: `PhotoStore.iter_photos` yields from a
+        # live cursor, and this loop writes back through the same connection
+        # via `update_many` below - the exact hazard `iter_photos`'s own
+        # docstring warns callers off.
+        photos = list(store.iter_photos())
+        claimed: dict[str, str] = {}
+        applied: set[Path] = set()
+        touched: dict[str, Photo] = {}
+
+        for photo in photos:
+            sidecar, match, tie = resolve(photo, index)
+            # Keyed on EVERY one of the photo's paths, not just paths[0]:
+            # `PhotoStore`'s dedup unions paths by content hash with no
+            # guarantee they share a filename, and `resolve()` itself already
+            # pooled candidates from every path name into one decision. A
+            # target reachable only through a non-first path must still be
+            # markable here, or its (possibly applied) sidecar falls through
+            # to `orphaned` in `account()` despite being written.
+            for path in photo.paths:
+                key = path.name.casefold()
+                # "ambiguous" must not be downgraded by a later photo that
+                # happens to resolve cleanly against the same key.
+                if key in index.by_target and match != "none" and claimed.get(key) != "ambiguous":
+                    claimed[key] = match
+            if match == "ambiguous":
+                photo.sidecar_match = "ambiguous"
+                touched[photo.file_hash] = photo
+                continue
+            if sidecar is None:
+                continue
+            apply_sidecar(photo, sidecar, clustered, report, tz_lookup=self._tz_lookup)
+            retitle_albums(photo, renames, report)
+            applied.add(sidecar.path)
+            report.photos_enriched += 1
+            if tie:
+                report.directory_preference_broke_a_tie += 1
+            touched[photo.file_hash] = photo
+
+        for photo in propagate_to_derivatives(photos, report):
+            retitle_albums(photo, renames, report)
+            touched[photo.file_hash] = photo
+
+        account(index, claimed, applied, report)
+
+        # One transaction for the whole run: `update_many` commits once, not
+        # once per photo.
+        store.update_many(touched.values())
+        store.set_meta("enrich_root", str(root))
+        store.set_meta("enriched_at", datetime.now(UTC).isoformat())
+        return report
