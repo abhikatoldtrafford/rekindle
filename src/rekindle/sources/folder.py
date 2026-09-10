@@ -69,6 +69,12 @@ class FolderSource:
         edited_pending: list[tuple[str, Path, str]] = []
 
         media_names: set[str] = set()
+        # Motion-photo pairing must be scoped to a single directory (a .MP in
+        # one album must never pair with a same-named still in another) and
+        # case-insensitive (real libraries mix .jpg and .JPG), so this tracks
+        # casefolded names per parent directory - unlike `media_names` above,
+        # which stays a flat, case-sensitive set for the sidecar-orphan check.
+        media_names_by_dir: dict[Path, set[str]] = {}
         sidecar_stems: list[str] = []
         saw_xmp: set[str] = set()
 
@@ -139,6 +145,7 @@ class FolderSource:
                 continue
 
             media_names.add(path.name)
+            media_names_by_dir.setdefault(path.parent, set()).add(path.name.casefold())
             album = path.parent.name if path.parent != root else None
 
             # Register stem BEFORE the duplicate check. A photo that appears in
@@ -226,12 +233,19 @@ class FolderSource:
         # by far the most common way an index silently comes out half-empty.
         report.orphan_sidecars = sum(1 for s in sidecar_stems if s not in media_names)
 
-        # Google exports motion photos as a separate .MP video beside the still.
+        # Google exports motion photos as a separate .MP video beside the
+        # still, named "<name>.MP.jpg" - i.e. the video's full NAME plus
+        # ".jpg", not its stem. Path.stem on "PXL_x.MP" strips only the final
+        # ".MP" suffix (giving "PXL_x"), so a still literally named
+        # "PXL_x.jpg" almost never exists; matching on `path.stem` finds zero
+        # pairs against a real export. Scoped to the same directory and
+        # case-insensitive, since real libraries mix .jpg/.JPG.
         report.motion_pairs = sum(
             1
             for p in by_hash.values()
             for path in p.paths
-            if path.suffix.lower() == ".mp" and f"{path.stem}.jpg" in media_names
+            if path.suffix.lower() == ".mp"
+            and f"{path.name}.jpg".casefold() in media_names_by_dir.get(path.parent, set())
         )
 
         photos = list(by_hash.values())

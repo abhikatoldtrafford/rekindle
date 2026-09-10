@@ -227,17 +227,24 @@ def build_library(root: Path) -> Path:
     )
 
     # A motion photo: Google exports the video component as a separate .MP file
-    # (ISO-BMFF, ftyp:isom) beside the still.
-    make_jpeg(album / "PXL_0001.jpg", color=(70, 140, 90), taken=datetime(2025, 9, 6, 13, 3))
+    # (ISO-BMFF, ftyp:isom) beside the still - named "<name>.MP.jpg", NOT
+    # "<name>.jpg". Path.stem on the "<name>.MP" video only strips the final
+    # ".MP" suffix (giving "<name>"), so pairing the two must compare against
+    # the video's full NAME plus ".jpg", not its stem. Verified against a
+    # real Takeout export.
+    make_jpeg(album / "PXL_0001.MP.jpg", color=(70, 140, 90), taken=datetime(2025, 9, 6, 13, 3))
     (album / "PXL_0001.MP").write_bytes(
         b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2" + b"\x00" * 128
     )
 
-    # An edited variant of the motion photo's STILL. Both the .jpg still and
-    # the .MP video share the stem "PXL_0001" - proves the edited variant
-    # links to the still's hash, never the video's, regardless of which one
-    # the scan happens to visit first.
-    make_jpeg(album / "PXL_0001-edited.jpg", color=(75, 145, 95), taken=datetime(2025, 9, 6, 13, 3))
+    # An edited variant of the motion photo's STILL. With the real naming
+    # above the still's stem is "PXL_0001.MP" (the video's stem is the
+    # shorter "PXL_0001") - they no longer collide in stem_index, so this now
+    # proves only ordinary edit-linking, not the video/still guard. See
+    # test_stem_index_prefers_image_over_video_sharing_a_stem for that.
+    make_jpeg(
+        album / "PXL_0001.MP-edited.jpg", color=(75, 145, 95), taken=datetime(2025, 9, 6, 13, 3)
+    )
 
     # The counter lands INSIDE the suffix when two photos share a filename.
     (year / "DSC_0880.JPG.supplemental-metadata(1).json").write_text(

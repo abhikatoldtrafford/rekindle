@@ -16,9 +16,9 @@ def test_indexes_images_and_skips_non_media(tmp_path):
     # A real check on media_indexed: the fixture library has exactly 9
     # distinct media items once cross-folder duplicates are merged
     # (IMG_0001, IMG_0001-edited, IMG_0002, IMG_0003, actually_jpeg.heic,
-    # PXL_0001.jpg, PXL_0001.MP, PXL_0001-edited, IMG_8000). A wrong count
-    # here - counting files_seen instead of distinct photos, or missing the
-    # dedupe - would fail this even though `media_indexed == len(photos)`
+    # PXL_0001.MP.jpg, PXL_0001.MP, PXL_0001.MP-edited, IMG_8000). A wrong
+    # count here - counting files_seen instead of distinct photos, or missing
+    # the dedupe - would fail this even though `media_indexed == len(photos)`
     # trivially holds either way.
     assert report.media_indexed == 9
     assert len(photos) == 9
@@ -50,7 +50,7 @@ def test_edited_variant_links_to_its_original(tmp_path):
     root = build_library(tmp_path / "lib")
     photos, report = _scan(root)
     edited = [p for p in photos if any("-edited" in x.name for x in p.paths)]
-    # IMG_0001-edited and PXL_0001-edited (FIX 2's motion-photo edit).
+    # IMG_0001-edited and PXL_0001.MP-edited (FIX 2's motion-photo edit).
     assert len(edited) == 2
     assert all(p.edited_of is not None for p in edited)
     assert report.edited_linked == 2
@@ -239,15 +239,24 @@ def test_aae_sidecar_is_skipped_not_miscounted_as_json_or_orphan(tmp_path):
     assert report.orphan_sidecars == 0
 
 
-def test_edited_variant_of_motion_photo_links_to_the_still_not_the_video(tmp_path):
-    """FIX 2: PXL_0001.jpg (still) and PXL_0001.MP (video) share the stem
-    "PXL_0001". stem_index must prefer the still regardless of visit order,
-    or an edited variant of the still could link to the video's hash."""
-    root = build_library(tmp_path / "lib")
+def test_stem_index_prefers_image_over_video_sharing_a_stem(tmp_path):
+    """FIX 2 (guard), direct unit test. With Google's real motion-photo
+    naming a video ("PXL_x.MP", stem "PXL_x") and its still ("PXL_x.MP.jpg",
+    stem "PXL_x.MP") do NOT share a stem - see FINDING B - so this
+    exercises the stem_index guard with a generic same-stem image/video pair
+    instead. Without the guard, the video (visited after the image
+    alphabetically) would overwrite the image's stem_index entry, and the
+    edited variant would silently link to the wrong original."""
+    root = tmp_path / "lib"
+    make_jpeg(root / "clip.jpg", color=(9, 8, 7))
+    (root / "clip.mov").write_bytes(b"\x00\x00\x00\x14ftypqt  \x00\x00\x02\x00" + b"\x00" * 128)
+    make_jpeg(root / "clip-edited.jpg", color=(1, 2, 3))
+
     photos, _ = _scan(root)
-    still = next(p for p in photos if any(x.name == "PXL_0001.jpg" for x in p.paths))
-    video = next(p for p in photos if any(x.name == "PXL_0001.MP" for x in p.paths))
-    edited = next(p for p in photos if any(x.name == "PXL_0001-edited.jpg" for x in p.paths))
+    still = next(p for p in photos if any(x.name == "clip.jpg" for x in p.paths))
+    video = next(p for p in photos if any(x.name == "clip.mov" for x in p.paths))
+    edited = next(p for p in photos if any(x.name == "clip-edited.jpg" for x in p.paths))
+    assert video.media_type is MediaType.VIDEO
     assert edited.edited_of == still.file_hash
     assert edited.edited_of != video.file_hash
 
