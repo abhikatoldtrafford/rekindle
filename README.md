@@ -65,9 +65,8 @@ git clone https://github.com/abhikatoldtrafford/rekindle
 cd rekindle
 uv sync
 
-rekindle doctor ~/Pictures    # what metadata do you actually have?
-rekindle index ~/Pictures     # build the local index
-rekindle serve                # open the player
+uv run rekindle doctor ~/Pictures    # what metadata do you actually have?
+uv run rekindle index ~/Pictures     # build the local index
 ```
 
 No `.env` needed unless you want the optional LLM narration.
