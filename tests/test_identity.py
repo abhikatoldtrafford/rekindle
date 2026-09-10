@@ -1,4 +1,7 @@
+import sys
 from pathlib import Path
+
+import pytest
 
 from rekindle.identity import file_hash, is_long_path, sniff
 from rekindle.models import MediaType
@@ -80,6 +83,31 @@ def test_unknown_iso_bmff_brand_is_unknown_not_guessed_video(tmp_path):
     assert fmt == "ftyp:crx "
 
 
-def test_long_path_detection():
+def test_sniff_propagates_an_io_error_instead_of_calling_it_unknown(tmp_path, monkeypatch):
+    """A file we cannot OPEN tells us nothing about its content. Returning
+    (UNKNOWN, "unknown") made the caller file a permission-denied photo under
+    skip("not_media") - a claim about content nobody ever inspected - and it
+    never reached the unreadable report."""
+    p = _write(tmp_path, "locked.jpg", JPEG)
+
+    def boom(self, *args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "open", boom)
+    with pytest.raises(OSError):
+        sniff(p)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="MAX_PATH is a Windows limit")
+def test_long_path_detection_on_windows():
     assert is_long_path(Path("C:/" + "a" * 300)) is True
+    assert is_long_path(Path("short.jpg")) is False
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="checks the non-Windows behaviour")
+def test_long_paths_are_not_flagged_off_windows():
+    """Linux and macOS allow paths far longer than 260 characters. Flagging
+    them made doctor tell a Linux user to "enable LongPathsEnabled" - advice
+    that cannot apply, about a problem they do not have."""
+    assert is_long_path(Path("/" + "a" * 300)) is False
     assert is_long_path(Path("short.jpg")) is False

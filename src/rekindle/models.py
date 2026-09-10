@@ -1,4 +1,3 @@
-# src/rekindle/models.py
 """Core data records. Source-agnostic: every source normalises into these."""
 
 from __future__ import annotations
@@ -149,6 +148,12 @@ class SourceReport:
     with_gps: int = 0
     with_people: int = 0
     with_xmp: int = 0
+    # Files that were INDEXED but could not be decoded. Deliberately not a
+    # `skipped` reason: they are not skipped, and filing them there made
+    # files_seen stop reconciling against the other buckets. Counted per
+    # photo (hash), not per path, so a corrupt file present in two folders
+    # counts once - `unreadable` below still names both paths.
+    undecodable: int = 0
     skipped: dict[str, int] = field(default_factory=dict)
     unreadable: list[tuple[Path, str]] = field(default_factory=list)
     long_paths: list[Path] = field(default_factory=list)

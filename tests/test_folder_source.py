@@ -29,10 +29,11 @@ def test_json_sidecars_are_ignored_but_counted(tmp_path):
     _, report = _scan(root)
     # Exact count (FIX 5): >=1 would also pass if .xmp were miscounted as
     # JSON, or if .aae/.thm leaked into the count (FIX 1). The fixture has
-    # exactly 3 real Google JSON sidecars (IMG_0001.jpg.json,
+    # exactly 4 real Google JSON sidecars (IMG_0001.jpg.json,
     # IMG_9999...supplemental-metadata.json, DSC_0880...supplemental-
-    # metadata(1).json); the .xmp and .aae sidecars must not add to this.
-    assert report.json_sidecars == 3
+    # metadata(1).json and IMG_0100.CR3...supplemental-metadata.json); the
+    # .xmp and .aae sidecars must not add to this.
+    assert report.json_sidecars == 4
 
 
 def test_duplicate_across_folders_becomes_one_photo_with_both_albums(tmp_path):
@@ -85,8 +86,16 @@ def test_xmp_metadata_is_read_into_the_photo(tmp_path):
 def test_exif_date_and_gps_are_read(tmp_path):
     root = build_library(tmp_path / "lib")
     photos, report = _scan(root)
-    dated = [p for p in photos if p.meta.taken_at_utc]
-    assert dated
+    # A REAL capture date, not the mtime fallback: `p.meta.taken_at_utc`
+    # alone can never be empty (resolve() always reaches the FILE_MTIME
+    # rung), so an assertion on it cannot fail and proves nothing about EXIF.
+    dated = [
+        p for p in photos if p.meta.taken_at_utc and p.meta.tz_source is not TzSource.FILE_MTIME
+    ]
+    # IMG_0001 (+ its album duplicate, merged), IMG_0001-edited, IMG_0002,
+    # PXL_0001.MP.jpg and PXL_0001.MP-edited carry EXIF DateTimeOriginal.
+    assert len(dated) == 5
+    assert report.with_date == 5
     geo = [p for p in photos if p.meta.gps]
     assert len(geo) == 1
     assert report.with_gps == 1
@@ -120,7 +129,11 @@ def test_corrupt_file_is_indexed_but_reported_as_unreadable(tmp_path):
     bad_path, reason = report.unreadable[0]
     assert bad_path.name == "truncated.jpg"
     assert reason
-    assert report.skipped.get("undecodable") == 1
+    # NOT report.skip("undecodable"): the file IS indexed, so filing it as a
+    # skip makes doctor's counters irreconcilable (see the accounting
+    # invariant test below). It gets its own field instead.
+    assert "undecodable" not in report.skipped
+    assert report.undecodable == 1
 
 
 def test_rescan_is_idempotent(tmp_path):
@@ -369,3 +382,120 @@ def test_unstatable_long_path_is_reported_not_silently_dropped(tmp_path, monkeyp
     assert ghost in report.long_paths
     assert report.skipped.get("long_path_unreadable") == 1
     assert not any(x.name == "ghost_too_long.jpg" for p in photos for x in p.paths)
+
+
+def test_every_file_seen_is_accounted_for_by_exactly_one_counter(tmp_path):
+    """The DoD promises "every skipped file is counted with a reason".
+
+    Nothing asserted that the counters ADD UP, so three of the fixture's
+    files (two .xmp and one .aae) fell through both `continue` statements in
+    the sidecar branch without incrementing anything, and the whole suite
+    stayed green. This invariant is what makes that recurrence impossible:
+    any future early `continue` that forgets a counter fails here.
+    """
+    root = build_library(tmp_path / "lib")
+    _, r = _scan(root)
+    accounted = (
+        r.media_indexed + r.duplicates_merged + r.json_sidecars + r.excluded_dirs + r.total_skipped
+    )
+    assert r.files_seen == accounted, (
+        f"{r.files_seen - accounted} file(s) vanished: "
+        f"indexed={r.media_indexed} dupes={r.duplicates_merged} "
+        f"json={r.json_sidecars} excluded={r.excluded_dirs} skipped={r.skipped}"
+    )
+    assert r.files_seen > 0
+
+
+def test_xmp_and_apple_sidecars_get_their_own_skip_reasons(tmp_path):
+    """Both must be counted somewhere - "read" and "ignored" are still
+    outcomes that have to appear in the ledger."""
+    root = build_library(tmp_path / "lib")
+    _, r = _scan(root)
+    assert r.skipped.get("sidecar_xmp") == 2  # IMG_0002.jpg.xmp, IMG_8000.jpg.xmp
+    assert r.skipped.get("sidecar_other") == 1  # IMG_7000.aae
+
+
+def test_undecodable_duplicate_is_counted_once_per_photo_not_per_path(tmp_path):
+    """The same truncated bytes in two folders are ONE photo. Counting the
+    decode failure per path gave files_seen=3 / indexed=2 / dupes=1 /
+    skipped=2 - a report nobody reading it could reconcile."""
+    root = tmp_path / "lib"
+    make_jpeg(root / "AAA" / "good.jpg")
+    truncated = b"\xff\xd8\xff" + b"\x00" * 20
+    (root / "AAA" / "bad.jpg").write_bytes(truncated)
+    (root / "ZZZ").mkdir(parents=True, exist_ok=True)
+    (root / "ZZZ" / "bad.jpg").write_bytes(truncated)
+
+    photos, r = _scan(root)
+    assert len(photos) == 2
+    assert r.files_seen == 3
+    assert r.duplicates_merged == 1
+    assert r.undecodable == 1  # one PHOTO, even though two paths hold its bytes
+    assert len(r.unreadable) == 2  # but both PATHS are named for the user
+    assert r.total_skipped == 0
+    assert r.files_seen == r.media_indexed + r.duplicates_merged + r.total_skipped
+
+
+def test_unrecognised_media_format_does_not_orphan_its_sidecar(tmp_path):
+    """A Canon .CR3 sniffs as ftyp:crx -> UNKNOWN. Recording its name only
+    AFTER a successful sniff left its own JSON sidecar with nothing to match,
+    so a complete library reported missing archive parts."""
+    root = build_library(tmp_path / "lib")
+    _, r = _scan(root)
+    # IMG_0100.CR3 is skipped as non-media, and its sidecar is counted...
+    assert r.skipped.get("not_media") == 2  # notes.txt and IMG_0100.CR3
+    assert r.json_sidecars == 4
+    # ...but it is NOT orphaned: only IMG_9999 and DSC_0880 genuinely are.
+    assert r.orphan_sidecars == 2
+
+
+def test_sidecar_matching_is_case_insensitive(tmp_path):
+    """Takeout writes the sidecar name from its own record of the filename,
+    which routinely disagrees with the file's own case (DSC_0880.JPG.json
+    beside DSC_0880.jpg). A case-sensitive match calls that an orphan."""
+    root = tmp_path / "lib"
+    make_jpeg(root / "DSC_0880.jpg")
+    (root / "DSC_0880.JPG.supplemental-metadata.json").write_text("{}", encoding="utf-8")
+
+    _, r = _scan(root)
+    assert r.json_sidecars == 1
+    assert r.orphan_sidecars == 0
+
+
+def test_unopenable_file_is_reported_unreadable_not_claimed_to_be_non_media(tmp_path, monkeypatch):
+    """sniff() swallowed OSError into (UNKNOWN, "unknown"), so a file the
+    process cannot open was filed under skip("not_media") - a positive claim
+    about its CONTENT that was never checked - and never reached
+    report.unreadable. Permission-denied is not "not a photo"."""
+    from pathlib import Path
+
+    root = tmp_path / "lib"
+    make_jpeg(root / "good.jpg")
+    locked = root / "locked.jpg"
+    locked.write_bytes(b"\xff\xd8\xff" + b"\x00" * 40)
+
+    real_open = Path.open
+
+    def fake_open(self, *args, **kwargs):
+        if self == locked:
+            raise PermissionError(13, "Permission denied")
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", fake_open)
+
+    photos, r = _scan(root)
+    assert not any(x.name == "locked.jpg" for p in photos for x in p.paths)
+    assert "not_media" not in r.skipped
+    assert r.skipped.get("unreadable") == 1
+    assert any(path == locked for path, _ in r.unreadable)
+    assert r.files_seen == r.media_indexed + r.duplicates_merged + r.total_skipped
+
+
+def test_folder_source_satisfies_the_source_protocol():
+    """base.py had zero importers, so nothing tied FolderSource to the
+    contract every future source is told to implement. The protocol could
+    drift from its only implementation without a single test noticing."""
+    from rekindle.sources.base import Source
+
+    _: Source = FolderSource()
+    assert isinstance(FolderSource(), Source)

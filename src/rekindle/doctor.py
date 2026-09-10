@@ -1,4 +1,3 @@
-# src/rekindle/doctor.py
 """Coverage reporting. Tells the user what metadata they actually have
 before they spend time indexing.
 """
@@ -92,6 +91,10 @@ def render(diagnosis: Diagnosis, console: Console) -> None:
     table.add_row("[yellow]Orphan sidecars[/yellow]", str(r.orphan_sidecars), "")
     table.add_row("Excluded (trash/system)", str(r.excluded_dirs), "")
     table.add_row("Skipped", str(r.total_skipped), "")
+    # Indexed but undecodable: NOT part of `Skipped`, so the rows above still
+    # add up to "Files seen". Shown because a library of corrupt files must
+    # never look healthy.
+    table.add_row("[yellow]Indexed but undecodable[/yellow]", str(r.undecodable), "")
     console.print(table)
 
     if r.skipped:

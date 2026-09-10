@@ -8,6 +8,7 @@ invalidate the whole resume cache.
 from __future__ import annotations
 
 import hashlib
+import sys
 from pathlib import Path
 
 from rekindle.models import MediaType
@@ -32,12 +33,16 @@ def file_hash(path: Path, *, chunk_size: int = _CHUNK) -> str:
 
 
 def sniff(path: Path) -> tuple[MediaType, str]:
-    """Identify media type from magic bytes. The extension is never consulted."""
-    try:
-        with path.open("rb") as f:
-            head = f.read(32)
-    except OSError:
-        return (MediaType.UNKNOWN, "unknown")
+    """Identify media type from magic bytes. The extension is never consulted.
+
+    Raises OSError if the file cannot be read. Swallowing that into
+    (UNKNOWN, "unknown") made a permission-denied or locked file
+    indistinguishable from a text file, so callers filed it as "not media" -
+    a positive claim about content that was never actually inspected. The
+    caller must tell the two apart, so the IO failure propagates.
+    """
+    with path.open("rb") as f:
+        head = f.read(32)
 
     if len(head) < 12:
         return (MediaType.UNKNOWN, "unknown")
@@ -76,5 +81,13 @@ def sniff(path: Path) -> tuple[MediaType, str]:
 
 
 def is_long_path(path: Path) -> bool:
-    """Windows MAX_PATH check. pathlib does not solve this; we report it."""
+    """Windows MAX_PATH check. pathlib does not solve this; we report it.
+
+    Windows-only on purpose: Linux and macOS allow paths far longer than 260
+    characters, so applying the limit everywhere made a deep-but-perfectly-
+    healthy Linux tree trigger doctor's "On Windows, enable LongPathsEnabled"
+    advice - advice that cannot possibly apply.
+    """
+    if sys.platform != "win32":
+        return False
     return len(str(path)) >= _MAX_PATH

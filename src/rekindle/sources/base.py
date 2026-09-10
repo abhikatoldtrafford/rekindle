@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from rekindle.models import Photo, SourceReport
 
 
+# runtime_checkable so a test can assert the pin rather than merely annotate
+# it: with no type checker in CI, a bare `_: Source = FolderSource()` can
+# never fail, and this module had no importers at all.
+@runtime_checkable
 class Source(Protocol):
     name: str
 

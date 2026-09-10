@@ -269,4 +269,17 @@ def build_library(root: Path) -> Path:
     # a perfectly complete library.
     (year / "IMG_7000.aae").write_text("dummy Apple edit sidecar", encoding="utf-8")
 
+    # A camera RAW format sniff() does not recognise (Canon CR3 is ISO-BMFF
+    # with the brand "crx "), plus its own Google JSON sidecar. The file is
+    # correctly skipped as non-media, but its NAME must still be recorded:
+    # otherwise its sidecar has nothing to match against and is counted as a
+    # permanently orphaned sidecar, driving doctor's "INCOMPLETE EXPORT"
+    # warning on a library that is in fact complete.
+    (year / "IMG_0100.CR3").write_bytes(
+        b"\x00\x00\x00\x18ftypcrx \x00\x00\x00\x01crx isom" + b"\x00" * 128
+    )
+    (year / "IMG_0100.CR3.supplemental-metadata.json").write_text(
+        json.dumps({"title": "IMG_0100.CR3"}), encoding="utf-8"
+    )
+
     return root

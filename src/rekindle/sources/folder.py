@@ -68,15 +68,35 @@ class FolderSource:
         stem_index: dict[tuple[Path, str], str] = {}
         edited_pending: list[tuple[str, Path, str]] = []
 
+        # Casefolded, because Takeout writes sidecar names from its own record
+        # of the filename and that routinely disagrees with the file's own
+        # case - a "DSC_0880.JPG.supplemental-metadata.json" beside a
+        # "DSC_0880.jpg" is not an orphan.
         media_names: set[str] = set()
-        # Motion-photo pairing must be scoped to a single directory (a .MP in
-        # one album must never pair with a same-named still in another) and
-        # case-insensitive (real libraries mix .jpg and .JPG), so this tracks
-        # casefolded names per parent directory - unlike `media_names` above,
-        # which stays a flat, case-sensitive set for the sidecar-orphan check.
+        # Motion-photo pairing must additionally be scoped to a single
+        # directory: a .MP in one album must never pair with a same-named
+        # still in another.
         media_names_by_dir: dict[Path, set[str]] = {}
         sidecar_stems: list[str] = []
         saw_xmp: set[str] = set()
+        saw_undecodable: set[str] = set()
+
+        def note_undecodable(digest: str, path: Path, error: str | None) -> None:
+            """Report per PATH, count per PHOTO.
+
+            `unreadable` must name every file the user should go and look at,
+            so both copies of a corrupt photo belong in it. The COUNT answers
+            a different question - "how many of my photos are broken" - and
+            the same bytes seen in two folders are one broken photo, not two.
+            Counting per path made files_seen stop reconciling against the
+            other buckets in doctor's output.
+            """
+            if error is None:
+                return
+            report.unreadable.append((path, error))
+            if digest not in saw_undecodable:
+                saw_undecodable.add(digest)
+                report.undecodable += 1
 
         # Explicit, platform-stable key. Path.__lt__ case-folds on Windows and
         # does not on POSIX, so bare sorted() visits files in a different order
@@ -101,18 +121,27 @@ class FolderSource:
             report.files_seen += 1
 
             # Deleted photos must never become memories.
-            if any(part.lower() in EXCLUDED_DIRS for part in path.relative_to(root).parts[:-1]):
+            if any(part.casefold() in EXCLUDED_DIRS for part in path.relative_to(root).parts[:-1]):
                 report.excluded_dirs += 1
                 continue
 
             if is_long_path(path):
                 report.long_paths.append(path)
 
-            if path.suffix.lower() in _SIDECAR_EXTS:
-                # .xmp files ARE read (find_sidecar/read_xmp). Counting them as
-                # "ignored" made doctor warn that data was being discarded three
-                # rows below reporting it as successfully read.
-                if path.suffix.lower() == ".xmp":
+            if path.suffix.casefold() in _SIDECAR_EXTS:
+                # EVERY branch below increments a bucket. `files_seen` has
+                # already counted this file, so a `continue` that lands in no
+                # bucket is a silent drop by definition - and one that
+                # survived ten reviews, because nothing asserted the counters
+                # add up. test_every_file_seen_is_accounted_for_by_exactly_
+                # one_counter now pins that.
+                #
+                # .xmp files ARE read (find_sidecar/read_xmp). Counting them
+                # under a generic "ignored" reason made doctor warn that data
+                # was being discarded three rows below reporting it as
+                # successfully read - hence a reason of their own.
+                if path.suffix.casefold() == ".xmp":
+                    report.skip("sidecar_xmp")
                     continue
                 # Only Google's own .json sidecars feed the orphan check.
                 # .aae (Apple edit sidecars) and .thm (video thumbnails) are
@@ -124,14 +153,36 @@ class FolderSource:
                 # .AAE per edited photo, so this would inflate doctor's
                 # "missing archive parts" warning on a perfectly complete
                 # library.
-                if path.suffix.lower() != ".json":
+                if path.suffix.casefold() != ".json":
+                    report.skip("sidecar_other")
                     continue
                 report.json_sidecars += 1
                 if path.name != "metadata.json":
                     sidecar_stems.append(_sidecar_target(path.name))
                 continue
 
-            media_type, _fmt = sniff(path)
+            # Register the NAME before sniffing, and whatever sniff decides. A
+            # format we do not recognise is still a file the user has, and it
+            # still has its own JSON sidecar: a Canon .CR3 is ISO-BMFF with the
+            # brand "crx " and sniffs as UNKNOWN, so recording names only after
+            # a successful sniff left "IMG_0100.CR3.supplemental-metadata.json"
+            # with nothing to match and drove the INCOMPLETE EXPORT warning on
+            # a library that was in fact complete. Same class of bug as the
+            # .aae one above; fixing it in one place was not enough.
+            media_names.add(path.name.casefold())
+            media_names_by_dir.setdefault(path.parent, set()).add(path.name.casefold())
+
+            try:
+                media_type, _fmt = sniff(path)
+            except OSError as exc:
+                # An unopenable file is not a statement about its CONTENT.
+                # sniff() used to swallow this into (UNKNOWN, "unknown"), so a
+                # permission-denied file was filed as "not_media" - a positive
+                # claim never actually checked - and never reached `unreadable`.
+                report.unreadable.append((path, str(exc)))
+                report.skip("unreadable")
+                continue
+
             if media_type is MediaType.UNKNOWN:
                 report.skip("not_media")
                 continue
@@ -144,8 +195,6 @@ class FolderSource:
                 report.skip("unreadable")
                 continue
 
-            media_names.add(path.name)
-            media_names_by_dir.setdefault(path.parent, set()).add(path.name.casefold())
             album = path.parent.name if path.parent != root else None
 
             # Register stem BEFORE the duplicate check. A photo that appears in
@@ -161,7 +210,11 @@ class FolderSource:
             # computed base can never match its original's raw NFD stem.
             base_stem, suffix = _split_edited(path.stem)
             if suffix is None:
-                stem_key = (path.parent, unicodedata.normalize("NFC", path.stem))
+                # `base_stem` already IS normalize("NFC", path.stem) when no
+                # edited suffix matched. Recomputing it here was the exact
+                # duplication RULING 1 exists to close: two expressions that
+                # must stay identical, and nothing forcing them to.
+                stem_key = (path.parent, base_stem)
                 # Google's motion photos give a .jpg still and a .MP video the
                 # SAME stem. Whichever is visited first would otherwise win
                 # unconditionally, so on a different sort order the video's
@@ -173,7 +226,11 @@ class FolderSource:
             else:
                 edited_pending.append((digest, path.parent, base_stem))
 
-            has_xmp = find_sidecar(path) is not None
+            # Found once and reused: find_sidecar stats the filesystem twice
+            # per candidate, and calling it again inside _read_meta doubled
+            # that for every media file in the library.
+            sidecar = find_sidecar(path)
+            has_xmp = sidecar is not None
 
             if digest in by_hash:
                 existing = by_hash[digest]
@@ -185,11 +242,11 @@ class FolderSource:
                 # The second copy must still be READ. In Takeout the sidecar
                 # frequently sits beside only one of the two copies, so
                 # skipping this silently loses the metadata half of dedupe.
-                merged, conflict = merge_meta(
-                    existing.meta, self._read_meta(path, media_type, mtime, report)
-                )
+                meta, decode_error = self._read_meta(path, media_type, mtime, sidecar)
+                merged, conflict = merge_meta(existing.meta, meta)
                 existing.meta = merged
                 existing.metadata_conflict = existing.metadata_conflict or conflict
+                note_undecodable(digest, path, decode_error)
                 if has_xmp and digest not in saw_xmp:
                     saw_xmp.add(digest)
                     report.with_xmp += 1
@@ -200,7 +257,8 @@ class FolderSource:
                 saw_xmp.add(digest)
                 report.with_xmp += 1
 
-            meta = self._read_meta(path, media_type, mtime, report)
+            meta, decode_error = self._read_meta(path, media_type, mtime, sidecar)
+            note_undecodable(digest, path, decode_error)
             by_hash[digest] = Photo(
                 file_hash=digest,
                 paths=[path],
@@ -231,7 +289,7 @@ class FolderSource:
         # A sidecar with no media file means that photo is in an archive part
         # the user has not extracted. Measured at 44% on a real partial export -
         # by far the most common way an index silently comes out half-empty.
-        report.orphan_sidecars = sum(1 for s in sidecar_stems if s not in media_names)
+        report.orphan_sidecars = sum(1 for s in sidecar_stems if s.casefold() not in media_names)
 
         # Google exports motion photos as a separate .MP video beside the
         # still, named "<name>.MP.jpg" - i.e. the video's full NAME plus
@@ -244,7 +302,7 @@ class FolderSource:
             1
             for p in by_hash.values()
             for path in p.paths
-            if path.suffix.lower() == ".mp"
+            if path.suffix.casefold() == ".mp"
             and f"{path.name}.jpg".casefold() in media_names_by_dir.get(path.parent, set())
         )
 
@@ -263,15 +321,23 @@ class FolderSource:
         return photos, report
 
     def _read_meta(
-        self, path: Path, media_type: MediaType, mtime: datetime, report: SourceReport
-    ) -> PhotoMeta:
+        self,
+        path: Path,
+        media_type: MediaType,
+        mtime: datetime,
+        sidecar: Path | None,
+    ) -> tuple[PhotoMeta, str | None]:
+        """Returns (meta, decode_error).
+
+        The decode failure is HANDED BACK rather than reported here: only the
+        caller knows this path's hash, and the failure has to be counted once
+        per photo, not once per path. Reporting it in here also filed an
+        indexed file under `skipped`, which it plainly is not.
+        """
         exif = read_exif(path) if media_type is MediaType.IMAGE else None
-        if exif is not None and not exif.decode_ok:
-            # Still index it - the file exists and the user should see it - but
-            # never let it pass as healthy.
-            report.unreadable.append((path, exif.error or "undecodable"))
-            report.skip("undecodable")
-        sidecar = find_sidecar(path)
+        # Still index it - the file exists and the user should see it - but
+        # never let it pass as healthy.
+        decode_error = None if exif is None or exif.decode_ok else (exif.error or "undecodable")
         xmp = read_xmp(sidecar) if sidecar else None
 
         utc, local, tz_source = resolve(
@@ -281,7 +347,7 @@ class FolderSource:
             mtime,
             tz_lookup=self._tz_lookup,
         )
-        return PhotoMeta(
+        meta = PhotoMeta(
             taken_at_utc=utc,
             taken_at_local=local,
             tz_source=tz_source,
@@ -295,6 +361,7 @@ class FolderSource:
             width=exif.width if exif else None,
             height=exif.height if exif else None,
         )
+        return meta, decode_error
 
 
 def _split_edited(stem: str) -> tuple[str, str | None]:
@@ -310,6 +377,10 @@ def _split_edited(stem: str) -> tuple[str, str | None]:
     that decomposes into more than one codepoint (e.g. "-modifié"'s "é" is 1
     codepoint in NFC but 2 in NFD) - the lengths differ, so the slice leaves a
     stray combining character and the base never matches the stem_index key.
+
+    When no suffix matches, the returned base is exactly
+    normalize("NFC", stem) - callers registering a stem_index key use it
+    rather than recomputing the normalisation.
     """
     norm = unicodedata.normalize("NFC", stem)
     norm_cf = norm.casefold()
