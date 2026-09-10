@@ -119,8 +119,58 @@ def test_enrich_is_idempotent(tmp_path):
         )
         for p in store.iter_photos()
     } == snapshot
-    assert second.matched == first.matched
-    assert second.orphaned == first.orphaned
+
+    # Broader than `matched`/`orphaned` alone: every count re-derived PURELY
+    # from the filesystem and resolve()'s outcome - never from what happens
+    # to already be stored - must be byte-identical between runs. These are
+    # the accounting numbers `doctor` reports; if `enrich()` were secretly
+    # order- or state-dependent, this would catch it where the original
+    # two-field check would not.
+    #
+    # Comparing the WHOLE `EnrichReport` (`second == first`) would be
+    # wrong, not stronger: `derivatives_enriched`, `people_added`,
+    # `dates_corrected`, `gps_added`, `descriptions_added`,
+    # `favourites_added`, `albums_retitled` and `conflicts` all count a
+    # CHANGE this specific run made relative to what was already stored -
+    # apply_sidecar's and propagate_to_derivatives's own idempotency
+    # guarantees mean a correct second run makes NONE of these changes
+    # again, so they are asserted to be exactly 0 below instead. Verified
+    # empirically before writing this: on the real fixture, a correct
+    # implementation's second run reads
+    # derivatives_enriched=0/people_added=0/dates_corrected=0/gps_added=0/
+    # descriptions_added=0/favourites_added=0 where the first run read
+    # 2/7/10/1/1/1 - `first == second` would fail on CORRECT code.
+    for field_name in (
+        "json_files_seen",
+        "sidecars_seen",
+        "album_metadata",
+        "other_json",
+        "excluded_dirs",
+        "unparseable",
+        "matched",
+        "orphaned",
+        "ambiguous",
+        "superseded",
+        "photos_enriched",
+        "directory_preference_broke_a_tie",
+        "cross_photo_collisions",
+        "title_disagreements",
+        "album_title_collisions",
+        "clustered_dates_suppressed",
+    ):
+        assert getattr(second, field_name) == getattr(first, field_name), field_name
+
+    for field_name in (
+        "derivatives_enriched",
+        "people_added",
+        "dates_corrected",
+        "gps_added",
+        "descriptions_added",
+        "favourites_added",
+        "albums_retitled",
+        "conflicts",
+    ):
+        assert getattr(second, field_name) == 0, field_name
     store.close()
 
 
@@ -232,6 +282,7 @@ def test_a_sidecar_is_never_applied_to_two_distinct_photos(tmp_path):
     report = TakeoutEnricher().enrich(root, store)
 
     assert report.matched == report.photos_enriched == 1
+    assert report.cross_photo_collisions == 1
     by_dir = {p.paths[0].parent.name: p for p in store.iter_photos()}
     assert by_dir["A"].meta.people == ["Priya"]
     assert by_dir["A"].sidecar_match == "exact"
@@ -246,6 +297,123 @@ def test_a_sidecar_is_never_applied_to_two_distinct_photos(tmp_path):
     store.close()
 
 
+def test_reliable_requires_the_matching_name_not_just_the_directory(tmp_path):
+    """A multi-path Photo can have ONE path sharing the sidecar's directory
+    (under a DIFFERENT name) and ANOTHER path sharing the sidecar's name (in
+    a DIFFERENT directory) - satisfying a directory-only check without
+    either individual path actually being the file the sidecar describes.
+    Checking directory alone would let this multi-path photo "win" over the
+    genuine, single-path match living directly beside the sidecar - a worse
+    outcome than not resolving the collision at all. Not hypothetical: 5
+    real photos in the export have paths with differing casefolded
+    filenames (e.g. `Dida\\IMG_20170927_184011(1).jpg` +
+    `Dida(1)\\IMG_20170927_184011.jpg`).
+    """
+    root = tmp_path / "Takeout"
+    d = root / "d"
+    e = root / "e"
+    d.mkdir(parents=True)
+    e.mkdir(parents=True)
+    (d / "Y.jpg.supplemental-metadata.json").write_text(
+        json.dumps(
+            {
+                "title": "Y.jpg",
+                "photoTakenTime": {"timestamp": "1400000000"},
+                "people": [{"name": "Priya"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    now = datetime(2020, 1, 1, tzinfo=UTC)
+    # A multi-path photo with ONE path beside the sidecar (d/X.jpg - wrong
+    # name) and ONE path sharing the sidecar's name (e/Y.jpg - wrong
+    # directory). Neither path alone qualifies; a directory-only check would
+    # wrongly let it qualify via the two paths together - and, under a
+    # directory-only check, BOTH photos below would qualify as "reliable",
+    # falling through to the lowest-file_hash tiebreak. The literal hashes
+    # are chosen so that tiebreak picks the WRONG one ("aaa..." < "zzz..."),
+    # so a regression to directory-only checking is caught here rather than
+    # masked by an accidental hash ordering (the same trap the first draft
+    # of `test_a_sidecar_is_never_applied_to_two_distinct_photos` fell into).
+    wrong = Photo(
+        file_hash="aaa-multipath-decoy",
+        paths=[d / "X.jpg", e / "Y.jpg"],
+        media_type=MediaType.IMAGE,
+        meta=PhotoMeta(),
+        first_seen=now,
+        last_seen=now,
+    )
+    # The genuine match: one path, both the right directory AND the right
+    # name.
+    real = Photo(
+        file_hash="zzz-genuine-match",
+        paths=[d / "Y.jpg"],
+        media_type=MediaType.IMAGE,
+        meta=PhotoMeta(),
+        first_seen=now,
+        last_seen=now,
+    )
+    store = PhotoStore(tmp_path / "data" / "rekindle.sqlite")
+    store.upsert_many([wrong, real])
+
+    report = TakeoutEnricher().enrich(root, store)
+
+    real_after = store.get("zzz-genuine-match")
+    wrong_after = store.get("aaa-multipath-decoy")
+    assert real_after.meta.people == ["Priya"]
+    assert real_after.sidecar_match == "exact"
+    assert wrong_after.meta.people == []
+    assert wrong_after.sidecar_match == "ambiguous"
+    assert report.matched == 1
+    assert report.cross_photo_collisions == 1
+    store.close()
+
+
+def test_no_reliable_claimant_refuses_everyone_rather_than_guessing(tmp_path):
+    """When NEITHER content-distinct namesake lives beside the sidecar,
+    there is zero evidence favouring one over the other. Picking a
+    "winner" anyway - even a deterministic one, like the lowest file_hash -
+    is fabrication with extra steps: it writes Google's face tag and
+    capture time onto a coin flip and calls it a match. `tests/fixtures/
+    takeout.py` documents 8 real album folders that hold a sidecar and NO
+    media at all (1,204 real photos are in that position); this reproduces
+    exactly that shape, with two content-distinct namesakes elsewhere so
+    that neither can claim the sidecar's own directory.
+    """
+    root = tmp_path / "Takeout"
+    (root / "Album").mkdir(parents=True)
+    (root / "C").mkdir(parents=True)
+    (root / "D").mkdir(parents=True)
+    (root / "Album" / "Z.jpg.supplemental-metadata.json").write_text(
+        json.dumps(
+            {
+                "title": "Z.jpg",
+                "photoTakenTime": {"timestamp": "1400000000"},
+                "people": [{"name": "Priya"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    make_jpeg(root / "C" / "Z.jpg", size=(44, 44))
+    make_jpeg(root / "D" / "Z.jpg", size=(46, 46))
+
+    photos, _ = FolderSource().scan(root)
+    store = PhotoStore(tmp_path / "data" / "rekindle.sqlite")
+    store.upsert_many(photos)
+
+    report = TakeoutEnricher().enrich(root, store)
+
+    assert report.matched == 0
+    assert report.photos_enriched == 0
+    assert report.ambiguous == 1
+    assert report.cross_photo_collisions == 2
+    for photo in store.iter_photos():
+        assert photo.meta.people == []
+        assert photo.sidecar_match == "ambiguous"
+    store.close()
+
+
 def test_enrich_against_an_empty_index_refuses(tmp_path):
     root = build_takeout(tmp_path / "Takeout")
     store = PhotoStore(tmp_path / "data" / "rekindle.sqlite")
@@ -254,34 +422,45 @@ def test_enrich_against_an_empty_index_refuses(tmp_path):
     store.close()
 
 
-def test_enrich_writes_photos_in_a_single_batch(tmp_path, monkeypatch):
-    """The spec's 'one transaction per run': `update_many` batches every
-    touched photo into one commit. A per-photo `update_photo` loop is orders
-    of magnitude slower against 19,480 rows and is the exact anti-pattern
-    `PhotoStore.update_photo`'s docstring warns is NOT `upsert_many`'s
-    merge-based batch path. Pinned by call-counting, not timing: correctness
-    of the final rows is identical either way, so nothing else here would
-    ever catch the regression.
+class _CommitCounter:
+    """Forwards everything to a real `sqlite3.Connection` except `commit()`,
+    which it counts. `sqlite3.Connection.commit` is a read-only attribute of
+    a C-extension type - `monkeypatch.setattr(conn, "commit", ...)` raises
+    `AttributeError: ... attribute 'commit' is read-only` - so a thin proxy
+    swapped in for `store._conn` is the only way to observe real commits
+    without changing `PhotoStore` itself.
+    """
+
+    def __init__(self, conn):
+        self._real = conn
+        self.commits = 0
+
+    def commit(self):
+        self.commits += 1
+        return self._real.commit()
+
+    def __getattr__(self, name):
+        return getattr(self._real, name)
+
+
+def test_enrich_commits_exactly_once(tmp_path):
+    """The spec's 'one transaction per run', measured the only way that
+    actually proves it: counting real commits on the underlying connection,
+    not calls to whichever store method happens to wrap them. A prior
+    version of this test counted `update_many`/`update_photo` calls instead
+    - it could not see that `enrich()` still called `set_meta` twice more
+    afterward, each with its OWN commit, leaving a crash window between the
+    photo batch and `enriched_at` where guard 3 (distinguish "ran and found
+    nothing" from "never ran") could not tell the two apart. Photos and
+    provenance must land in the SAME transaction.
     """
     root, store = _indexed(tmp_path)
-    calls = {"update_many": 0, "update_photo": 0}
-    real_update_many = PhotoStore.update_many
-
-    def counting_update_many(self, photos):
-        calls["update_many"] += 1
-        return real_update_many(self, photos)
-
-    def counting_update_photo(self, photo):
-        calls["update_photo"] += 1
-        return None
-
-    monkeypatch.setattr(PhotoStore, "update_many", counting_update_many)
-    monkeypatch.setattr(PhotoStore, "update_photo", counting_update_photo)
+    counter = _CommitCounter(store._conn)
+    store._conn = counter
 
     TakeoutEnricher().enrich(root, store)
 
-    assert calls["update_many"] == 1
-    assert calls["update_photo"] == 0
+    assert counter.commits == 1
     store.close()
 
 
@@ -289,6 +468,37 @@ def test_enrich_records_when_and_where_it_ran(tmp_path):
     root, store = _indexed(tmp_path)
     TakeoutEnricher().enrich(root, store)
     assert store.get_meta("enrich_root") == str(root)
+    raw = store.get_meta("enriched_at")
+    assert raw
+    # `assert raw` alone passes for any non-empty string, including a typo
+    # like "yes". Guard 3 needs a REAL, UTC timestamp here - `doctor` (Task
+    # 12) will compare it against wall-clock time to flag a stale enrich.
+    parsed = datetime.fromisoformat(raw)
+    assert parsed.tzinfo is not None
+    assert parsed.utcoffset() == timedelta(0)
+    store.close()
+
+
+def test_enriched_at_is_recorded_even_when_nothing_is_found(tmp_path):
+    """Half of guard 3's purpose: `sidecar_match == "none"` must be readable
+    as "enrich ran and found nothing" rather than "enrich never ran" - which
+    only works if `enriched_at` is written on a run that matches zero
+    sidecars too. `_indexed()` always has matches (the shared fixture is
+    full of them), so it can never exercise this path; this test indexes a
+    photo with no Takeout JSON anywhere near it.
+    """
+    root = tmp_path / "Takeout"
+    make_jpeg(root / "Photos from 2020" / "LONELY.jpg", size=(50, 50))
+    photos, _ = FolderSource().scan(root)
+    store = PhotoStore(tmp_path / "data" / "rekindle.sqlite")
+    store.upsert_many(photos)
+
+    report = TakeoutEnricher().enrich(root, store)
+
+    assert report.matched == 0
+    assert report.photos_enriched == 0
+    only = next(iter(store.iter_photos()))
+    assert only.sidecar_match == "none"
     assert store.get_meta("enriched_at")
     store.close()
 
@@ -331,10 +541,12 @@ def test_google_date_replaces_the_mtime_fallback(tmp_path):
 # content hash, with no requirement that the names match), a sidecar found
 # via a non-first path would be attributed to the wrong (or no) target key
 # in `claimed` and its whole group would fall through to `orphaned` in
-# `account()`, even though it WAS applied. Not observed in real Takeout
-# exports - album copies keep the filename - but nothing in the data model
-# forbids it, so it is pinned here directly rather than left as an
-# unverified assumption.
+# `account()`, even though it WAS applied. This is not hypothetical: 5
+# photos in the reference export have paths with differing casefolded
+# filenames (e.g. `Dida\IMG_20170927_184011(1).jpg` +
+# `Dida(1)\IMG_20170927_184011.jpg`) - album copies usually keep the
+# filename, but not always - so this is pinned here directly rather than
+# left as an unverified assumption.
 def test_a_sidecar_found_via_a_non_first_path_still_counts_as_matched(tmp_path):
     root = tmp_path / "Takeout"
     album = root / "Album"

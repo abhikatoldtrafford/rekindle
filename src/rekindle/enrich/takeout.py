@@ -209,6 +209,14 @@ class EnrichReport:
     # 942 on the reference export against an `ambiguous` count of 2, so
     # leaving it unreported makes the hazard look negligible.
     directory_preference_broke_a_tie: int = 0
+    # Photos refused because a DIFFERENT, content-distinct photo already
+    # claimed the identical sidecar - 342 filenames are shared by distinct
+    # photos even after content-hash dedup, and resolve() (handed one photo
+    # at a time) cannot see that its single-global-candidate match already
+    # belongs elsewhere. Silent, this looks exactly like "no misattribution
+    # ever happened" rather than "3 were caught and refused" - the same
+    # silence `directory_preference_broke_a_tie` exists to prevent.
+    cross_photo_collisions: int = 0
     derivatives_enriched: int = 0
     people_added: int = 0
     dates_corrected: int = 0
@@ -707,9 +715,12 @@ def retitle_albums(photo: Photo, renames: dict[str, str], report: EnrichReport) 
         photo.albums = updated
 
 
+_REFUSED = Resolution(None, "ambiguous", False)
+
+
 def _resolve_without_cross_photo_collisions(
-    photos: list[Photo], index: SidecarIndex
-) -> list[tuple[Photo, Sidecar | None, str, bool]]:
+    photos: list[Photo], index: SidecarIndex, report: EnrichReport
+) -> list[tuple[Photo, Resolution]]:
     """`resolve()` per photo, then correct for what it cannot see on its own.
 
     A sidecar describes exactly one real photo. 342 filenames are shared by
@@ -721,38 +732,70 @@ def _resolve_without_cross_photo_collisions(
     capture time written onto a photo they were never about), not merely an
     accounting gap. First found by running the enricher against the
     reference export: `matched` read 3 lower than a naive per-photo tally of
-    "resolve() said exact".
+    "resolve() said exact" (confirmed live: Photo0288.jpg, Photo0361.jpg and
+    Photo0365.jpg each exist once under "Photos from 2011", with a sidecar,
+    and once under "Photos from 2012", without one).
 
     `resolve()` cannot see this on its own - it is handed one photo at a
     time. Only here, with every photo's resolution in hand, can the
     collision even be detected. It is broken by preferring whichever photo
-    actually lives in the sidecar's own directory (rule 1, `resolve()`'s
-    reliable branch - at most one candidate ever can, since two different
-    files cannot share one name in one directory) and falling back to the
-    lowest `file_hash` for a deterministic, idempotent choice when neither
-    does. Whoever loses is demoted to "ambiguous", exactly as if `resolve()`
-    had refused it directly.
+    actually lives in the sidecar's own directory UNDER THE SIDECAR'S OWN
+    NAME (rule 1, `resolve()`'s reliable branch). Both conditions must hold
+    on the SAME path: checking the directory alone is not enough, because a
+    multi-path Photo can have one path sharing the sidecar's directory
+    (under a different name) and another sharing its name (in a different
+    directory) without either path actually being the file the sidecar
+    describes. This is not hypothetical - 5 photos in the reference export
+    have paths with differing casefolded filenames (e.g.
+    `Dida\\IMG_20170927_184011(1).jpg` + `Dida(1)\\IMG_20170927_184011.jpg`).
+    With both conditions on one path, at most one candidate can ever
+    qualify: two different files cannot share one name in one directory.
+
+    When NO claimant qualifies, there is zero evidence favouring any one of
+    them over the others - picking one anyway (even deterministically)
+    would fabricate an attribution, which the spec's "never fabricate a
+    value" forbids just as much as picking one at random would. Every
+    claimant in that case is demoted, not just all-but-one.
+
+    Whoever loses is demoted to "ambiguous", exactly as if `resolve()` had
+    refused it directly, and counted in `report.cross_photo_collisions` -
+    silent, this looks identical to "no misattribution was ever caught".
     """
-    resolved = [(photo, *resolve(photo, index)) for photo in photos]
+    resolved: list[tuple[Photo, Resolution]] = [(photo, resolve(photo, index)) for photo in photos]
 
     claims: dict[Path, list[int]] = {}
-    for i, (_photo, sidecar, _match, _tie) in enumerate(resolved):
-        if sidecar is not None:
-            claims.setdefault(sidecar.path, []).append(i)
+    for i, (_photo, res) in enumerate(resolved):
+        if res.sidecar is not None:
+            claims.setdefault(res.sidecar.path, []).append(i)
 
     demoted: set[int] = set()
     for sidecar_path, indices in claims.items():
         if len(indices) < 2:
             continue
         reliable = [
-            i for i in indices if sidecar_path.parent in {p.parent for p in resolved[i][0].paths}
+            i
+            for i in indices
+            if any(
+                p.parent == sidecar_path.parent
+                and p.name.casefold() == resolved[i][1].sidecar.target_cf
+                for p in resolved[i][0].paths
+            )
         ]
-        winner = reliable[0] if reliable else min(indices, key=lambda i: resolved[i][0].file_hash)
+        # Provably at most one entry can ever reach `reliable` (see
+        # docstring) - `min()` here is defensive determinism against a
+        # future change to that proof, not a tiebreak this branch should
+        # ever actually need. Deterministic on `file_hash` rather than list
+        # position: `iter_photos()` gives no `ORDER BY` guarantee, and
+        # `INSERT OR REPLACE` churns rowids across runs, so `reliable[0]`
+        # would not be reproducible run to run.
+        winner = min(reliable, key=lambda i: resolved[i][0].file_hash) if reliable else None
         demoted.update(i for i in indices if i != winner)
 
+    report.cross_photo_collisions += len(demoted)
+
     return [
-        (photo, None, "ambiguous", False) if i in demoted else (photo, sidecar, match, tie)
-        for i, (photo, sidecar, match, tie) in enumerate(resolved)
+        (photo, _REFUSED) if i in demoted else (photo, res)
+        for i, (photo, res) in enumerate(resolved)
     ]
 
 
@@ -790,14 +833,15 @@ class TakeoutEnricher:
 
         # Materialised, not streamed: `PhotoStore.iter_photos` yields from a
         # live cursor, and this loop writes back through the same connection
-        # via `update_many` below - the exact hazard `iter_photos`'s own
-        # docstring warns callers off.
+        # via `update_many_with_meta` below - the exact hazard
+        # `iter_photos`'s own docstring warns callers off.
         photos = list(store.iter_photos())
         claimed: dict[str, str] = {}
         applied: set[Path] = set()
         touched: dict[str, Photo] = {}
 
-        for photo, sidecar, match, tie in _resolve_without_cross_photo_collisions(photos, index):
+        for photo, res in _resolve_without_cross_photo_collisions(photos, index, report):
+            sidecar, match, tie = res
             # Keyed on EVERY one of the photo's paths, not just paths[0]:
             # `PhotoStore`'s dedup unions paths by content hash with no
             # guarantee they share a filename, and `resolve()` itself already
@@ -831,9 +875,13 @@ class TakeoutEnricher:
 
         account(index, claimed, applied, report)
 
-        # One transaction for the whole run: `update_many` commits once, not
-        # once per photo.
-        store.update_many(touched.values())
-        store.set_meta("enrich_root", str(root))
-        store.set_meta("enriched_at", datetime.now(UTC).isoformat())
+        # One transaction for the WHOLE run, photos and provenance together:
+        # a crash between a photo batch commit and a separate `enrich_at`
+        # commit would leave rows enriched with no way to tell "ran and
+        # found nothing" apart from "never ran" - exactly what guard 3
+        # exists to prevent.
+        store.update_many_with_meta(
+            touched.values(),
+            {"enrich_root": str(root), "enriched_at": datetime.now(UTC).isoformat()},
+        )
         return report

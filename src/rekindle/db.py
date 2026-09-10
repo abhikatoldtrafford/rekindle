@@ -284,6 +284,33 @@ class PhotoStore:
         self._conn.commit()
         return n
 
+    def update_many_with_meta(self, photos: Iterable[Photo], meta: dict[str, str]) -> int:
+        """`update_many`, plus `meta` keys, in ONE transaction.
+
+        For a caller (the Takeout enricher) whose meta keys are PROVENANCE
+        for this exact write - `enriched_at` recorded in a separate, later
+        transaction would leave a crash window where photos are enriched but
+        the row a reader needs to tell "ran and found nothing" apart from
+        "never ran" (guard 3) does not exist yet. `set_meta`'s own commit is
+        correct for its other callers (e.g. `index_root`, written once with
+        nothing else pending); it is wrong here specifically because two
+        MORE commits after the photo batch is exactly the "one transaction
+        per run" constraint this method exists to restore.
+        """
+        cur = self._conn.cursor()
+        n = 0
+        for photo in photos:
+            self._insert(cur, photo)
+            n += 1
+        for key, value in meta.items():
+            cur.execute(
+                "INSERT INTO meta(key, value) VALUES(?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+        self._conn.commit()
+        return n
+
     @staticmethod
     def _merge(old: Photo, new: Photo) -> Photo:
         """Union paths and albums; keep the widest time window."""
