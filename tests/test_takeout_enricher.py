@@ -1,4 +1,5 @@
-from datetime import UTC, datetime
+import json
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -6,6 +7,7 @@ from rekindle.db import PhotoStore
 from rekindle.enrich.takeout import EmptyIndexError, TakeoutEnricher
 from rekindle.models import MediaType, Photo, PhotoMeta, TzSource
 from rekindle.sources.folder import FolderSource
+from tests.fixtures.gen import make_jpeg
 from tests.fixtures.takeout import build_takeout
 
 
@@ -122,11 +124,102 @@ def test_enrich_is_idempotent(tmp_path):
     store.close()
 
 
+def test_re_enrich_of_an_exif_naive_photo_stays_idempotent(tmp_path):
+    """Task 8's `exif_taken_at_utc` mechanism, exercised through an actual
+    two-run `TakeoutEnricher().enrich()` rather than a bare `apply_sidecar()`
+    call. `build_takeout`'s own fixture photos carry no EXIF taken time at
+    all (tz_source starts at FILE_MTIME), so none of them touch the
+    EXIF_NAIVE -> TAKEOUT reconstruction path; this test builds its own
+    minimal root specifically to reach it at the integration level.
+
+    Ladder rung 3 (`meta.timestamps.from_takeout`) recovers a real +05:30
+    offset from the gap between the naive EXIF wall clock and Google's UTC
+    instant. That recovery only survives a SECOND enrich if the pristine
+    EXIF_NAIVE state is reconstructed from `exif_taken_at_utc` first - reading
+    back the already-Takeout-derived `tz_source` instead silently regresses
+    local time to UTC.
+    """
+    root = tmp_path / "Takeout"
+    year = root / "Photos from 2019"
+    naive_taken = datetime(2019, 5, 1, 15, 30)
+    make_jpeg(year / "IST.jpg", taken=naive_taken)
+    # 5:30 earlier than the naive wall clock - the IST offset, recoverable
+    # only via rung 3.
+    google_instant = datetime(2019, 5, 1, 10, 0, tzinfo=UTC)
+    (year / "IST.jpg.supplemental-metadata.json").write_text(
+        json.dumps(
+            {
+                "title": "IST.jpg",
+                "photoTakenTime": {"timestamp": str(int(google_instant.timestamp()))},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    photos, _ = FolderSource().scan(root)
+    store = PhotoStore(tmp_path / "data" / "rekindle.sqlite")
+    store.upsert_many(photos)
+    digest = photos[0].file_hash
+
+    TakeoutEnricher().enrich(root, store)
+    after_first = store.get(digest)
+    assert after_first.meta.tz_source == TzSource.TAKEOUT
+    assert after_first.meta.taken_at_local.utcoffset() == timedelta(hours=5, minutes=30)
+    assert after_first.metadata_conflict is False
+
+    second = TakeoutEnricher().enrich(root, store)
+    after_second = store.get(digest)
+
+    # Aware-datetime `==` compares INSTANTS, not offsets - it would call
+    # 10:00 UTC and 15:30+05:30 equal even though the second is UTC-flattened
+    # local time, which is exactly what a lost reconstruction produces. The
+    # offset itself is the assertion that cannot be fooled that way.
+    assert after_second.meta.taken_at_local.utcoffset() == timedelta(hours=5, minutes=30)
+    assert after_second.meta.taken_at_utc == after_first.meta.taken_at_utc
+    assert after_second.meta.taken_at_local == after_first.meta.taken_at_local
+    assert after_second.meta.tz_source == after_first.meta.tz_source
+    assert after_second.meta.exif_taken_at_utc == after_first.meta.exif_taken_at_utc
+    assert after_second.metadata_conflict is False
+    assert second.dates_corrected == 0
+    store.close()
+
+
 def test_enrich_against_an_empty_index_refuses(tmp_path):
     root = build_takeout(tmp_path / "Takeout")
     store = PhotoStore(tmp_path / "data" / "rekindle.sqlite")
     with pytest.raises(EmptyIndexError):
         TakeoutEnricher().enrich(root, store)
+    store.close()
+
+
+def test_enrich_writes_photos_in_a_single_batch(tmp_path, monkeypatch):
+    """The spec's 'one transaction per run': `update_many` batches every
+    touched photo into one commit. A per-photo `update_photo` loop is orders
+    of magnitude slower against 19,480 rows and is the exact anti-pattern
+    `PhotoStore.update_photo`'s docstring warns is NOT `upsert_many`'s
+    merge-based batch path. Pinned by call-counting, not timing: correctness
+    of the final rows is identical either way, so nothing else here would
+    ever catch the regression.
+    """
+    root, store = _indexed(tmp_path)
+    calls = {"update_many": 0, "update_photo": 0}
+    real_update_many = PhotoStore.update_many
+
+    def counting_update_many(self, photos):
+        calls["update_many"] += 1
+        return real_update_many(self, photos)
+
+    def counting_update_photo(self, photo):
+        calls["update_photo"] += 1
+        return None
+
+    monkeypatch.setattr(PhotoStore, "update_many", counting_update_many)
+    monkeypatch.setattr(PhotoStore, "update_photo", counting_update_photo)
+
+    TakeoutEnricher().enrich(root, store)
+
+    assert calls["update_many"] == 1
+    assert calls["update_photo"] == 0
     store.close()
 
 
