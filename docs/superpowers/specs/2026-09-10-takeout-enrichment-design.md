@@ -1,30 +1,56 @@
 # Takeout enrichment — design spec
 
 **Date:** 2026-09-10
-**Status:** approved
+**Revision:** v2, after an adversarial review that measured v1's claims against a
+real 45,900-file export and falsified the central one.
+**Status:** approved in shape, revised in substance
 **Supersedes:** the sidecar-matching design in
 [the main spec](2026-09-10-rekindle-design.md) §5.1
 
+## 0. What v1 got wrong
+
+v1 argued that every sidecar carries a `title` field naming its own photo, that
+this gives an exact match key, and that the main spec's confidence-tier matching
+ladder was therefore unnecessary machinery for a hazard removed by construction.
+
+**That was false, and it was measured on a sample of one.**
+
+Google puts the disambiguating counter in the sidecar's *filename*, not in
+`title`. `DSC00107.JPG.supplemental-metadata(1).json` carries
+`title: "DSC00107.JPG"` but belongs to `DSC00107(1).JPG`. Measured across all
+24,248 sidecars in the reference export:
+
+| Match key | Rate | Correct pairs |
+|---|---|---|
+| `title` (v1's design) | 83.80% | 19,358 |
+| **sidecar filename** | 83.81% | **20,322** |
+
+v1 would have silently dropped **984 sidecars**, left **967 photos** with
+sidecars unenriched, and made **963 definite mis-pairs** — avoided in practice
+only because `(` sorts before `.` in ASCII, so the correct sidecar happened to
+overwrite the wrong one. Reverse the directory iteration order and a thousand
+photos inherit another photo's date and face tags.
+
+The failure mode is the one v1's own §7 warned about: a convention observed once,
+generalised, and then relied on structurally. It is M0's motion-photo bug again.
+
+**Corrected position:** match on the sidecar's own filename, which is what M0
+already does in `_sidecar_target`. Use `title` only as a cross-check.
+
 ## 1. Purpose
 
-Google Takeout ships a JSON sidecar beside almost every photo. Those sidecars
-carry what EXIF cannot: **face-tag names**, Google's authoritative capture time,
-descriptions, favourites, and coordinates for photos whose EXIF was stripped
-during re-compression.
+Google Takeout ships a JSON sidecar beside almost every photo, carrying what EXIF
+cannot: **face-tag names**, Google's capture time, descriptions, favourites, and
+album membership.
 
-M0 indexes the pixels and deliberately ignores the JSON. This adds a second pass
-that reads it and enriches the rows M0 already created.
+Measured on the reference export: **24,248 sidecars, 59.6% carrying people across
+40 distinct names**, all clean (no empty, whitespace-only, or case-colliding
+values). Roughly **2,360 photos have no EXIF date at all** and a matched sidecar
+fixes them. There is no other route to any of this.
 
-Measured on a real 45,900-file export: **24,280 sidecars, 59% of them carrying
-people, across 31 distinct names.** Person-based memories are impossible without
-this and straightforward with it.
+## 2. What the real data actually looks like
 
-## 2. What the real data looks like
-
-Every design decision below is grounded in an inspected export rather than in
-documentation or folklore.
-
-A per-photo sidecar:
+Every claim below is measured across the whole export, not sampled.
 
 ```json
 {
@@ -35,169 +61,270 @@ A per-photo sidecar:
   "geoData":     {"latitude": 0.0, "longitude": 0.0, "altitude": 0.0},
   "geoDataExif": {"latitude": 0.0, "longitude": 0.0, "altitude": 0.0},
   "people": [{"name": "Paro r Baba"}, {"name": "Avyan"}],
-  "url": "https://photos.google.com/photo/...",
-  "googlePhotosOrigin": {"mobileUpload": {"deviceType": "ANDROID_PHONE"}}
+  "url": "...", "googlePhotosOrigin": {...}
 }
 ```
 
-Observed facts that shape the design:
-
-- **`title` holds the exact target filename.** The sidecar names its own photo.
-- **`creationTime` is upload time.** On the sample above it is 57 minutes after
-  `photoTakenTime`. Using it would date every memory by when the user migrated
-  to Google Photos.
-- **`geoData` is frequently zeroed** while `geoDataExif` carries the real
-  coordinates. In a 400-sidecar sample both were populated on exactly the same
-  47 records, so they agree when present.
-- **Descriptions and favourites are rare** — 2 descriptions and 0 favourites in
-  400 sidecars. Worth reading, not worth optimising for.
-- **Album folders carry `metadata.json` with the album's true title**, which is
-  the pre-sanitisation name: folder `Abhirup Birthday- Sudipta Saad` has title
-  `Abhirup Birthday/ Sudipta Saad`. 3 of 41 albums differ; some titles are empty.
+| Fact | Measurement |
+|---|---|
+| `creationTime` is upload time | 57 minutes after `photoTakenTime` on the sample above. Using it would date memories by migration date. |
+| Sidecar filename schemes | Exactly two: `.supplemental-metadata` (23,255) and `.supplemental-metadata(N)` (993). **No truncated forms.** |
+| `geoData` vs `geoDataExif` | Both non-zero on the same 2,532 records (10.4%); `geoDataExif` is key-absent on the rest. **Zero disagreements.** It never rescues a stripped photo — Takeout adds coordinates to 0.3% of photos. |
+| Descriptions | Present as a key on 100%, non-empty on 145 (0.60%). |
+| `favorited` | Absent when false; present on 7 sidecars, always `true`. |
+| `archived` / `trashed` | 162 archived, 12 trashed. **User intent, sitting unused.** |
+| Album `metadata.json` | 42 files; 4 titles differ from the folder name, 2 empty. Also present: `shared_album_comments.json` and `user-generated-memory-titles.json`, whose `title` is a **list**, and a root-level `metadata.json` with `title: null`. |
+| Album folders with zero media | **8**, holding hundreds of sidecars each. |
+| `photoTakenTime` clustering | 20 timestamps shared by ≥10 sidecars, covering 907 records — one value on 618. These are Google's *guesses*, not shutter times. |
 
 ## 3. Shape: an enrichment pass, not a Source
 
 ```
-rekindle index  <folder>    # pixels  -> Photo rows          (M0, unchanged)
-rekindle enrich <folder>    # sidecars -> updates those rows  (this spec)
+rekindle index  <folder>    # pixels   -> Photo rows        (M0, unchanged)
+rekindle enrich <folder>    # sidecars -> updates those rows (this spec)
 ```
 
 New module `src/rekindle/enrich/takeout.py`; new CLI verb; `FolderSource`
-untouched.
+untouched. It does **not** implement `Source`: that protocol returns
+`(list[Photo], SourceReport)` for something producing records from pixels, and
+this updates existing records addressed by content hash.
 
-It deliberately does **not** implement the `Source` protocol. `Source.scan`
-returns `(list[Photo], SourceReport)` for something that walks pixels and
-produces records. This walks JSON and *updates* records addressed by content
-hash. Forcing it into that signature would misdescribe it. It gets its own
-narrow interface:
+**But v1 dropped the one thing that protocol was enforcing** — the
+count-everything contract — and that is how 984 vanishing sidecars became
+possible. §7 restores it explicitly.
 
-```python
-class TakeoutEnricher:
-    name = "takeout"
+### Guards against undesigned states
 
-    def enrich(self, root: Path, store: PhotoStore) -> EnrichReport: ...
+- **`enrich` before `index`**: an empty store must abort with "run `rekindle index` first", not orphan 24,248 sidecars and fire doctor's INCOMPLETE EXPORT warning at 100%.
+- **`enrich` against a foreign folder**: paths are stored absolute. The `meta` table records `enrich_root` and `index_root`; a mismatch warns rather than silently matching nothing.
+- **Half-enriched index**: `meta` records `enriched_at`, so `sidecar_match = none` can be read as "enrich never ran" versus "enrich found nothing".
+
+## 4. Matching
+
+### Key: the sidecar's filename, not its title
+
+Extend M0's `_sidecar_target` so it **relocates** the counter instead of
+stripping it:
+
+```
+DSC00107.JPG.supplemental-metadata.json     -> DSC00107.JPG
+DSC00107.JPG.supplemental-metadata(1).json  -> DSC00107(1).JPG      # relocated
+IMG_1234.jpg.json                           -> IMG_1234.jpg
 ```
 
-Re-running is idempotent: the same sidecars produce the same values.
+M0's current implementation returns `DSC00107.JPG` for both, which is the
+collision. The change is confined to one function and is covered by the existing
+`test_sidecar_target_*` tests plus new counter cases.
 
-### Why not fold it into FolderSource
+**`title` becomes a cross-check, not the key.** When the filename-derived target
+and `title` disagree beyond the counter, that is a signal worth recording, not
+ignoring.
 
-That would make the generic folder source Google-aware, which is the vendor
-coupling v1 was scoped to avoid (main spec §3.1). Keeping enrichment separate
-also means a user can re-run it after adding archive parts without re-hashing
-45,900 files.
+### Index shape: global, with directory as a preference
 
-## 4. Matching — exact, or not at all
+v1 keyed on `(directory, title)`. That discards **3,927 sidecars (16.2%), 3,026
+of them carrying people**, because Takeout writes a sidecar into every album a
+photo belongs to without duplicating the pixels there — 1,204 of those photos
+exist in the index and would have got nothing.
 
-Build an index `{(folder, title): sidecar}` from every per-photo JSON, keyed on
-the sidecar's own `title` field. For each `Photo`, for each path it has, look up
-`(path.parent, path.name)`. A photo filed in two albums gets two chances.
+The index is therefore `dict[casefolded_filename, list[sidecar]]`, built over the
+whole tree. Resolution for a photo:
 
-**No fuzzy fallback. No filename munging. No confidence ladder.**
+1. A sidecar in the **same directory** as one of the photo's paths wins.
+2. Otherwise, if exactly one candidate exists anywhere, use it.
+3. If several remain and they **disagree** on capture time or people, **refuse to
+   enrich** and count it. Never let dictionary insertion order decide.
 
-The main spec §5.1 specified a five-rung matching ladder with tiers, written
-before we knew `title` existed. That design existed to manage the risk that
-aggressive filename matching mis-pairs sidecars — a mature tool shipped exactly
-that and produced roughly **a third of its GPS pointing at the wrong place**.
+Measured need for step 3: 833 colliding groups, 90 with >1 day of spread (max 332
+days), 100 with differing people sets.
 
-With an exact key that risk does not arise, so the mitigation is unnecessary.
-§7's guardrail — *narration may never assert a place or date derived from a
-heuristic match* — is satisfied **by construction** rather than by enforcement.
+### Orphans: one definition, shared
 
-`Photo.sidecar_match` is recorded as `exact | none` so `doctor` can report
-coverage. Two states, not five. **Building the tier ladder now would be
-speculative machinery for a hazard this design has removed.**
+M0's `FolderSource` already computes `orphan_sidecars` globally and
+filename-derived (2,438). v1's per-directory title-keyed count gives 3,927 for
+the same export. Two numbers for one concept, both rendered by `doctor`, is a
+defect. **One function, used by both.**
 
-Unmatched sidecars are counted and reported. They are never force-matched, and
-a sidecar whose `title` names a file that is not present is an *orphan* — the
-existing signal that archive parts are missing.
-
-### Case sensitivity
-
-Lookups casefold the filename, matching the folder source's own convention.
-Directory identity is the `Path` itself.
+`EXCLUDED_DIRS` is inherited from `folder.py` — the enricher must not parse
+`Trash/`'s sidecars and count them against an index that correctly excludes them.
 
 ## 5. Merge semantics
 
-Enrichment does **not** route through `models.merge_meta`. That function's
-"earliest real date wins" is a tiebreak between sources of *equal* authority.
-Here they are not equal, and smuggling source priority into a general-purpose
-merge would hide the distinction.
+### The instant: Google wins, with a bound
+
+Measured on 1,317 comparable photos: 34.2% agree to the second; every sub-day
+disagreement is **exactly −330 minutes** (IST), meaning Google's instant is right
+and naive EXIF is wrong. Where they differ by more than a year, EXIF is a broken
+camera clock and Google is right.
+
+**Exception (v1 had none):** suppress the override when Google's timestamp
+belongs to a large identical-timestamp cluster *and* EXIF carries a distinct real
+date. 618 photos sharing one second did not fire the shutter together.
+
+### Local time: derived, never round-tripped
+
+**This is v1's most damaging error.** `photoTakenTime` is a UTC instant;
+`timestamps.resolve()` expects a naive wall-clock value and stamps a zone onto
+it. Feeding one to the other yields `local = utc`, so a photo taken at 21:00 IST
+is relabelled 15:30 — and v1 did this to **every EXIF-dated photo**: 811 shifted,
+and 442 more that already had a correct `EXIF_OFFSET` had it discarded.
+
+Correct derivation of `taken_at_local`, in order:
+
+1. EXIF `OffsetTimeOriginal` if present
+2. GPS timezone lookup if coordinates exist
+3. **`exif_naive − google_utc`**, which recovers +05:30 exactly
+4. UTC
+
+`tz_source` keeps `EXIF_OFFSET` when an offset is what resolved local time.
+`TzSource.TAKEOUT` describes the *date's* provenance, not the *zone's*;
+conflating them loses information.
+
+### Field rules
 
 | Field | Rule |
 |---|---|
-| `taken_at_utc` | **Google's `photoTakenTime` wins**, unconditionally. New `TzSource.TAKEOUT` records the provenance. |
-| `taken_at_local` | Recomputed from the new UTC value through the existing ladder |
-| `people` | Union, order-preserving, de-duplicated |
-| `gps` | Fills only when absent. Prefers whichever of `geoDataExif`/`geoData` is non-zero; a (0,0) pair is treated as absent |
-| `description` | Longest non-empty wins |
-| `favorite` | Logical OR |
-| `albums` | The real title from album `metadata.json` replaces the sanitised folder name. An empty title leaves the folder name in place |
-| `metadata_conflict` | Set when EXIF carried a **real** date (not the mtime fallback) that disagrees with Google's |
+| `taken_at_utc` | Google's `photoTakenTime`, subject to the cluster bound above |
+| `taken_at_local` | Derived as above — never via the naive ladder |
+| `people` | Union on first enrich; **replace** on re-enrich for the same source (see below) |
+| `gps` | Fills only when absent; `(0,0)` treated as absent |
+| `description` | Longest non-empty |
+| `favorite` | From `favorited`; absent means false |
+| `archived` / `trashed` | **New fields.** Archived means the user deliberately hid it — it must not surface in a montage |
+| `albums` | Real title from album `metadata.json`, applied wherever the photo lives |
+| `exif_taken_at_utc` | **New field.** Retains the displaced EXIF date |
+| `metadata_conflict` | Set only when the two dates differ as *instants* after offset normalisation |
 
-### Why Google's date wins
+### Why replace-not-union on re-enrich
 
-It is Google's own record of when the shutter fired, it survives the
-re-compression that strips EXIF, and it is present on essentially every photo.
-On the reference library **3,012 of 19,480 photos currently have only a
-filesystem-mtime date** — this fixes all of them that have a sidecar.
+v1's union/OR merges are non-retractable: a face tag corrected in Google Photos,
+or a photo un-favourited, could never be fixed by re-exporting. For a tool
+holding 40 real people's names, an index with no way to retract a wrong
+identification is a defect, not a simplification. Enrichment is keyed on source
+provenance so a second run replaces what the first wrote.
 
-Where EXIF exists and agrees, nothing changes. Where it disagrees, the record is
-flagged rather than silently overwritten.
+### Why `metadata_conflict` changed
 
-## 6. Reporting
+v1's rule fired on **65.8%** of comparable photos — a boolean true for the
+majority conveys nothing, and it was almost entirely the −330 minute timezone
+artefact rather than genuine disagreement. Comparing instants after
+normalisation makes it mean "different day", which is what a reader would assume.
 
-`EnrichReport`, rendered by `doctor` and by `enrich` itself:
+v1 also promised the record was "flagged rather than silently overwritten" while
+`PhotoMeta` has exactly one date field — so it was flagged *and* overwritten.
+`exif_taken_at_utc` makes the promise true.
+
+### Idempotency
+
+v1's conflict rule was not idempotent: after run 1 the stored `tz_source` is
+`TAKEOUT` and the EXIF date is gone, so run 2 cannot recompute the flag.
+Retaining `exif_taken_at_utc` and replacing rather than unioning makes a second
+run produce identical output.
+
+## 6. Derivatives inherit enrichment
+
+Google writes **no sidecar for `-edited` files or `.MP` halves** — 177 and 692
+respectively in the reference export, zero matched by any key. Each is a separate
+`file_hash` and therefore a separate `Photo` row, so the version a user most
+likely wants in a montage is the one with no date and no face tags.
+
+M0 already links them via `edited_of` and motion pairing. After matching,
+enrichment **propagates along those links**.
+
+## 7. Reporting, with an enforced invariant
 
 ```
-sidecars_seen, matched, orphaned
-photos_enriched
-people_added, dates_corrected, gps_added, descriptions_added,
-favourites_added, albums_retitled
-conflicts            # EXIF vs Google disagreements
+EnrichReport:
+  sidecars_seen, matched, orphaned, ambiguous, excluded_dirs
+  photos_enriched, derivatives_enriched
+  people_added, dates_corrected, gps_added, albums_retitled
+  conflicts, clustered_dates_suppressed
 ```
 
-`doctor` gains a person-coverage line once enrichment has run.
+**An accounting-invariant test, mirroring M0's:**
 
-**Report, never silently drop** applies unchanged: every sidecar is either
-matched, orphaned, or counted with a reason.
+```
+sidecars_seen == matched + orphaned + ambiguous + excluded_dirs
+```
 
-## 7. Testing
+M0's equivalent test is what makes a whole class of silent drop impossible to
+ship. v1 inherited the slogan "report, never silently drop" and none of the
+machinery — this test alone would have caught v1's 984 vanishing sidecars.
 
-### Fixtures built from observed structure
+### `doctor` must read the index
 
-M0's motion-photo bug came from a fixture inventing a naming convention Google
-does not use. These fixtures reproduce **inspected** structure: the real field
-names above, zeroed `geoData` beside populated `geoDataExif`, the
-counter-inside-suffix form `DSC_0880.JPG.supplemental-metadata(1).json`, album
-`metadata.json` with both differing and empty titles, and `title` values that
-contain `.MP.jpg`.
+`doctor` currently runs a live `FolderSource().scan()` and never opens the
+database, so after a successful enrich it would still print *"No person data
+found in XMP sidecars"* and *"the Takeout parser … is not implemented yet"*
+forever. `doctor` gains an index-reading path.
 
-### A conformance test against a real export
+## 8. Store API and migration — both were missing from v1
 
-`tests/test_takeout_conformance.py` runs only when `REKINDLE_TAKEOUT_DIR` is
-set, and skips otherwise. It asserts structural invariants against a real
-library — every sidecar parses, `title` is present and non-empty, matched
-photos exceed a floor — without committing anyone's personal data.
+v1's central loop — *"for each `Photo`, for each path it has"* — is
+**unimplementable against the current `PhotoStore`**, which exposes only `count`,
+`all_hashes`, `upsert_many`, `get` and `schema_version`. There is no way to
+enumerate photos, no path lookup (`paths` is a JSON blob), and no writer that
+does not route through `merge_meta`.
 
-This is the answer to *our fixtures certify our own fiction*. CI never needs an
-export; a contributor who has one gets real verification. **The same treatment
-is owed to XMP**, which still has no real-world coverage (see
-[known-limitations.md](../../known-limitations.md)).
+Required additions:
 
-## 8. Sequencing risk
+- `iter_photos()` — enumerate (M0 had one and it was deleted as dead code; it now has a consumer)
+- a `photo_paths(file_hash, path)` table, indexed — the honest fix for path lookup
+- `update_meta(file_hash, meta, ...)` — writes without merging
 
-This delivers person data **before** the exclusion list that governs it (main
-spec §7.2, currently M2). No memory engine exists yet, so nothing can surface a
-person unprompted and the risk today is nil.
+### Migration is mandatory, not optional
 
-**Exclusions must land before anything auto-triggers.** Recorded here so the
-ordering is deliberate rather than accidental.
+`db.py` raises on schema mismatch: *"no migration exists yet. Delete the file and
+re-index."* Adding `sidecar_match`, `archived`, `trashed` and
+`exif_taken_at_utc` bumps `SCHEMA_VERSION`, so **every existing user would lose
+their index and re-hash 45,900 files** — while §3 justifies the separate verb
+precisely by avoiding that.
 
-## 9. Out of scope
+A real migration ships with this: `ALTER TABLE` for the new columns, the new
+table, and a version bump. Three lines, and the difference between an upgrade and
+a data-loss event.
 
-- The `url` and `googlePhotosOrigin` fields. Read nothing we do not use.
-- Deletion reconciliation. An incremental export cannot express deletion; the
-  main spec's `last_seen` policy stands.
-- Shared-album photos. Takeout does not export other people's uploads, and no
-  parser can recover them.
+Note also that `_row_to_photo` does `TzSource(row["tz_source"])`, so a DB
+containing `TAKEOUT` opened by an older rekindle raises `ValueError` from inside
+deserialisation rather than the friendly schema error. The migration must bump
+the version so the friendly path fires first.
+
+## 9. Testing
+
+### Fixtures from measured structure
+
+Reproducing what was observed, not assumed: both sidecar filename schemes
+including `(N)`, colliding `(dir, title)` pairs with differing people, an album
+folder containing sidecars and **zero** media, `geoDataExif` key-absent rather
+than zeroed, `favorited` absent when false, `archived`/`trashed`, a
+`metadata.json` with a null title, a `user-generated-memory-titles.json` whose
+`title` is a list, and `-edited` / `.MP` files with no sidecar.
+
+### Conformance against a real export
+
+`tests/test_takeout_conformance.py` runs only when `REKINDLE_TAKEOUT_DIR` is set
+and skips otherwise.
+
+**v1's version would not have caught v1's bug.** It asserted "matched photos
+exceed a floor", and a floor of 80% passes while 984 sidecars vanish. It must
+assert the §7 accounting identity per-sidecar instead.
+
+The same treatment remains owed to XMP, which still has no real-world coverage.
+
+## 10. Sequencing risk
+
+Person data arrives **before** the exclusion list that governs it (main spec
+§7.2, currently M2). No memory engine exists, so nothing surfaces a person
+unprompted and today's risk is nil. **Exclusions must land before anything
+auto-triggers.**
+
+## 11. Out of scope
+
+- `url`, `googlePhotosOrigin`, `appSource` — read nothing we do not use.
+- Deletion reconciliation. `last_seen` stands.
+- Shared-album photos: Takeout does not export other people's uploads. (Note 6
+  sidecars do carry `sharedAlbumComments`; the main spec's claim that no shared
+  data is exported is narrowly wrong, though the pixels genuinely are absent.)
+- Rejoining albums split across export parts (`Dida` / `Dida(1)`), and album
+  titles that collide after substitution (`Untitled`, `Untitled(1)`,
+  `Untitled(3)` → one name). Detected and reported; not merged.

@@ -16,7 +16,7 @@ Items are tagged by the task that surfaced them.
 - **T3** file_hash has no error handling for missing/unreadable files (raises uncaught); task-3-report overstates error coverage.
 - **T3** two RIFF-prefixed branches repeat the startswith check.
 - **T4** upsert_many does one SELECT + full deserialization per photo to decide insert-vs-merge (plan-mandated); consider preloading all_hashes() for large batches.
-- **T4** iter_photos() is implemented but not in the task's Produces list and has no consumer yet.
+- **T4** `iter_photos()` was deleted during M0's final review as dead code. The Takeout enrichment spec now needs it, so it returns with a consumer.
 - **T4** no test for two PhotoStore instances open concurrently; SQLite default 5s lock timeout is unconfigured.
 - **T4** untested whether a mid-batch exception rolls back cleanly.
 - **T5** test_make_xmp_sidecar_writes_parseable_xml does substring checks, never parses the XML it claims to validate.
