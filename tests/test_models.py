@@ -43,10 +43,25 @@ def test_photo_defaults():
     assert p.edited_of is None
 
 
-def test_face_region_is_normalised():
-    r = FaceRegion(name="Alice", x=0.5, y=0.4, w=0.2, h=0.25)
-    assert 0.0 <= r.x <= 1.0
-    assert r.name == "Alice"
+def test_face_region_is_hashable_and_compares_by_value():
+    # merge_meta calls dict.fromkeys(...) on face_regions to de-duplicate
+    # while unioning. That only works if FaceRegion is frozen (hashable)
+    # and compares by value. If it ever stopped being frozen, that call
+    # would raise TypeError: unhashable type, breaking the union at
+    # runtime - this test protects that invariant.
+    a = FaceRegion(name="Alice", x=0.5, y=0.4, w=0.2, h=0.25)
+    b = FaceRegion(name="Alice", x=0.5, y=0.4, w=0.2, h=0.25)
+    c = FaceRegion(name="Bob", x=0.5, y=0.4, w=0.2, h=0.25)
+
+    assert a == b
+    assert hash(a) == hash(b)
+    assert a != c
+
+    deduped = {a, b, c}
+    assert deduped == {a, c}
+
+    as_dict_key = {a: "first", b: "second"}
+    assert as_dict_key == {a: "second"}
 
 
 def test_gps_is_frozen():
