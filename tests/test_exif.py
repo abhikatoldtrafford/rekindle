@@ -1,8 +1,14 @@
 import warnings
 from datetime import datetime
 
-from rekindle.meta.exif import read_exif
-from tests.fixtures.gen import make_corrupt_exif_jpeg, make_jpeg
+import pytest
+
+from rekindle.meta.exif import _dms_to_decimal, _rational, read_exif
+from tests.fixtures.gen import (
+    make_corrupt_exif_jpeg,
+    make_jpeg,
+    make_zero_denominator_gps_jpeg,
+)
 
 
 def test_reads_datetime_offset_and_camera(tmp_path):
@@ -76,3 +82,32 @@ def test_corrupt_exif_produces_no_warning_output(tmp_path):
         warnings.simplefilter("always")
         read_exif(p)
     assert caught == []
+
+
+def test_zero_denominator_rational_is_rejected_not_invented_as_zero():
+    """`float(num) / float(den) if den else 0.0` turned a damaged rational
+    into a real-looking 0, and because it never raised, _dms_to_decimal's
+    ZeroDivisionError guard was unreachable dead code."""
+    assert _rational((17, 2)) == 8.5
+    with pytest.raises(ZeroDivisionError):
+        _rational((17, 0))
+
+
+def test_one_damaged_rational_rejects_the_whole_coordinate():
+    """15deg 0min 57.57sec with the MINUTES damaged is not "15.016 degrees" -
+    it is an unknown position. Substituting 0 for the broken part yields a
+    coordinate that is wrong by up to half a degree and looks perfectly
+    plausible, which no downstream check can catch."""
+    intact = _dms_to_decimal(((15, 1), (17, 1), (5757, 100)), "N")
+    assert intact is not None
+    assert _dms_to_decimal(((15, 1), (17, 0), (5757, 100)), "N") is None
+
+
+def test_gps_with_a_damaged_rational_yields_no_gps_at_all(tmp_path):
+    """End to end, through a real JPEG. Silently-wrong GPS is the one failure
+    this tool must never produce: a montage narrated with the wrong place is
+    worse than one narrated with no place."""
+    p = make_zero_denominator_gps_jpeg(tmp_path / "damaged_gps.jpg")
+    d = read_exif(p)
+    assert d.decode_ok is True  # the FILE is fine; only the coordinate is not
+    assert d.gps is None

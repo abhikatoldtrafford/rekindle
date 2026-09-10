@@ -89,6 +89,28 @@ def _deg_to_dms(deg: float) -> tuple[IFDRational, IFDRational, IFDRational]:
     return (IFDRational(d, 1), IFDRational(m, 1), IFDRational(s, 100))
 
 
+def make_zero_denominator_gps_jpeg(path: Path) -> Path:
+    """A JPEG whose GPS latitude has one damaged rational: minutes = 17/0.
+
+    Seen in the wild wherever a write was interrupted. The other five
+    rationals are intact, so the coordinate looks entirely plausible - which
+    is the danger. Pillow hands a zero-denominator IFDRational back as NaN,
+    so the reader has to reject the whole coordinate rather than let a
+    wrong-but-believable latitude through.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    im = Image.new("RGB", (16, 16), (60, 60, 60))
+    exif = im.getexif()
+    exif[0x8825] = {
+        1: "N",
+        2: (IFDRational(15, 1), IFDRational(17, 0), IFDRational(5757, 100)),
+        3: "E",
+        4: _deg_to_dms(74.1240),
+    }
+    im.save(path, "JPEG", exif=exif)
+    return path
+
+
 def make_corrupt_exif_jpeg(path: Path) -> Path:
     """A real, fully-openable JPEG whose embedded EXIF sub-IFD pointer is
     truncated - reproduces Pillow's `UserWarning: Corrupt EXIF data.

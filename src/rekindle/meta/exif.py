@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import warnings
 from dataclasses import dataclass
 from datetime import datetime
@@ -46,9 +47,20 @@ class ExifData:
 
 
 def _rational(value: object) -> float:
+    """Raises ZeroDivisionError on a damaged (zero-denominator) rational.
+
+    It used to substitute 0.0, which turned one damaged component of a GPS
+    triple into a wrong-but-entirely-plausible coordinate - off by up to half
+    a degree, and indistinguishable downstream from a real reading. Because
+    it never raised, _dms_to_decimal's ZeroDivisionError guard was
+    unreachable. Silently-wrong location is the one failure this tool must
+    not produce, so a damaged part now rejects the whole coordinate.
+    """
     if isinstance(value, tuple) and len(value) == 2:
         num, den = value
-        return float(num) / float(den) if den else 0.0
+        if not den:
+            raise ZeroDivisionError("zero denominator in EXIF rational")
+        return float(num) / float(den)
     return float(value)  # type: ignore[arg-type]
 
 
@@ -58,6 +70,13 @@ def _dms_to_decimal(dms: object, ref: object) -> float | None:
     except (TypeError, ValueError, ZeroDivisionError):
         return None
     dec = d + m / 60.0 + s / 3600.0
+    # Pillow does not hand a damaged rational back as a (num, den) tuple: it
+    # returns an IFDRational that floats to NaN, so the guard above never
+    # sees it. NaN propagates through every arithmetic and comparison
+    # downstream without ever looking wrong, which is exactly how it reaches
+    # the database. Reject anything non-finite, whatever produced it.
+    if not math.isfinite(dec):
+        return None
     if str(ref).upper().strip() in {"S", "W"}:
         dec = -dec
     return dec
@@ -106,6 +125,8 @@ def read_exif(path: Path) -> ExifData:
                     alt = _rational(gps_ifd.get(6))
                 except (TypeError, ValueError, ZeroDivisionError):
                     alt = None
+                else:
+                    alt = alt if math.isfinite(alt) else None
             gps = Gps(lat=lat, lon=lon, alt=alt)
 
     def _clean(v: object) -> str | None:
