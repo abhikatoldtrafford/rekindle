@@ -313,7 +313,36 @@ Arithmetic: 50k × 768 × fp32 = **154 MB**; 500k = 1.5 GB. On any modern machin
   **Not `float16`** — numpy has no BLAS path for half precision, so a measured
   500k-vector search took **5.5 s in fp16 versus 188 ms in fp32**. Store fp32,
   or move the matmul to the GPU where fp16 *is* faster.
-- Both sit behind a narrow `Index` façade, so a vector database can be reintroduced later if someone genuinely arrives with millions of photos.
+- Both sit behind a narrow `Index` façade.
+
+Measured on the reference machine, exact brute-force search over 500k vectors
+takes **60–190 ms on a single core**. Two properties fall out of that:
+
+- **Thread count barely matters** — the scan is memory-bandwidth bound (12
+  threads ≈ 2 threads). Search need not monopolise the machine.
+- **Mask, don't gather.** Scoring everything and masking beat pre-gathering a
+  filtered subset, because the gather costs nearly a full scan.
+
+**Writes must be batched.** This applies to SQLite as much as to any store: wrap
+an index run in transactions rather than committing per photo.
+
+#### Escalation gate
+
+Brute force is the v1 design, not a permanent commitment. The gate is explicit:
+
+> If p95 search latency exceeds **200 ms** on target hardware, add an ANN index.
+
+Crucially it would be a **derived** artifact — rebuildable from the `.f32`
+memmap, deletable at any time, with **no change to the data model**. The exact
+path stays as the fallback for selective filters, where a masked scan is both
+faster *and* more accurate than any ANN index. `usearch` is the likely choice
+(0.3 MB wheels, filtering pushed into graph traversal); `faiss` IVF_PQ is the
+institutional alternative.
+
+**Do not trust published ANN recall figures**, including any we generate on
+synthetic data — isotropic Gaussian vectors in 768 dimensions are the
+pathological worst case for ANN. Recall must be measured on real SigLIP
+embeddings or not claimed.
 
 ### 5.6 Picker API — dropped from v1
 
