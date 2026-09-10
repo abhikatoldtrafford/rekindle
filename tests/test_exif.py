@@ -1,7 +1,8 @@
+import warnings
 from datetime import datetime
 
 from rekindle.meta.exif import read_exif
-from tests.fixtures.gen import make_jpeg
+from tests.fixtures.gen import make_corrupt_exif_jpeg, make_jpeg
 
 
 def test_reads_datetime_offset_and_camera(tmp_path):
@@ -63,3 +64,15 @@ def test_healthy_file_without_exif_is_decode_ok(tmp_path):
     d = read_exif(make_jpeg(tmp_path / "plain.jpg"))
     assert d.decode_ok is True
     assert d.taken_naive is None
+
+
+def test_corrupt_exif_produces_no_warning_output(tmp_path):
+    """A real scan printed Pillow's 'Corrupt EXIF data' UserWarning straight
+    to stderr. The file is still readable and already reported via
+    decode_ok/error - the warning itself must be suppressed, not the
+    information it carries."""
+    p = make_corrupt_exif_jpeg(tmp_path / "corrupt_exif.jpg")
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        read_exif(p)
+    assert caught == []

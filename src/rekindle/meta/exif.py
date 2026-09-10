@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import warnings
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -73,11 +74,18 @@ def _parse_dt(raw: object) -> datetime | None:
 
 def read_exif(path: Path) -> ExifData:
     try:
-        with Image.open(path) as im:
-            width, height = im.size
-            exif = im.getexif()
-            sub = exif.get_ifd(_EXIF_IFD)
-            gps_ifd = exif.get_ifd(_GPS_IFD)
+        # A damaged-but-decodable EXIF block (seen on a real Takeout export)
+        # makes Pillow emit a UserWarning straight to stderr. The file's
+        # readability is already reported via decode_ok/error below, so this
+        # scopes ONLY the Pillow calls - never a global filter, and nowhere
+        # else in the codebase.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with Image.open(path) as im:
+                width, height = im.size
+                exif = im.getexif()
+                sub = exif.get_ifd(_EXIF_IFD)
+                gps_ifd = exif.get_ifd(_GPS_IFD)
     except Image.DecompressionBombError as exc:
         return ExifData(decode_ok=False, error=f"decompression bomb: {exc}")
     except Exception as exc:

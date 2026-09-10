@@ -7,7 +7,9 @@ variants, sidecars, and files whose extensions lie.
 
 from __future__ import annotations
 
+import io
 import json
+import struct
 from datetime import datetime
 from pathlib import Path
 
@@ -85,6 +87,34 @@ def _deg_to_dms(deg: float) -> tuple[IFDRational, IFDRational, IFDRational]:
     m = int(m_full)
     s = round((m_full - m) * 60 * 100)
     return (IFDRational(d, 1), IFDRational(m, 1), IFDRational(s, 100))
+
+
+def make_corrupt_exif_jpeg(path: Path) -> Path:
+    """A real, fully-openable JPEG whose embedded EXIF sub-IFD pointer is
+    truncated - reproduces Pillow's `UserWarning: Corrupt EXIF data.
+    Expecting to read N bytes but only got 0.` seen on a real Takeout export.
+
+    The image itself decodes fine; only the tiny hand-crafted TIFF blob in
+    its APP1 segment is broken, which is exactly the "damaged EXIF, healthy
+    file" case read_exif must handle quietly.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    im = Image.new("RGB", (8, 8), (1, 2, 3))
+    buf = io.BytesIO()
+    im.save(buf, "JPEG")
+    data = bytearray(buf.getvalue())
+
+    exif_header = b"Exif\x00\x00"
+    tiff = b"II*\x00\x08\x00\x00\x00"  # little-endian TIFF header, IFD0 at offset 8
+    # IFD0's one entry is the EXIF sub-IFD pointer (tag 0x8769), aimed at an
+    # offset past the end of this (deliberately short) TIFF blob.
+    entry = struct.pack("<HHII", 0x8769, 4, 1, 26)
+    ifd0 = struct.pack("<H", 1) + entry + struct.pack("<I", 0)
+    app1_payload = exif_header + tiff + ifd0
+    app1_segment = b"\xff\xe1" + struct.pack(">H", len(app1_payload) + 2) + app1_payload
+
+    path.write_bytes(bytes(data[:2] + app1_segment + data[2:]))
+    return path
 
 
 def make_xmp_sidecar(
