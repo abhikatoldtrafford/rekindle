@@ -11,6 +11,7 @@ HEIC = b"\x00\x00\x00\x18ftypheic" + b"\x00" * 64
 AVIF = b"\x00\x00\x00\x18ftypavif" + b"\x00" * 64
 MP4 = b"\x00\x00\x00\x18ftypisom" + b"\x00" * 64
 MOV = b"\x00\x00\x00\x14ftypqt  " + b"\x00" * 64
+CRX = b"\x00\x00\x00\x18ftypcrx " + b"\x00" * 64
 JUNK = b"not a media file at all" + b"\x00" * 64
 
 
@@ -29,8 +30,9 @@ def test_hash_is_stable_and_content_addressed(tmp_path):
     assert len(file_hash(a)) == 32
 
 
-def test_hash_reads_in_chunks_without_loading_whole_file(tmp_path):
+def test_hash_is_invariant_to_chunk_size(tmp_path):
     big = _write(tmp_path, "big.bin", b"x" * (5 * 1024 * 1024))
+    assert file_hash(big, chunk_size=1024) == file_hash(big)
     assert len(file_hash(big)) == 32
 
 
@@ -64,6 +66,18 @@ def test_sniff_returns_unknown_for_junk(tmp_path):
 def test_sniff_handles_empty_file(tmp_path):
     p = _write(tmp_path, "empty.jpg", b"")
     assert sniff(p) == (MediaType.UNKNOWN, "unknown")
+
+
+def test_unknown_iso_bmff_brand_is_unknown_not_guessed_video(tmp_path):
+    """Unrecognised ISO-BMFF brands must return UNKNOWN, never guessed video.
+
+    Guessing video would file a raw camera format (crx) wrongly and silently.
+    UNKNOWN gets it counted and surfaced instead.
+    """
+    p = _write(tmp_path, "photo.cr3", CRX)
+    media_type, fmt = sniff(p)
+    assert media_type is MediaType.UNKNOWN
+    assert fmt == "ftyp:crx "
 
 
 def test_long_path_detection():
