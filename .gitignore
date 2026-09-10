@@ -1,0 +1,44 @@
+# Secrets — never commit
+.env
+.env.*
+!.env.example
+*.key
+credentials*.json
+client_secret*.json
+token*.json
+
+# Personal data — never commit
+data/
+takeout/
+*.zip
+*.tgz
+photos/
+thumbnails/
+index/
+memories/
+*.mp4
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Models
+models/
+*.safetensors
+*.onnx
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

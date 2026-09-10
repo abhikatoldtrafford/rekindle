@@ -1,0 +1,67 @@
+# Contributing to rekindle
+
+Thanks for considering it. This project is meant to be extended.
+
+## The three extension points
+
+Almost every contribution fits one of these, and none of them require touching
+the core engine.
+
+### 1. A new memory type (best first contribution)
+
+A `Recipe` decides which photos belong in a memory and how they are ordered.
+One file, one protocol, one registry entry:
+
+```python
+class Recipe(Protocol):
+    name: str
+    params_model: type[BaseModel]
+
+    def candidates(self, params, index) -> list[Photo]: ...
+    def arrange(self, photos, params) -> list[Shot]: ...
+    def fact_sheet(self, shots, params) -> FactSheet: ...
+```
+
+Ideas nobody has built yet: *Kids Growing Up*, *Every Sunset*, *This Café Over
+The Years*, *Seasons In One Place*, *Everyone Who Came To Dinner*.
+
+### 2. A new photo source
+
+`Source` normalises any library into `Photo` records. Apple Photos, Immich,
+Nextcloud, Synology Photos and PhotoPrism are all wanted.
+
+### 3. A new model backend
+
+`Embedder`, `Captioner` and `Narrator` are swappable. Ollama, llama.cpp,
+Gemini and local VLMs all fit.
+
+## Ground rules
+
+**Never commit personal data.** No photos, no Takeout exports, no `.env`. The
+`.gitignore` is deliberately aggressive — please keep it that way.
+
+**Tests must run without photos, without a GPU, and without API keys.** CI has
+none of those. Use the synthetic fixture generator in `tests/fixtures/` and the
+`Fake*` providers. If your change needs a real model to be tested, it needs a
+fake too.
+
+**Cross-platform.** Windows, macOS and Linux are all supported. Use `pathlib`,
+never hardcode separators or drive letters, and don't assume ffmpeg's location.
+
+**Found a new Takeout quirk?** That's a genuinely valuable bug report. Please
+include the filename shape and what `rekindle doctor` said — and if you can,
+add a fixture case reproducing it.
+
+## Development
+
+```bash
+uv sync
+uv run pytest
+uv run ruff check .
+uv run ruff format .
+```
+
+## Pull requests
+
+Keep them focused, explain the why, and add tests. If you're planning something
+large, open an issue first so we can agree on the shape before you build it.
