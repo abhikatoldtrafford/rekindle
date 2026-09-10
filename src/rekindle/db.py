@@ -23,7 +23,7 @@ from rekindle.models import (
     merge_meta,
 )
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -55,13 +55,41 @@ CREATE TABLE IF NOT EXISTS photos (
     width         INTEGER,
     height        INTEGER,
     source        TEXT NOT NULL DEFAULT 'folder',
-    metadata_conflict INTEGER NOT NULL DEFAULT 0
+    metadata_conflict INTEGER NOT NULL DEFAULT 0,
+    exif_taken_at_utc TEXT,
+    takeout_people TEXT NOT NULL DEFAULT '[]',
+    archived      INTEGER NOT NULL DEFAULT 0,
+    trashed       INTEGER NOT NULL DEFAULT 0,
+    sidecar_match TEXT NOT NULL DEFAULT 'none'
+);
+
+-- `paths` is a JSON blob and therefore unqueryable. The enricher must look a
+-- photo up by filename 20,000 times; without this table that is a full table
+-- scan per lookup.
+CREATE TABLE IF NOT EXISTS photo_paths (
+    file_hash TEXT NOT NULL,
+    path      TEXT NOT NULL,
+    name_cf   TEXT NOT NULL,
+    parent    TEXT NOT NULL,
+    PRIMARY KEY (file_hash, path)
 );
 
 CREATE INDEX IF NOT EXISTS idx_photos_taken ON photos(taken_at_utc);
 CREATE INDEX IF NOT EXISTS idx_photos_type  ON photos(media_type);
 CREATE INDEX IF NOT EXISTS idx_photos_edited ON photos(edited_of);
+CREATE INDEX IF NOT EXISTS idx_photo_paths_name ON photo_paths(name_cf);
 """
+
+# Column additions, in order, applied to a database created before them.
+# ALTER TABLE ADD COLUMN is the only schema change SQLite does cheaply and it
+# is all this migration needs.
+_V2_COLUMNS = (
+    ("exif_taken_at_utc", "TEXT"),
+    ("takeout_people", "TEXT NOT NULL DEFAULT '[]'"),
+    ("archived", "INTEGER NOT NULL DEFAULT 0"),
+    ("trashed", "INTEGER NOT NULL DEFAULT 0"),
+    ("sidecar_match", "TEXT NOT NULL DEFAULT 'none'"),
+)
 
 
 def _dt(value: datetime | None) -> str | None:
@@ -84,6 +112,7 @@ class PhotoStore:
             (str(SCHEMA_VERSION),),
         )
         self._conn.commit()
+        self._migrate()
         # CREATE TABLE IF NOT EXISTS silently keeps an old table, so a version
         # check is the only thing standing between a schema change and a
         # baffling OperationalError on the next write.
@@ -101,9 +130,39 @@ class PhotoStore:
                 )
             raise RuntimeError(
                 f"{db_path} uses schema v{found}, this rekindle expects "
-                f"v{SCHEMA_VERSION}, and no migration exists yet. Delete the "
-                "file and re-index."
+                f"v{SCHEMA_VERSION}, and no migration exists for that step. "
+                "Delete the file and re-index."
             )
+
+    def _migrate(self) -> None:
+        """v1 -> v2. Additive only: no row is ever rewritten or dropped."""
+        if self.schema_version() >= SCHEMA_VERSION:
+            return
+        existing = {r["name"] for r in self._conn.execute("PRAGMA table_info(photos)")}
+        for name, decl in _V2_COLUMNS:
+            if name not in existing:
+                self._conn.execute(f"ALTER TABLE photos ADD COLUMN {name} {decl}")
+        # photo_paths was created empty by _SCHEMA above; backfill it from the
+        # JSON blob that was the only path record in v1.
+        # fetchall(), not a live cursor: writing through the same connection
+        # while iterating a SELECT on it is undefined behaviour in SQLite.
+        rows = self._conn.execute("SELECT file_hash, paths FROM photos").fetchall()
+        for row in rows:
+            for raw in json.loads(row["paths"]):
+                self._index_path(self._conn, row["file_hash"], Path(raw))
+        self._conn.execute(
+            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
+            (str(SCHEMA_VERSION),),
+        )
+        self._conn.commit()
+
+    @staticmethod
+    def _index_path(cur: sqlite3.Connection | sqlite3.Cursor, digest: str, path: Path) -> None:
+        cur.execute(
+            "INSERT OR REPLACE INTO photo_paths(file_hash, path, name_cf, parent)"
+            " VALUES (?, ?, ?, ?)",
+            (digest, str(path), path.name.casefold(), str(path.parent)),
+        )
 
     def __enter__(self) -> PhotoStore:
         return self
@@ -128,6 +187,15 @@ class PhotoStore:
 
     def all_hashes(self) -> set[str]:
         return {r["file_hash"] for r in self._conn.execute("SELECT file_hash FROM photos")}
+
+    def hashes_for_filename(self, name_cf: str) -> set[str]:
+        """Every photo having a path whose filename casefolds to `name_cf`."""
+        return {
+            r["file_hash"]
+            for r in self._conn.execute(
+                "SELECT file_hash FROM photo_paths WHERE name_cf = ?", (name_cf,)
+            )
+        }
 
     def upsert_many(self, photos: Iterable[Photo]) -> tuple[int, int]:
         """Insert or merge. Returns (inserted, updated). One transaction."""
@@ -161,6 +229,7 @@ class PhotoStore:
             edited_of=new.edited_of or old.edited_of,
             source=new.source or old.source,
             metadata_conflict=old.metadata_conflict or new.metadata_conflict or conflict,
+            sidecar_match=old.sidecar_match if old.sidecar_match != "none" else new.sidecar_match,
         )
 
     @staticmethod
@@ -174,13 +243,15 @@ class PhotoStore:
                 last_seen, taken_at_utc, taken_at_local, tz_source, gps_lat,
                 gps_lon, gps_alt, people, face_regions, keywords, description,
                 favorite, camera_make, camera_model, width, height, source,
-                metadata_conflict)
+                metadata_conflict, exif_taken_at_utc, takeout_people, archived,
+                trashed, sidecar_match)
                VALUES
                (:file_hash,:media_type,:paths,:albums,:edited_of,:first_seen,
                 :last_seen,:taken_at_utc,:taken_at_local,:tz_source,:gps_lat,
                 :gps_lon,:gps_alt,:people,:face_regions,:keywords,:description,
                 :favorite,:camera_make,:camera_model,:width,:height,:source,
-                :metadata_conflict)""",
+                :metadata_conflict,:exif_taken_at_utc,:takeout_people,:archived,
+                :trashed,:sidecar_match)""",
             {
                 "file_hash": p.file_hash,
                 "media_type": str(p.media_type),
@@ -211,8 +282,16 @@ class PhotoStore:
                 "height": m.height,
                 "source": p.source,
                 "metadata_conflict": int(p.metadata_conflict),
+                "exif_taken_at_utc": _dt(m.exif_taken_at_utc),
+                "takeout_people": json.dumps(m.takeout_people),
+                "archived": int(m.archived),
+                "trashed": int(m.trashed),
+                "sidecar_match": p.sidecar_match,
             },
         )
+        cur.execute("DELETE FROM photo_paths WHERE file_hash = ?", (p.file_hash,))
+        for path in p.paths:
+            PhotoStore._index_path(cur, p.file_hash, path)
 
     def get(self, file_hash: str) -> Photo | None:
         row = self._conn.execute(
@@ -239,6 +318,10 @@ class PhotoStore:
             camera_model=row["camera_model"],
             width=row["width"],
             height=row["height"],
+            exif_taken_at_utc=_undt(row["exif_taken_at_utc"]),
+            takeout_people=json.loads(row["takeout_people"]),
+            archived=bool(row["archived"]),
+            trashed=bool(row["trashed"]),
         )
         return Photo(
             file_hash=row["file_hash"],
@@ -251,4 +334,5 @@ class PhotoStore:
             edited_of=row["edited_of"],
             source=row["source"],
             metadata_conflict=bool(row["metadata_conflict"]),
+            sidecar_match=row["sidecar_match"],
         )

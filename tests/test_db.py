@@ -1,10 +1,12 @@
+import json
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from rekindle.db import SCHEMA_VERSION, PhotoStore
-from rekindle.models import FaceRegion, Gps, MediaType, Photo, PhotoMeta, TzSource
+from rekindle.models import FaceRegion, Gps, MediaType, Photo, PhotoMeta, TzSource, merge_meta
 
 T0 = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
 T1 = datetime(2026, 6, 1, 12, 0, tzinfo=UTC)
@@ -102,6 +104,24 @@ def test_upsert_same_hash_updates_last_seen_and_unions_albums(tmp_path):
     assert got.last_seen == T1  # latest wins
 
 
+def test_reindex_does_not_reset_a_resolved_sidecar_match(tmp_path):
+    """A folder rescan always writes sidecar_match='none' (it knows nothing
+    about Takeout sidecars). If _merge let that clobber a prior 'exact'
+    resolution, every `rekindle index` after an enrich would erase it."""
+    with PhotoStore(tmp_path / "db.sqlite") as s:
+        enriched = _photo()
+        enriched.sidecar_match = "exact"
+        s.upsert_many([enriched])
+
+        rescanned = _photo()  # sidecar_match defaults to "none"
+        assert rescanned.sidecar_match == "none"
+        inserted, updated = s.upsert_many([rescanned])
+        assert (inserted, updated) == (0, 1)
+
+        got = s.get("abc123")
+    assert got.sidecar_match == "exact"
+
+
 def test_get_returns_none_for_unknown_hash(tmp_path):
     with PhotoStore(tmp_path / "db.sqlite") as s:
         assert s.get("nope") is None
@@ -143,3 +163,94 @@ def test_upsert_many_commits_once_not_per_photo(tmp_path):
 
     with PhotoStore(db) as s:
         assert s.count() == 0
+
+
+def _write_v1_database(path):
+    """An M0-schema database, byte-for-byte as v1 wrote it."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    conn.executescript(
+        """
+        CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        CREATE TABLE photos (
+            file_hash TEXT PRIMARY KEY, media_type TEXT NOT NULL,
+            paths TEXT NOT NULL, albums TEXT NOT NULL, edited_of TEXT,
+            first_seen TEXT NOT NULL, last_seen TEXT NOT NULL,
+            taken_at_utc TEXT, taken_at_local TEXT, tz_source TEXT NOT NULL,
+            gps_lat REAL, gps_lon REAL, gps_alt REAL, people TEXT NOT NULL,
+            face_regions TEXT NOT NULL, keywords TEXT NOT NULL,
+            description TEXT, favorite INTEGER NOT NULL DEFAULT 0,
+            camera_make TEXT, camera_model TEXT, width INTEGER, height INTEGER,
+            source TEXT NOT NULL DEFAULT 'folder',
+            metadata_conflict INTEGER NOT NULL DEFAULT 0
+        );
+        """
+    )
+    conn.execute("INSERT INTO meta(key, value) VALUES('schema_version', '1')")
+    conn.execute(
+        "INSERT INTO photos (file_hash, media_type, paths, albums, first_seen,"
+        " last_seen, tz_source, people, face_regions, keywords) VALUES"
+        " ('abc', 'image', ?, ?, '2020-01-01T00:00:00+00:00',"
+        " '2020-01-01T00:00:00+00:00', 'exif_naive', ?, '[]', '[]')",
+        (
+            json.dumps(["/lib/Photos from 2014/IMG_0001.jpg"]),
+            json.dumps(["Photos from 2014"]),
+            json.dumps(["Ada"]),
+        ),
+    )
+    conn.commit()
+    conn.close()
+
+
+def test_v1_database_migrates_without_losing_rows(tmp_path):
+    """A data-loss regression test. M0 users must not be told to re-index."""
+    db_path = tmp_path / "data" / "rekindle.sqlite"
+    _write_v1_database(db_path)
+
+    with PhotoStore(db_path) as store:
+        assert store.schema_version() == SCHEMA_VERSION == 2
+        assert store.count() == 1
+        photo = store.get("abc")
+        assert photo is not None
+        assert photo.meta.people == ["Ada"]
+        assert photo.albums == ["Photos from 2014"]
+        # New columns arrive with their defaults, not with NULLs that crash
+        # deserialisation.
+        assert photo.sidecar_match == "none"
+        assert photo.meta.archived is False
+        assert photo.meta.trashed is False
+        assert photo.meta.exif_taken_at_utc is None
+        assert photo.meta.takeout_people == []
+
+
+def test_migration_backfills_the_photo_paths_table(tmp_path):
+    db_path = tmp_path / "data" / "rekindle.sqlite"
+    _write_v1_database(db_path)
+    with PhotoStore(db_path) as store:
+        hits = store.hashes_for_filename("img_0001.jpg")
+    assert hits == {"abc"}
+
+
+def test_new_meta_fields_survive_a_reindex_merge():
+    """merge_meta enumerates fields; one left out is enrichment destroyed."""
+    enriched = PhotoMeta(
+        taken_at_utc=datetime(2014, 6, 1, tzinfo=UTC),
+        tz_source=TzSource.TAKEOUT,
+        people=["Ada"],
+        takeout_people=["Ada"],
+        archived=True,
+        trashed=False,
+        exif_taken_at_utc=datetime(2010, 1, 1, tzinfo=UTC),
+    )
+    fresh_from_disk = PhotoMeta(
+        taken_at_utc=datetime(2020, 1, 1, tzinfo=UTC),
+        tz_source=TzSource.FILE_MTIME,
+    )
+    merged, _ = merge_meta(enriched, fresh_from_disk)
+    assert merged.takeout_people == ["Ada"]
+    assert merged.archived is True
+    assert merged.exif_taken_at_utc == datetime(2010, 1, 1, tzinfo=UTC)
+
+
+def test_takeout_is_a_real_tz_source():
+    assert TzSource("takeout") is TzSource.TAKEOUT

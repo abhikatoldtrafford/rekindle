@@ -21,6 +21,9 @@ class TzSource(StrEnum):
     EXIF_NAIVE = "exif_naive"
     GPS = "gps"
     FILE_MTIME = "file_mtime"
+    # Google's photoTakenTime supplied the INSTANT. It says nothing about the
+    # zone: local time is derived separately (meta.timestamps.from_takeout).
+    TAKEOUT = "takeout"
     NONE = "none"
 
 
@@ -57,6 +60,26 @@ class PhotoMeta:
     camera_model: str | None = None
     width: int | None = None
     height: int | None = None
+    # The EXIF instant that Google's photoTakenTime displaced. Without this,
+    # `metadata_conflict` is a flag with no payload: the spec promised the
+    # record was "flagged rather than silently overwritten" while there was
+    # exactly one date field to overwrite.
+    exif_taken_at_utc: datetime | None = None
+    # Exactly what the last Takeout enrich contributed to `people`. Needed so a
+    # second enrich can RETRACT a face tag the user corrected in Google Photos.
+    # A flat union can only ever grow.
+    takeout_people: list[str] = field(default_factory=list)
+    # Google's own flags. Archived means the user deliberately hid this photo;
+    # it must never surface in a montage. 162 rows on the reference export.
+    archived: bool = False
+    # EXPECTED TO BE PERMANENTLY ZERO FOR TAKEOUT. All 12 `trashed: true`
+    # sidecars on the reference export live under `Trash/`, which both
+    # FolderSource and build_index exclude, so the photo never reaches the
+    # store to be flagged. The field exists for sources that expose a
+    # soft-delete flag WITHOUT segregating the files - Immich and Apple Photos
+    # both do. If a Takeout run ever reports a non-zero count here, Google has
+    # changed the export layout and the exclusion needs revisiting.
+    trashed: bool = False
 
     @classmethod
     def empty(cls) -> PhotoMeta:
@@ -80,6 +103,11 @@ class Photo:
     # Set when two sightings of the same bytes disagree on a real capture date
     # or carry different non-empty descriptions.
     metadata_conflict: bool = False
+    # "exact"     - a sidecar was resolved for this photo
+    # "ambiguous" - candidates disagreed and enrichment was REFUSED
+    # "none"      - no sidecar, or enrich has never run. Distinguish the two by
+    #               the `enriched_at` key in the meta table, not by this field.
+    sidecar_match: str = "none"
 
 
 def merge_meta(old: PhotoMeta, new: PhotoMeta) -> tuple[PhotoMeta, bool]:
@@ -125,6 +153,12 @@ def merge_meta(old: PhotoMeta, new: PhotoMeta) -> tuple[PhotoMeta, bool]:
         camera_model=old.camera_model or new.camera_model,
         width=old.width or new.width,
         height=old.height or new.height,
+        # A re-index must never destroy enrichment. `new` here is the folder
+        # source, which knows none of these, so `old` wins on all four.
+        exif_taken_at_utc=old.exif_taken_at_utc or new.exif_taken_at_utc,
+        takeout_people=list(old.takeout_people or new.takeout_people),
+        archived=old.archived or new.archived,
+        trashed=old.trashed or new.trashed,
     )
     return merged, conflict
 
