@@ -114,7 +114,7 @@ A photo appearing in several album folders yields several paths and sidecars. **
 ```
 file_hash, paths[], source, source_id
 taken_at_utc, taken_at_local, tz_source
-sidecar_match: exact | supplemental | truncated | counter | heuristic | none
+sidecar_match: exact | none   (see takeout-enrichment spec; the tier ladder was cut)
 gps (lat, lon, alt) | None,  gps_source
 people[], description, favorite, albums[]
 camera_make, camera_model, width, height, media_type
@@ -140,7 +140,7 @@ music        -> track_id, in_point, beat_cues[], license, attribution
 narration[]  -> text, verified: bool, verifier_notes
 transcript   -> full narration as plain text (accessibility)
 provenance   -> inputs, filters applied, model + prompt versions,
-                sidecar_match tiers present, metadata_conflicts
+                sidecar_match coverage, metadata_conflicts
 ```
 
 **Timeline semantics are normative**, because two renderers must agree:
@@ -212,17 +212,26 @@ duplicate photos.
 Retained here because it is the next source planned, and because the audit's
 findings about it are worth not relearning. Nothing in this section ships in v1.
 
-#### Sidecar matching is a data-correctness problem, not a coverage problem
+#### Sidecar matching — SUPERSEDED
 
-v1 specified a fallback ladder ending in "fuzzy". A mature tool (GooglePhotosTakeoutHelper) shipped that design and produced roughly **34.5% of GPS-tagged outputs with the wrong location** — its aggressive fallback matched the wrong photo's sidecar. For rekindle, a wrong GPS produces a wrong trip cluster, a wrong FactSheet, and confident narration about the wrong place.
-
-The matcher is therefore **combinatorial, not linear** — Takeout truncates the *suffix* as well as the base (`.supplemental-metad.json`, `.supple.json`, `.s.json`, around a 46-character cap), and one export can contain old-style, new-style and truncated names simultaneously. It searches `{base truncation} × {suffix truncation} × {counter position}`.
-
-Every match records its **tier** on the `Photo`. Consequences:
-
-- `doctor` reports a **histogram by tier**, never a single coverage percentage.
-- **Heuristic-tier matches are rejected by default** and require an explicit opt-in flag.
-- **Narration may never assert a place name or date derived from a heuristic-tier match.** This is a code-enforced guardrail and appears in §7.
+> **This subsection is obsolete.** See
+> [2026-09-10-takeout-enrichment-design.md](2026-09-10-takeout-enrichment-design.md),
+> which replaces it after inspection of a real 45,900-file export.
+>
+> The design below assumed sidecars must be matched by transforming their
+> filenames, and built a combinatorial matcher with confidence tiers to manage
+> the risk of mis-pairing. **Every Takeout sidecar carries a `title` field
+> naming its own target file**, so an exact key exists and the ladder is
+> unnecessary. `sidecar_match` is now `exact | none`.
+>
+> The hazard the ladder guarded against is real and worth remembering: a mature
+> tool (GooglePhotosTakeoutHelper) shipped aggressive filename matching and
+> produced roughly **34.5% of GPS-tagged outputs with the wrong location**. The
+> new design avoids it by construction rather than by mitigation.
+>
+> Also corrected: that export contained **no truncated sidecar suffixes** at all
+> (longest filename 102 chars, intact). The truncation folklore is real
+> elsewhere but was not present here.
 
 #### Other quirks handled
 
@@ -470,7 +479,7 @@ Grounding validates **traceability, not truth**. It cannot catch a claim derived
 | Junk | query time | `junk_score` threshold; flags, not deletions |
 | Exclusion list | pre-selection | People / albums / **date ranges** removed from the candidate pool before any prompt is built |
 | Sensitive context | pre-selection | Flagged photos held back pending explicit confirmation |
-| Match-tier restriction | narration | Place/date claims from heuristic-tier sidecars are forbidden |
+| Match-tier restriction | matching | Satisfied by construction: sidecars match on their own `title` field, so no heuristic tier exists to guard against |
 | Untrusted-field handling | narration | Delimited, capped, ineligible for grounding |
 | Grounding | post-generation | Independent verifier, allowlisted inferences, eval-gated |
 | Music mood | selection | Deterministic mapping from recipe + FactSheet, **not** an LLM choice |
