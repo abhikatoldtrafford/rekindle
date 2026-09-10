@@ -9,13 +9,15 @@ count everything - which `EnrichReport` enforces in Task 6.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 from pathlib import Path
 from typing import NamedTuple
 
-from rekindle.models import Gps, Photo
+from rekindle.meta.timestamps import TzLookup, from_takeout
+from rekindle.models import Gps, Photo, PhotoMeta, TzSource
 from rekindle.sidecars import is_album_metadata, sidecar_target
 from rekindle.sources.folder import EXCLUDED_DIRS
 
@@ -398,3 +400,141 @@ def account(
             report.superseded += len(sidecars) - used
         else:
             report.orphaned += len(sidecars)
+
+
+# 20 timestamps in the reference export are shared by >=10 sidecars, covering
+# 907 records - one value on 618 of them. No 618 photos fire in one second;
+# these are Google's day- or year-granular guesses.
+CLUSTER_MIN = 10
+
+# After offset normalisation the -05:30 artefact is gone, so a tight bound now
+# means genuine disagreement. A day-wide tolerance would hide exactly the
+# broken-camera-clock cases (2016 EXIF vs 2020 Google) the flag exists for.
+CONFLICT_TOLERANCE = timedelta(minutes=1)
+
+
+def clustered_timestamps(index: SidecarIndex) -> frozenset[datetime]:
+    """photoTakenTime values shared by CLUSTER_MIN or more sidecars.
+
+    These are not 618 photos that fired in the same second - they are
+    Google's day- or year-granular guesses, indistinguishable from a real
+    timestamp except by how many sidecars repeat it verbatim.
+    """
+    counts: Counter[datetime] = Counter()
+    for sidecars in index.by_target.values():
+        for sidecar in sidecars:
+            if sidecar.taken_at_utc is not None:
+                counts[sidecar.taken_at_utc] += 1
+    return frozenset(ts for ts, n in counts.items() if n >= CLUSTER_MIN)
+
+
+def _has_real_date(meta: PhotoMeta) -> bool:
+    """A filesystem mtime - or a prior Takeout guess - is not knowing when a
+    photo was taken."""
+    return meta.taken_at_utc is not None and meta.tz_source not in (
+        TzSource.FILE_MTIME,
+        TzSource.NONE,
+        TzSource.TAKEOUT,
+    )
+
+
+def apply_sidecar(
+    photo: Photo,
+    sidecar: Sidecar,
+    clustered: frozenset[datetime],
+    report: EnrichReport,
+    tz_lookup: TzLookup | None = None,
+) -> None:
+    """Write `sidecar` onto `photo`, in place, per spec section 5.
+
+    Idempotent: running it twice with the same sidecar produces the same
+    record. That is why `people` replaces rather than unions, why
+    `exif_taken_at_utc` is written once and then left alone, and why
+    `from_takeout` is always fed the PRISTINE EXIF instant/source - never the
+    already-Takeout-derived state a first run left behind - by reconstructing
+    `EXIF_NAIVE` from `exif_taken_at_utc` when `tz_source` now reads TAKEOUT.
+    Skipping that reconstruction cannot re-fire rung 3 (`exif_naive -
+    google_utc`) on a second run and silently regresses local time to UTC.
+    """
+    meta = photo.meta
+
+    if sidecar.taken_at_utc is not None:
+        suppress = sidecar.taken_at_utc in clustered and _has_real_date(meta)
+        if suppress:
+            report.clustered_dates_suppressed += 1
+        else:
+            # Was the EXIF value a naive WALL CLOCK stamped UTC, or a true
+            # instant? Only the first needs its offset subtracted before it
+            # can be compared. Getting this wrong invents a conflict on every
+            # photo that already carried a correct OffsetTimeOriginal - 34%
+            # of them.
+            was_naive = meta.tz_source is TzSource.EXIF_NAIVE or (
+                meta.tz_source is TzSource.TAKEOUT and meta.exif_taken_at_utc is not None
+            )
+            # Keep the displaced EXIF instant BEFORE overwriting it, and only
+            # on the first enrich - on a re-run taken_at_utc is already
+            # Google's, and copying that here would erase the real one.
+            if meta.exif_taken_at_utc is None and _has_real_date(meta):
+                meta.exif_taken_at_utc = meta.taken_at_utc
+
+            utc, local, tz_source = from_takeout(
+                google_utc=sidecar.taken_at_utc,
+                existing_utc=meta.exif_taken_at_utc or meta.taken_at_utc,
+                existing_local=meta.taken_at_local,
+                existing_tz_source=(
+                    TzSource.EXIF_NAIVE
+                    if meta.tz_source is TzSource.TAKEOUT and meta.exif_taken_at_utc
+                    else meta.tz_source
+                ),
+                gps=meta.gps or sidecar.gps,
+                tz_lookup=tz_lookup,
+            )
+            if meta.taken_at_utc != utc:
+                report.dates_corrected += 1
+            meta.taken_at_utc = utc
+            meta.taken_at_local = local
+            meta.tz_source = tz_source
+
+            # Instants, after normalisation. from_takeout has already folded
+            # a pure timezone difference away, so anything left is real.
+            if meta.exif_taken_at_utc is not None:
+                normalised = meta.exif_taken_at_utc
+                if was_naive and local is not None:
+                    offset = local.utcoffset()
+                    if offset is not None:
+                        normalised = meta.exif_taken_at_utc - offset
+                conflict = abs(normalised - utc) > CONFLICT_TOLERANCE
+                if conflict and not photo.metadata_conflict:
+                    report.conflicts += 1
+                photo.metadata_conflict = photo.metadata_conflict or conflict
+
+    # People: REPLACE the previous Takeout contribution, keep everything else.
+    # A union can only grow, so a face tag corrected in Google Photos could
+    # never be retracted.
+    previous = set(meta.takeout_people)
+    kept = [name for name in meta.people if name not in previous]
+    before = len(meta.people)
+    meta.people = list(dict.fromkeys([*kept, *sidecar.people]))
+    meta.takeout_people = list(sidecar.people)
+    if len(meta.people) > before:
+        report.people_added += len(meta.people) - before
+
+    if meta.gps is None and sidecar.gps is not None:
+        meta.gps = sidecar.gps
+        report.gps_added += 1
+
+    if sidecar.description and (
+        meta.description is None or len(sidecar.description) > len(meta.description)
+    ):
+        meta.description = sidecar.description
+        report.descriptions_added += 1
+
+    if sidecar.favorite and not meta.favorite:
+        meta.favorite = True
+        report.favourites_added += 1
+
+    # Google's own flags. Archived means the user deliberately hid this photo.
+    meta.archived = meta.archived or sidecar.archived
+    meta.trashed = meta.trashed or sidecar.trashed
+
+    photo.sidecar_match = "exact"
