@@ -372,21 +372,63 @@ A separate **`Timeline` stage** owns all timing, transitions and beat alignment.
 
 ### 6.2 Recipes
 
-v1 set, chosen so every one works on **EXIF alone**:
+Memories come from **four kinds of grouping**, in descending order of how much
+we should trust them:
 
-| Recipe | Needs | Degrades how |
-|---|---|---|
-| `TripRecipe` | dates, GPS *(optional)* | Falls back to pure time-clustering without GPS |
-| `OnThisDayRecipe` | dates | — |
-| `AnniversaryRecipe` | dates | — |
-| `YearInReviewRecipe` | dates | — |
-| `FreeformRecipe` | embeddings | — |
+1. **Curated albums** — the user already decided these photos belong together.
+2. **Clusters** — geographic, temporal, and person, derived from metadata.
+3. **Relations across time** — the same place or people, years apart.
+4. **Semantic retrieval** — embeddings, for anything the above don't cover.
 
-`BeforeAndNowRecipe` requires person identity and therefore ships **only when a
-source supplies people** (XMP sidecars, or a later Immich/Takeout source). A
-recipe declares its required fields; the registry hides recipes whose
-requirements the current index cannot meet, rather than letting them fail
-mysteriously at run time.
+#### Albums are the strongest signal in the library
+
+Validated against a real 2,692-photo export: it contained **40 hand-made
+albums** — `Kashmir`, `Leh Ladakh`, `Gopalpur`, `Diwali Kali Puja 22`,
+`Mahasaptami, 2013`. Each is a memory the user already curated, already scoped,
+and **already titled in their own words**.
+
+This matters for guardrails as much as quality: a title taken from the user's
+own album name is grounded by construction, where an LLM-invented title is a
+claim needing verification. `AlbumRecipe` is therefore the highest-value recipe
+in v1 and the one to build first.
+
+The same export also showed **254 photos filed in two albums at once**
+(`ladakh` + `Leh Ladakh`, `Avyan` + `Gopalpur`), so album membership is
+many-to-many and overlapping albums must be reconciled rather than assumed
+disjoint.
+
+#### v1 recipe set
+
+| Recipe | Grouping | Needs | Degrades how |
+|---|---|---|---|
+| `AlbumRecipe` | curated | folder/album names | — (always available) |
+| `GeoClusterRecipe` | spatial | GPS | Unavailable without GPS; `doctor` reports coverage |
+| `TemporalClusterRecipe` | temporal | dates | Detects events as bursts of photo density |
+| `TripRecipe` | spatial + temporal | dates, GPS *(optional)* | Falls back to pure time-clustering |
+| `OnThisDayRecipe` | temporal | dates | — |
+| `AnniversaryRecipe` | temporal | dates | — |
+| `YearInReviewRecipe` | temporal | dates | — |
+| `FreeformRecipe` | semantic | embeddings | — |
+
+Requiring person data, and therefore shipping only where a source supplies it:
+
+| Recipe | Grouping |
+|---|---|
+| `PersonClusterRecipe` | everyone who appears with a given person |
+| `TogetherOverTimeRecipe` | A **and** B across the years — "me and Mom" |
+| `BeforeAndNowRecipe` | one person, maximally separated in time |
+
+A recipe **declares its required fields**, and the registry hides those the
+current index cannot satisfy rather than letting them fail mysteriously.
+
+#### Near-duplicate collapsing applies inside a memory, not just at index time
+
+Bursts are heavily represented in real libraries (the validation export is full
+of `_BURST000_COVER_TOP` / `_BURST001` sequences). A montage that shows six
+near-identical frames reads as broken. Every recipe's output therefore passes
+through near-duplicate collapsing — `phash` plus capture-time proximity, keeping
+the sharpest of each group — as a `Timeline` responsibility, so no recipe author
+has to remember it.
 
 ### 6.3 Router and FreeformRecipe
 

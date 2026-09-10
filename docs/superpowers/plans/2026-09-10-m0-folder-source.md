@@ -340,6 +340,9 @@ class SourceReport:
     duplicates_merged: int = 0
     edited_linked: int = 0
     sidecars_ignored: int = 0
+    orphan_sidecars: int = 0
+    motion_pairs: int = 0
+    excluded_dirs: int = 0
     with_date: int = 0
     with_gps: int = 0
     with_people: int = 0
@@ -549,7 +552,7 @@ def is_long_path(path: Path) -> bool:
 - [ ] **Step 4: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_identity.py -v`
-Expected: PASS (7 tests)
+Expected: PASS (10 tests)
 
 - [ ] **Step 5: Commit**
 
@@ -1169,6 +1172,30 @@ def build_library(root: Path) -> Path:
 
     # Not media.
     (root / "notes.txt").write_text("just some notes", encoding="utf-8")
+
+    # --- shapes observed in a real 2,692-photo Takeout export ---
+
+    # Deleted photos. Must never be indexed.
+    make_jpeg(root / "Trash" / "deleted.jpg", color=(5, 5, 5))
+
+    # A sidecar whose photo lives in an archive part the user never extracted.
+    # 44% of sidecars were orphaned this way in the validation export.
+    (year / "IMG_9999.jpg.supplemental-metadata.json").write_text(
+        json.dumps({"title": "IMG_9999.jpg"}), encoding="utf-8"
+    )
+
+    # A motion photo: Google exports the video component as a separate .MP file
+    # (ISO-BMFF, ftyp:isom) beside the still.
+    make_jpeg(album / "PXL_0001.jpg", color=(70, 140, 90),
+              taken=datetime(2025, 9, 6, 13, 3))
+    (album / "PXL_0001.MP").write_bytes(
+        b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2" + b"\x00" * 128
+    )
+
+    # The counter lands INSIDE the suffix when two photos share a filename.
+    (year / "DSC_0880.JPG.supplemental-metadata(1).json").write_text(
+        json.dumps({"title": "DSC_0880.JPG"}), encoding="utf-8"
+    )
 
     return root
 ```
@@ -1885,6 +1912,39 @@ def test_empty_directory_yields_empty_report(tmp_path):
     photos, report = _scan(root)
     assert photos == []
     assert report.files_seen == 0
+
+
+def test_trash_folder_is_never_indexed(tmp_path):
+    """Deleted photos must not become memories."""
+    root = build_library(tmp_path / "lib")
+    photos, report = _scan(root)
+    assert report.excluded_dirs >= 1
+    assert not any("deleted.jpg" == p.name for photo in photos for p in photo.paths)
+
+
+def test_orphan_sidecars_are_counted(tmp_path):
+    """A sidecar with no photo means archive parts are missing."""
+    root = build_library(tmp_path / "lib")
+    _, report = _scan(root)
+    assert report.orphan_sidecars >= 1
+
+
+def test_sidecar_target_strips_supplemental_metadata_and_counter():
+    from rekindle.sources.folder import _sidecar_target
+
+    assert _sidecar_target("IMG_1234.jpg.supplemental-metadata.json") == "IMG_1234.jpg"
+    assert _sidecar_target("DSC_0880.JPG.supplemental-metadata(1).json") == "DSC_0880.JPG"
+    assert _sidecar_target("IMG_1234.jpg.supplemental-metad.json") == "IMG_1234.jpg"
+    assert _sidecar_target("IMG_1234.jpg.json") == "IMG_1234.jpg"
+
+
+def test_motion_photo_video_is_indexed_as_video_and_paired(tmp_path):
+    root = build_library(tmp_path / "lib")
+    photos, report = _scan(root)
+    mp = [p for p in photos if any(x.suffix.lower() == ".mp" for x in p.paths)]
+    assert len(mp) == 1
+    assert mp[0].media_type is MediaType.VIDEO
+    assert report.motion_pairs == 1
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1928,6 +1988,7 @@ Also create an empty `src/rekindle/sources/__init__.py`.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -1950,6 +2011,13 @@ EDITED_SUFFIXES: tuple[str, ...] = (
 
 _SIDECAR_EXTS = {".json", ".xmp", ".aae", ".thm"}
 
+# Never index deleted photos. Verified present in a real Takeout export as
+# "Trash"; localised in other locales.
+EXCLUDED_DIRS = {
+    "trash", "bin", "papierkorb", "corbeille", "papelera", "cestino",
+    "prullenbak", "papperskorg", ".thumbnails", "@eadir",
+}
+
 
 class FolderSource:
     name = "folder"
@@ -1963,14 +2031,24 @@ class FolderSource:
         stem_index: dict[tuple[Path, str], str] = {}
         edited_pending: list[tuple[str, Path, str]] = []
 
+        media_names: set[str] = set()
+        sidecar_stems: list[str] = []
+
         for path in sorted(p for p in root.rglob("*") if p.is_file()):
             report.files_seen += 1
+
+            # Deleted photos must never become memories.
+            if any(part.lower() in EXCLUDED_DIRS for part in path.relative_to(root).parts[:-1]):
+                report.excluded_dirs += 1
+                continue
 
             if is_long_path(path):
                 report.long_paths.append(path)
 
             if path.suffix.lower() in _SIDECAR_EXTS:
                 report.sidecars_ignored += 1
+                if path.name != "metadata.json":
+                    sidecar_stems.append(_sidecar_target(path.name))
                 continue
 
             media_type, _fmt = sniff(path)
@@ -1986,6 +2064,7 @@ class FolderSource:
                 report.skip("unreadable")
                 continue
 
+            media_names.add(path.name)
             album = path.parent.name if path.parent != root else None
 
             # Register stem BEFORE the duplicate check. A photo that appears in
@@ -2027,6 +2106,19 @@ class FolderSource:
             if original and original != digest:
                 by_hash[digest].edited_of = original
                 report.edited_linked += 1
+
+        # A sidecar with no media file means that photo is in an archive part
+        # the user has not extracted. Measured at 44% on a real partial export -
+        # by far the most common way an index silently comes out half-empty.
+        report.orphan_sidecars = sum(1 for s in sidecar_stems if s not in media_names)
+
+        # Google exports motion photos as a separate .MP video beside the still.
+        report.motion_pairs = sum(
+            1
+            for p in by_hash.values()
+            for path in p.paths
+            if path.suffix.lower() == ".mp" and f"{path.stem}.jpg" in media_names
+        )
 
         photos = list(by_hash.values())
         report.media_indexed = len(photos)
@@ -2072,15 +2164,31 @@ class FolderSource:
 
 def _split_edited(stem: str) -> tuple[str, str | None]:
     for suffix in EDITED_SUFFIXES:
-        if stem.endswith(suffix):
+        if stem.lower().endswith(suffix):
             return stem[: -len(suffix)], suffix
     return stem, None
+
+
+def _sidecar_target(name: str) -> str:
+    """Media filename a Takeout sidecar refers to.
+
+    Verified against a real 5,006-sidecar export: the dominant form is
+    `IMG_1234.jpg.supplemental-metadata.json`, and when two photos share a
+    filename the counter lands INSIDE that suffix -
+    `DSC_0880.JPG.supplemental-metadata(1).json` - not after the extension.
+
+    That export contained no truncated suffixes (longest filename was 102
+    chars, intact). Truncation is well documented elsewhere though, and the
+    `met[a-z]*` wildcard costs nothing, so it stays.
+    """
+    stem = re.sub(r"\.supplemental-met[a-z]*(\(\d+\))?\.json$", "", name, flags=re.I)
+    return re.sub(r"\.json$", "", stem, flags=re.I)
 ```
 
 - [ ] **Step 5: Run test to verify it passes**
 
 Run: `uv run pytest tests/test_folder_source.py -v`
-Expected: PASS (12 tests)
+Expected: PASS (17 tests)
 
 If `test_edited_variant_links_to_its_original` fails, check that `stem_index` is
 populated *before* the duplicate-`continue`, not after.
@@ -2166,6 +2274,28 @@ def test_healthy_library_has_no_warnings():
     d = diagnose(_report(media_indexed=100, with_date=100, with_gps=80,
                          with_people=50, with_xmp=50))
     assert d.warnings == []
+
+
+def test_orphan_sidecars_produce_an_incomplete_export_warning():
+    """The single most common way a library comes out half-empty."""
+    d = diagnose(_report(media_indexed=2802, with_date=2802, with_people=1,
+                         sidecars_ignored=5013, orphan_sidecars=2211))
+    hits = [w for w in d.warnings if "INCOMPLETE EXPORT" in w]
+    assert len(hits) == 1
+    assert "2211" in hits[0]
+    assert "44.1%" in hits[0]
+
+
+def test_no_orphan_warning_when_export_is_complete():
+    d = diagnose(_report(media_indexed=100, with_date=100, with_people=5,
+                         sidecars_ignored=100, orphan_sidecars=0))
+    assert not any("INCOMPLETE EXPORT" in w for w in d.warnings)
+
+
+def test_excluded_trash_is_mentioned():
+    d = diagnose(_report(media_indexed=100, with_date=100, with_people=1,
+                         excluded_dirs=12))
+    assert any("trash" in w.lower() for w in d.warnings)
 ```
 
 ```python
@@ -2274,11 +2404,27 @@ def diagnose(report: SourceReport) -> Diagnosis:
             f"{len(report.long_paths)} long paths found (>=260 chars). On Windows, "
             "enable LongPathsEnabled or some files may be unreadable."
         )
+    if report.orphan_sidecars:
+        matched = max(report.sidecars_ignored - report.orphan_sidecars, 0)
+        denom = matched + report.orphan_sidecars
+        rate = round(100.0 * report.orphan_sidecars / denom, 1) if denom else 0.0
+        warnings.append(
+            f"INCOMPLETE EXPORT: {report.orphan_sidecars} metadata sidecars "
+            f"({rate}%) have no matching photo. Those photos are almost certainly "
+            "in Takeout archive parts you have not extracted yet. Extract every "
+            "part into the SAME folder before indexing, or your library will be "
+            "silently missing photos."
+        )
     if report.sidecars_ignored and total and report.sidecars_ignored >= total * 0.25:
         warnings.append(
             f"{report.sidecars_ignored} JSON/XMP sidecars were ignored. This looks "
             "like a Google Takeout export - the Takeout parser that reads those "
             "(face tags, descriptions) is not implemented yet."
+        )
+    if report.excluded_dirs:
+        warnings.append(
+            f"{report.excluded_dirs} files skipped in trash/system folders - "
+            "deleted photos are never indexed."
         )
     return Diagnosis(report=report, warnings=warnings)
 
@@ -2298,7 +2444,10 @@ def render(diagnosis: Diagnosis, console: Console) -> None:
     table.add_row("With XMP sidecar", str(r.with_xmp), f"{diagnosis.pct(r.with_xmp)}%")
     table.add_row("Duplicates merged", str(r.duplicates_merged), "")
     table.add_row("Edited variants linked", str(r.edited_linked), "")
+    table.add_row("Motion photo pairs", str(r.motion_pairs), "")
     table.add_row("Sidecars ignored", str(r.sidecars_ignored), "")
+    table.add_row("[yellow]Orphan sidecars[/yellow]", str(r.orphan_sidecars), "")
+    table.add_row("Excluded (trash/system)", str(r.excluded_dirs), "")
     table.add_row("Skipped", str(r.total_skipped), "")
     console.print(table)
 
@@ -2378,7 +2527,7 @@ def index(
 - [ ] **Step 5: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_doctor.py tests/test_cli.py -v`
-Expected: PASS (11 tests)
+Expected: PASS (14 tests)
 
 - [ ] **Step 6: Verify the CLI works end to end by hand**
 
