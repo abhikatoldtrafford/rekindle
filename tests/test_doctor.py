@@ -25,13 +25,21 @@ def test_zero_media_does_not_divide_by_zero():
 
 
 def test_warns_when_no_people_data():
-    d = diagnose(_report(media_indexed=100, with_people=0))
-    assert any("person" in w.lower() for w in d.warnings)
+    # with_date=100 so the low-date warning does not fire and stand in for
+    # this one - the mirror image of the trap the two tests below describe.
+    d = diagnose(_report(media_indexed=100, with_date=100, with_people=0))
+    assert any(w.startswith("No person data found") for w in d.warnings)
 
 
 def test_warns_when_date_coverage_is_low():
-    d = diagnose(_report(media_indexed=100, with_date=10))
-    assert any("date" in w.lower() for w in d.warnings)
+    """with_people=1 on purpose: at its default of 0 the "No person data
+    found in XMP sidecars... Use DATE-range and folder exclusions" warning
+    also fires, and one string containing the word "date" satisfied this
+    assertion on its own. Deleting the low-date block entirely left this test
+    green (verified). Assert the distinctive phrase, and silence the warning
+    that was standing in for it."""
+    d = diagnose(_report(media_indexed=100, with_date=10, with_people=1))
+    assert any(w.startswith("Low date coverage") for w in d.warnings)
 
 
 def test_warns_about_long_paths(tmp_path):
@@ -40,8 +48,12 @@ def test_warns_about_long_paths(tmp_path):
 
 
 def test_warns_about_unignored_json_sidecars():
-    d = diagnose(_report(media_indexed=100, with_date=100, json_sidecars=40))
-    assert any("takeout" in w.lower() or "sidecar" in w.lower() for w in d.warnings)
+    """Same trap as above: the person warning names "XMP sidecars", so
+    `"sidecar" in w.lower()` was satisfied whether or not this block existed.
+    Match the phrase only this warning uses."""
+    d = diagnose(_report(media_indexed=100, with_date=100, with_people=1, json_sidecars=40))
+    assert any("Google JSON sidecars" in w for w in d.warnings)
+    assert any("40" in w for w in d.warnings)
 
 
 def test_healthy_library_has_no_warnings():

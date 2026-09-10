@@ -39,6 +39,66 @@ def test_index_writes_photos_to_the_database(tmp_path):
         assert s.count() > 0
 
 
+def test_reindex_does_not_destroy_previously_merged_metadata(tmp_path):
+    """The DoD clause "does not destroy previously merged metadata" had no
+    coverage at all: `test_index_twice_does_not_duplicate` below asserts only
+    a row count, so replacing PhotoStore._merge's merge_meta call with
+    `new.meta` left the entire suite green (verified) - the exact defect
+    merge_meta exists to prevent.
+
+    IMG_0003.jpg is the fixture's photo with no metadata whatsoever, so every
+    field asserted here can only have come from the enrichment. A real
+    capture date is included on purpose: the folder source always supplies
+    taken_at_utc via its mtime fallback, so a wholesale
+    `new if new.taken_at_utc else old` swap would look correct and quietly
+    overwrite a known date with a file timestamp on every single re-index.
+    """
+    from datetime import UTC, datetime
+
+    from rekindle.db import PhotoStore
+    from rekindle.models import TzSource
+
+    root = build_library(tmp_path / "lib")
+    data = tmp_path / "data"
+    db = data / "rekindle.sqlite"
+    assert runner.invoke(app, ["index", str(root), "--data-dir", str(data)]).exit_code == 0
+
+    known_date = datetime(2014, 7, 4, 11, 30, tzinfo=UTC)
+    with PhotoStore(db) as s:
+        plain = next(
+            s.get(h)
+            for h in s.all_hashes()
+            if any(x.name == "IMG_0003.jpg" for x in s.get(h).paths)
+        )
+        assert plain.meta.people == []
+        assert plain.meta.description is None
+        assert plain.meta.tz_source is TzSource.FILE_MTIME
+        target = plain.file_hash
+
+        # Enrichment of the kind a later source (or the user) contributes.
+        plain.meta.people = ["Ravi", "Meera"]
+        plain.meta.description = "the afternoon on the terrace"
+        plain.meta.keywords = ["terrace"]
+        plain.meta.favorite = True
+        plain.meta.taken_at_utc = known_date
+        plain.meta.taken_at_local = known_date
+        plain.meta.tz_source = TzSource.EXIF_OFFSET
+        s.upsert_many([plain])
+
+    assert runner.invoke(app, ["index", str(root), "--data-dir", str(data)]).exit_code == 0
+
+    with PhotoStore(db) as s:
+        after = s.get(target)
+    assert after is not None
+    assert after.meta.people == ["Ravi", "Meera"]
+    assert after.meta.description == "the afternoon on the terrace"
+    assert after.meta.keywords == ["terrace"]
+    assert after.meta.favorite is True
+    # A known capture date must not be overwritten by the mtime fallback.
+    assert after.meta.taken_at_utc == known_date
+    assert after.meta.tz_source is TzSource.EXIF_OFFSET
+
+
 def test_index_twice_does_not_duplicate(tmp_path):
     root = build_library(tmp_path / "lib")
     data = tmp_path / "data"

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 from types import TracebackType
@@ -219,10 +219,6 @@ class PhotoStore:
             "SELECT * FROM photos WHERE file_hash = ?", (file_hash,)
         ).fetchone()
         return self._row_to_photo(row) if row else None
-
-    def iter_photos(self) -> Iterator[Photo]:
-        for row in self._conn.execute("SELECT * FROM photos"):
-            yield self._row_to_photo(row)
 
     @staticmethod
     def _row_to_photo(row: sqlite3.Row) -> Photo:

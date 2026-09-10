@@ -107,7 +107,10 @@ def test_get_returns_none_for_unknown_hash(tmp_path):
         assert s.get("nope") is None
 
 
-def test_all_hashes_supports_incremental_scan(tmp_path):
+def test_all_hashes_returns_every_stored_hash(tmp_path):
+    # Named for what it actually checks. Incremental scan is an explicit
+    # scope cut in the M0 plan - nothing here exercises it, and the old name
+    # claimed a capability the code does not have.
     with PhotoStore(tmp_path / "db.sqlite") as s:
         s.upsert_many([_photo("h1"), _photo("h2")])
         assert s.all_hashes() == {"h1", "h2"}
