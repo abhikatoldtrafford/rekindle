@@ -1,8 +1,18 @@
-# Connecting your Google Photos library
+# Exporting from Google Photos
 
-> **TL;DR** — Google removed the API that could read your library. Google Takeout
-> is now the only way to get your photos *with* their face tags, GPS and
-> descriptions. Start the export first; it takes hours to days.
+> **You may not need this page.** rekindle v1 reads a **folder**. If your photos
+> are already on disk, just point it at them — no export required.
+>
+> This page is for getting photos *out* of Google Photos. Once extracted, the
+> result is an ordinary directory that rekindle indexes like any other, reading
+> dates, GPS and camera data from EXIF.
+>
+> A dedicated Takeout parser that also reads Google's JSON sidecars — recovering
+> face tags and descriptions that EXIF doesn't carry — is the next source
+> planned. Everything below about Takeout's quirks applies to it.
+
+> **TL;DR** — Google removed the API that could read your library. Takeout is
+> the only way out, and it takes hours to days. Start it early.
 
 ## Why not just use the API?
 

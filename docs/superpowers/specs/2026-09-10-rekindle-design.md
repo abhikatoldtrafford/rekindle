@@ -32,9 +32,10 @@ Precisely what was and wasn't available:
 - **Face groupings** were never exposed by any API. Correct.
 - **Content labels** *were* exposed — as a search filter only. `mediaItems.search` accepted a `contentFilter` with 26 fixed categories (`SCREENSHOTS`, `RECEIPTS`, `DOCUMENTS`, `SELFIES`, `PEOPLE`, `LANDSCAPES`, …). Labels were never returned per-item, and the filter died with the scopes. This is why §5.2 must rebuild junk classification locally.
 
-### 2.2 What Takeout actually gives us
+### 2.2 What Takeout gives us — deferred past v1
 
-Takeout is the primary ingestion path, but its coverage is narrower than v1 claimed:
+**Takeout is not a v1 component** (see §3.1). Recorded here because it is the
+next source to land, and because its limits are widely misunderstood:
 
 - It exports **only media the user uploaded**. Photos other people contributed to shared or collaborative albums are **silently excluded**. For a memories product this is the worst possible gap — weddings and group trips are disproportionately other people's uploads. `doctor` must detect and report suspected sparse albums; the docs must state it plainly.
 - **Face tags (`people[]`) are unavailable in Illinois and Texas** (BIPA/CUBI) and are opt-in elsewhere. Any feature depending on them degrades silently. This directly limits the exclusion-list guardrail — see §7.2.
@@ -55,17 +56,34 @@ RTX A4000 16GB, Ryzen 5 5600GT (6c/12t), 96GB RAM, Python 3.13, ffmpeg. Library 
 
 ```
 sources/  ->  enrich/  ->  index/  ->  memory/  ->  render/
-takeout       prefilter    SQLite     recipes      MemorySpec
-folder        embed        + vectors  timeline     web player
+folder        prefilter    SQLite     recipes      MemorySpec
+              embed        + vectors  timeline     web player
               postfilter              narrate      ffmpeg mp4
                                       verify
 ```
+
+### 3.1 v1 scope: folders only
+
+**v1 ships exactly one source: a local directory.** No Google integration, no
+OAuth, no API clients, no vendor-specific parsing.
+
+The reasoning: rekindle's value is the memory engine, and every integration is
+friction between a user and finding out whether that engine is any good. A
+directory works for everyone immediately — including anyone who has already
+extracted a Takeout export, which is just a folder of JPEGs. Integrations are
+`Source` implementations and can land any time; the engine cannot.
+
+This also means **v1 has no dependency on any vendor's API policy**, which is
+what made the original design fragile.
+
+Deferred, in likely order: Takeout parser (§5.1), Immich (a real REST API with
+people and face regions), Apple Photos via `osxphotos` (face regions too).
 
 Three protocols carry all extensibility:
 
 | Protocol | Implementations | Contributor story |
 |---|---|---|
-| `Source` | takeout, folder | Add Immich, Apple Photos, Nextcloud |
+| `Source` | **folder** (v1) | Add Immich, Apple Photos, Takeout, Nextcloud |
 | `Embedder` / `Captioner` / `Narrator` | siglip-local, openai, ollama, template, fake | Add a model backend |
 | `Recipe` | trip, anniversary, before_and_now, year_in_review, freeform | **Add a memory type** |
 
@@ -137,7 +155,43 @@ The only input to narration. Field values are carried with their trust class, so
 
 ## 5. Ingestion and enrichment
 
-### 5.1 Takeout parser (highest-risk component)
+### 5.0 Folder source — the only v1 source
+
+Walks a directory tree and normalises what it finds. Deliberately dumb.
+
+**Metadata comes from the files themselves**, in preference order:
+
+1. **XMP sidecar** (`photo.jpg.xmp` / `photo.xmp`) — where present, the richest
+   source available. Lightroom, digiKam and `osxphotos` all write person names
+   and **face regions** (`mwg-rs:Regions`) here, plus keywords and ratings. A
+   library with XMP sidecars keeps person-based memories and face-aware
+   cropping; one without does not.
+2. **EXIF/IPTC embedded** — timestamps, GPS, camera, orientation, and IPTC
+   keywords / `PersonInImage` where present.
+3. **Filesystem** — mtime as a last-resort date; the containing directory name
+   as a pseudo-album.
+
+**Consequences of EXIF-only libraries**, stated plainly because they shape §6:
+
+- **No people** means no `BeforeAndNowRecipe`, and person exclusions are
+  unavailable. Date-range and folder exclusions carry the guardrail (§7.2) —
+  which the audit found were the reliable primitives anyway.
+- **GPS is sparse.** Well under half of a typical library has it, so
+  `TripRecipe` must degrade to time-clustering when coordinates are missing.
+
+`doctor` reports coverage for each: dates, GPS, people, XMP sidecars, media
+types, and anything unreadable.
+
+**Media types, magic-byte sniffed** (§5.4). Never trust an extension.
+
+**Identity and incremental scan** work exactly as §4.1 describes — `file_hash`
+keyed, so re-scanning a directory is idempotent and only new files cost work.
+Files that disappear are never deleted from the index; `last_seen` is retained.
+
+### 5.1 Takeout parser (deferred past v1)
+
+Retained here because it is the next source planned, and because the audit's
+findings about it are worth not relearning. Nothing in this section ships in v1.
 
 #### Sidecar matching is a data-correctness problem, not a coverage problem
 
@@ -239,7 +293,21 @@ A separate **`Timeline` stage** owns all timing, transitions and beat alignment.
 
 ### 6.2 Recipes
 
-v1 set: `TripRecipe` (GPS + time clustering), `AnniversaryRecipe`, `BeforeAndNowRecipe`, `YearInReviewRecipe`, `FreeformRecipe`.
+v1 set, chosen so every one works on **EXIF alone**:
+
+| Recipe | Needs | Degrades how |
+|---|---|---|
+| `TripRecipe` | dates, GPS *(optional)* | Falls back to pure time-clustering without GPS |
+| `OnThisDayRecipe` | dates | — |
+| `AnniversaryRecipe` | dates | — |
+| `YearInReviewRecipe` | dates | — |
+| `FreeformRecipe` | embeddings | — |
+
+`BeforeAndNowRecipe` requires person identity and therefore ships **only when a
+source supplies people** (XMP sidecars, or a later Immich/Takeout source). A
+recipe declares its required fields; the registry hides recipes whose
+requirements the current index cannot meet, rather than letting them fail
+mysteriously at run time.
 
 ### 6.3 Router and FreeformRecipe
 
@@ -344,15 +412,28 @@ This is the highest-leverage artifact in the project. Without it, "add a recipe"
 
 Re-sequenced so that **guardrails precede the thing they guard**. v1 shipped LLM narration in M1 with all guardrails in M2.
 
-**M0 — foundation.** Takeout parser (match tiers, incremental merge, media types) + `doctor` + synthetic fixtures + folder source + SQLite schema. No models, no LLM. Independently useful, highest-risk, fully CI-testable.
+**M0 — foundation.** Folder source (XMP/EXIF/IPTC, magic-byte sniffing, media
+types, incremental scan) + `doctor` + synthetic fixtures + SQLite schema. No
+models, no LLM, no network. Fully CI-testable, and usable by anyone with a
+directory of photos on day one.
 
-**M1 — memories without an LLM.** Embeddings + vector store + prefilter/postfilter + `TripRecipe` + `Timeline` + **`TemplateNarrator`** + exclusion list + sensitive gating + web player + transcript. Proves the entire pipeline with no model in the loop, and doubles as the mandatory offline path.
+**M1 — memories without an LLM.** Embeddings + vector store +
+prefilter/postfilter + `TripRecipe` + `Timeline` + **`TemplateNarrator`** +
+exclusion list + sensitive gating + web player + transcript. Proves the whole
+pipeline with no model in the loop, and doubles as the mandatory offline path.
 
-**M2 — LLM layer.** Router + `LLMNarrator` + independent verifier + grounding eval set + cost estimation, caps and dry-run.
+**M2 — LLM layer.** Router + `LLMNarrator` + independent verifier + grounding
+eval set + cost estimation, caps and dry-run.
 
-**M3 — breadth.** Remaining recipes + `FreeformRecipe` + ffmpeg export + conformance suite + beat-synced music + CC0 corpus and recipe eval harness.
+**M3 — breadth.** Remaining recipes + `FreeformRecipe` + ffmpeg export +
+renderer conformance suite + beat-synced music + CC0 corpus and recipe eval
+harness.
 
-**M4 — automation.** Scheduler (default off) + feedback loop + onboarding + optional Picker.
+**M4 — automation.** Scheduler (default off) + feedback loop + onboarding.
+
+**Post-v1 — sources.** Takeout parser (§5.1), then Immich, then Apple Photos via
+`osxphotos`. The latter two supply people *and* face regions, which unlocks
+`BeforeAndNowRecipe` and face-aware cropping.
 
 ## 11. Open risks
 

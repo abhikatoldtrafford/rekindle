@@ -3,17 +3,19 @@
 **Turn your photo library into memories.**
 
 rekindle finds the photos that belong together — a trip, an anniversary, a
-person across a decade — and stitches them into a short narrated montage set to
+season in one place — and stitches them into a short narrated montage set to
 music. Ask for one in plain language, or let it surface them on its own.
 
 ```
-rekindle memory "Goa trip 2014"
-rekindle memory "me and Mom over the years"
+rekindle index ~/Pictures
+rekindle memory "our trip to the coast, 2014"
 rekindle memory --auto          # anniversaries, "N years ago today"
 ```
 
-Runs entirely on your machine. The default configuration makes no network calls
-at all.
+Point it at a folder. That's the whole setup.
+
+Runs entirely on your machine — the default configuration makes no network
+calls at all, and needs no API key.
 
 > **Status: early development.** The design is settled and written up in
 > [the design spec](docs/superpowers/specs/2026-09-10-rekindle-design.md), which
@@ -24,19 +26,37 @@ at all.
 
 ## Getting your photos in
 
-**Google removed the API that could read your library** after 31 March 2025, so
-there is no "connect to Google Photos" button any more — not in rekindle, not in
-anything else. Google Takeout is the only route that still carries face tags,
-GPS and descriptions.
+**v1 reads a directory.** No accounts, no OAuth, no API keys, no vendor lock-in.
+If your photos are on disk — a NAS, an external drive, a phone backup folder, an
+export from anywhere — rekindle can use them now.
 
-The export takes hours, so **start it before anything else**:
+Metadata comes from the files themselves:
 
-**[→ Connecting your Google Photos library](docs/connecting-google-photos.md)**
+| Source | Gives you |
+|---|---|
+| **XMP sidecars** (Lightroom, digiKam, osxphotos) | Person names **and face regions**, keywords, ratings |
+| **EXIF / IPTC** | Date taken, GPS, camera, orientation, keywords |
+| **Filesystem** | Folder names as albums, mtime as a fallback date |
 
-Since June 2026 scheduled Takeout exports are *incremental*, which makes them a
-genuine recurring feed. rekindle merges each delta into your existing index.
+`rekindle doctor` tells you what coverage you actually have before you index.
 
-rekindle also reads plain folders, so it works with any photo collection.
+### If your photos are in Google Photos
+
+Google removed the API that could read your library after 31 March 2025, so
+there's no connector — not in rekindle, not in anything else. Export with Google
+Takeout, extract it, and point rekindle at the folder. You'll get dates, GPS and
+camera data from EXIF.
+
+A dedicated Takeout parser that also reads Google's JSON sidecars — recovering
+face tags and descriptions — is the next source planned.
+
+**[→ Exporting from Google Photos](docs/connecting-google-photos.md)**
+
+### Other libraries
+
+Immich, Apple Photos, Nextcloud and PhotoPrism all expose their libraries
+properly, and several give face regions that Google never did. Each is one
+`Source` implementation: [writing-sources.md](docs/writing-sources.md).
 
 ## Quick start
 
@@ -45,19 +65,19 @@ git clone https://github.com/abhikatoldtrafford/rekindle
 cd rekindle
 uv sync
 
-cp .env.example .env      # optional — the defaults are fully offline
-
-rekindle doctor           # validate your Takeout export
-rekindle index            # build the local index
-rekindle serve            # open the player
+rekindle doctor ~/Pictures    # what metadata do you actually have?
+rekindle index ~/Pictures     # build the local index
+rekindle serve                # open the player
 ```
+
+No `.env` needed unless you want the optional LLM narration.
 
 ## How it works
 
 ```
-Takeout / folders
+a folder of photos
         ↓
-  parse + match          sidecar matching, with confidence tiers
+  read metadata          XMP → EXIF/IPTC → filesystem
         ↓
   local embeddings       SigLIP on your GPU, or CPU
         ↓
@@ -80,11 +100,11 @@ had every guardrail applied, and its choices are validated against that pool.
 Memories touch a nerve. rekindle tries hard not to hurt you, and is honest about
 where it can't guarantee that:
 
-- **Exclusion list** — blocklist date ranges, albums or people. Applied before
+- **Exclusion list** — blocklist date ranges, folders or people. Applied before
   anything else runs.
 - **Sensitive contexts** — likely-painful material is held back for your
-  confirmation, and every memory has a "not this person / not this period /
-  never again" action that feeds back into the exclusion list.
+  confirmation, and every memory has a "not this period / never again" action
+  that feeds back into the exclusion list.
 - **Verified narration** — an independent verifier checks each claim against
   your metadata. Claims it can't substantiate are rejected, not published.
 - **Junk filtering** — screenshots and receipts stay out of your memories.
@@ -95,30 +115,32 @@ where it can't guarantee that:
 
 We'd rather tell you than let you find out:
 
-- **Blocking a *person* only removes photos tagged with them.** Untagged photos
-  of that person will still appear. Face tags are opt-in, and unavailable in
-  Illinois and Texas. **Date-range and album exclusions are reliable; person
-  exclusions are best-effort.**
+- **Person features need person data.** Without XMP sidecars, rekindle doesn't
+  know who is in a photo, so person-based memories and person exclusions are
+  unavailable. **Date-range and folder exclusions always work** — prefer them.
+- **GPS is sparse** in most libraries, so trip detection falls back to clustering
+  by time alone.
 - **Sensitive-context detection is weak on the cases that hurt most.** It can
   see a hospital; it cannot know someone has died, or that a trip ended a
   relationship. That's what the exclusion list and feedback action are for.
-- **Takeout doesn't include photos other people added to shared albums.** Group
-  trips and weddings may be thinner than you remember.
 
 ## Privacy
 
-Everything runs locally by default — no API key needed, no network calls made.
-If you enable the OpenAI providers, only photos that reach a memory are sent for
-captioning, never your whole library. See [SECURITY.md](SECURITY.md).
+Everything runs locally by default — no API key needed, no network calls made,
+and your original files are never modified. If you enable the OpenAI providers,
+only photos that reach a memory are sent for captioning, never your whole
+library. See [SECURITY.md](SECURITY.md).
 
 ## Contributing
 
-The easiest and most valuable contribution is **a new memory type**. A recipe is
-one file implementing one protocol, registered via entry points, with no core
-changes: [writing-recipes.md](docs/writing-recipes.md).
+Two high-value contributions, neither requiring core changes:
 
-New photo sources (Apple Photos, Immich, Nextcloud) and model backends are
-equally welcome. See [CONTRIBUTING.md](CONTRIBUTING.md).
+- **A new memory type** — one file implementing one protocol:
+  [writing-recipes.md](docs/writing-recipes.md)
+- **A new photo source** — Immich, Apple Photos, Nextcloud:
+  [writing-sources.md](docs/writing-sources.md)
+
+See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
