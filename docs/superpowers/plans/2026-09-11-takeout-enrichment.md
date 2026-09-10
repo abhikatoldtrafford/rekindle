@@ -16,7 +16,7 @@
 - **No new runtime dependencies.** Everything here is stdlib plus what M0 already installs.
 - **No network calls anywhere.** A test that needs the network is a broken test.
 - **Cross-platform: Windows, macOS, Linux.** Use `pathlib` exclusively. Never hardcode `/` or `\`.
-- **Match on the sidecar's own FILENAME, never on its `title` field.** Measured across 24,248 real sidecars: `title` yields 19,358 correct pairs, filename yields 20,322. `title` is a cross-check only.
+- **Match on the sidecar's own FILENAME, never on its `title` field.** The property that holds is COLLISION REDUCTION, not a higher raw match count: measured across 24,248 real sidecars, keying on `title` leaves 4,737 sidecars beyond the first claiming one photo, keying on the filename leaves 3,772 — the 965 that `title` mis-pairs. Raw matches actually fall by 4 (five `(N)` sidecars correctly become orphans because their photo is in an un-extracted archive part). `title` is a cross-check only.
 - **The counter is RELOCATED, not stripped.** `DSC00107.JPG.supplemental-metadata(1).json` targets `DSC00107(1).JPG`, not `DSC00107.JPG`.
 - **Never let dictionary insertion order resolve a collision.** If two sidecars claim one photo and disagree on capture time or people, refuse to enrich and count it.
 - **Filename lookups casefold.** Directory identity is the `Path`.
@@ -74,7 +74,7 @@ every field and destroyed enrichment on every re-index".
   - `PhotoMeta.takeout_people: list[str]`
   - `Photo.sidecar_match: str` (`"exact"` | `"ambiguous"` | `"none"`)
   - `db.SCHEMA_VERSION == 2`
-  - `photo_paths(file_hash TEXT, path TEXT)` table with `idx_photo_paths_path`
+  - `photo_paths(file_hash, path, name_cf, parent)` table with index `idx_photo_paths_name`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -233,8 +233,15 @@ class PhotoMeta:
     # A flat union can only ever grow.
     takeout_people: list[str] = field(default_factory=list)
     # Google's own flags. Archived means the user deliberately hid this photo;
-    # it must never surface in a montage.
+    # it must never surface in a montage. 162 rows on the reference export.
     archived: bool = False
+    # EXPECTED TO BE PERMANENTLY ZERO FOR TAKEOUT. All 12 `trashed: true`
+    # sidecars on the reference export live under `Trash/`, which both
+    # FolderSource and build_index exclude, so the photo never reaches the
+    # store to be flagged. The field exists for sources that expose a
+    # soft-delete flag WITHOUT segregating the files - Immich and Apple Photos
+    # both do. If a Takeout run ever reports a non-zero count here, Google has
+    # changed the export layout and the exclusion needs revisiting.
     trashed: bool = False
 ```
 
@@ -507,8 +514,15 @@ date wins" would silently reject Google's date.
 - Produces:
   - `PhotoStore.iter_photos() -> Iterator[Photo]`
   - `PhotoStore.update_photo(photo: Photo) -> None` — writes without merging
+  - `PhotoStore.update_many(photos: Iterable[Photo]) -> int` — the batched form, consumed by Task 11
   - `PhotoStore.get_meta(key: str) -> str | None`
   - `PhotoStore.set_meta(key: str, value: str) -> None`
+
+**Deviation from the spec, recorded deliberately:** spec §8 names this method
+`update_meta(file_hash, meta, ...)`. It ships as `update_photo(photo)` instead,
+because enrichment also changes `albums`, `sidecar_match` and
+`metadata_conflict`, none of which live on `PhotoMeta`. A `meta`-only signature
+would need three more parameters to say the same thing.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -590,6 +604,12 @@ Expected: FAIL — `AttributeError: 'PhotoStore' object has no attribute 'iter_p
     def iter_photos(self) -> Iterator[Photo]:
         """Every row, streamed. The enricher needs all of them and `get()` per
         hash would be one SELECT per photo - 19,480 of them on a real export.
+
+        WARNING: this yields from a LIVE cursor. Writing to this store while
+        iterating it is undefined behaviour in SQLite - the same hazard
+        `_migrate` calls `.fetchall()` to avoid. Callers that write must
+        materialise first: `photos = list(store.iter_photos())`, which is what
+        TakeoutEnricher does.
         """
         for row in self._conn.execute("SELECT * FROM photos"):
             yield self._row_to_photo(row)
@@ -794,8 +814,15 @@ def is_album_metadata(name: str) -> bool:
     return name.casefold() == "metadata.json"
 ```
 
-In `src/rekindle/sources/folder.py`, delete the local `_sidecar_target` function
-and its regexes, and add the re-export near the other imports:
+In `src/rekindle/sources/folder.py`:
+
+1. Delete the local `_sidecar_target` function and its two module-level regexes.
+2. **Delete `import re`** — that function held its last use, and leaving it is
+   `F401 imported but unused`, which fails the Definition of Done.
+3. Add the re-export **immediately after** `from rekindle.models import (...)`,
+   not merely "near the other imports": `rekindle.sidecars` sorts after
+   `rekindle.models` and before `rekindle.sources`, and anywhere else is
+   `I001 un-sorted imports`.
 
 ```python
 from rekindle.sidecars import sidecar_target as _sidecar_target
@@ -1212,6 +1239,12 @@ from tests.fixtures.takeout import build_takeout
 
 
 def test_the_tree_reproduces_every_measured_pathology(tmp_path):
+    """This test verifies NO production code. It is a fixture asserting the
+    fixture, and it earns its place only as a drift guard: build_takeout() is
+    the behavioural spec for Tasks 6, 9, 11 and 12, so a change to the tree
+    that quietly removes a pathology would otherwise weaken four task suites
+    at once with all of them still green. Keep it, and do not mistake it for
+    coverage."""
     root = build_takeout(tmp_path / "Takeout")
     year = root / "Photos from 2011"
 
@@ -1439,8 +1472,10 @@ each gets its own `file_hash`.
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `uv run pytest tests/test_takeout_fixtures.py -v`
-Expected: all pass
+Run: `uv run pytest tests/test_takeout_fixtures.py -v && uv run ruff format tests/`
+Expected: all pass. `ruff format` rewrites `tests/fixtures/takeout.py` as
+transcribed above (line lengths in `_sidecar` call sites); run it before
+committing or `ruff format --check .` fails at the Definition of Done.
 
 - [ ] **Step 5: Commit**
 
@@ -1504,12 +1539,12 @@ def test_the_counter_variant_gets_its_own_sidecar(tmp_path):
     index = build_index(root, EnrichReport())
     year = root / "Photos from 2011"
 
-    plain, match = resolve(_photo(year / "DSC00107.JPG"), index)
+    plain, match, _tie = resolve(_photo(year / "DSC00107.JPG"), index)
     assert match == "exact"
     assert plain.taken_at_utc == datetime.fromtimestamp(1323826707, UTC)
     assert plain.people == ("Grace",)
 
-    counter, match = resolve(_photo(year / "DSC00107(1).JPG"), index)
+    counter, match, _tie = resolve(_photo(year / "DSC00107(1).JPG"), index)
     assert match == "exact"
     assert counter.taken_at_utc == datetime.fromtimestamp(1295183562, UTC)
     assert counter.people == ("Ada",)
@@ -1519,7 +1554,7 @@ def test_a_sidecar_in_a_media_less_album_still_matches(tmp_path):
     """Per-directory keying loses 1,204 real photos this way."""
     root = build_takeout(tmp_path / "Takeout")
     index = build_index(root, EnrichReport())
-    found, match = resolve(_photo(root / "Photos from 2011" / "IMG_ALBUM.jpg"), index)
+    found, match, _tie = resolve(_photo(root / "Photos from 2011" / "IMG_ALBUM.jpg"), index)
     assert match == "exact"
     assert found.people == ("Ada",)
 
@@ -1528,10 +1563,13 @@ def test_same_directory_wins_over_a_distant_candidate(tmp_path):
     root = build_takeout(tmp_path / "Takeout")
     index = build_index(root, EnrichReport())
     year = root / "Photos from 2011"
-    found, match = resolve(_photo(year / "AMBIG.jpg"), index)
+    found, match, tie = resolve(_photo(year / "AMBIG.jpg"), index)
     assert match == "exact"
     assert found.path.parent == year
     assert found.people == ("Ada",)
+    # The Goa Trip candidate disagrees and was OVERRIDDEN, not refused. 942
+    # photos on the reference export; silent, it is invisible.
+    assert tie is True
 
 
 def test_disagreeing_candidates_with_no_directory_tiebreak_are_refused(tmp_path):
@@ -1540,7 +1578,7 @@ def test_disagreeing_candidates_with_no_directory_tiebreak_are_refused(tmp_path)
     root = build_takeout(tmp_path / "Takeout")
     index = build_index(root, EnrichReport())
     # A path in NEITHER candidate's directory, so preference cannot resolve it.
-    found, match = resolve(_photo(root / "Goa Trip" / "elsewhere" / "AMBIG.jpg"), index)
+    found, match, _tie = resolve(_photo(root / "Goa Trip" / "elsewhere" / "AMBIG.jpg"), index)
     assert match == "ambiguous"
     assert found is None
 
@@ -1548,7 +1586,7 @@ def test_disagreeing_candidates_with_no_directory_tiebreak_are_refused(tmp_path)
 def test_a_photo_with_no_sidecar_resolves_to_none(tmp_path):
     root = build_takeout(tmp_path / "Takeout")
     index = build_index(root, EnrichReport())
-    found, match = resolve(_photo(root / "Photos from 2011" / "IMG_EDIT-edited.jpg"), index)
+    found, match, _tie = resolve(_photo(root / "Photos from 2011" / "IMG_EDIT-edited.jpg"), index)
     assert found is None
     assert match == "none"
 
@@ -1578,7 +1616,16 @@ def test_build_index_buckets_every_json_file(tmp_path):
 
 
 def test_the_sidecar_accounting_identity_holds(tmp_path):
-    """THE test. v1 would have failed it by 984."""
+    """v1 would have failed this by 984.
+
+    On its own the identity is weak - `account()` partitions a set it builds
+    itself, so it cannot see anything downstream of indexing. The assertion
+    that actually bites is `matched == photos_enriched`, in
+    tests/test_takeout_enricher.py. This one pins the partition; that one ties
+    the partition to what reached the database.
+    """
+    from rekindle.enrich.takeout import account
+
     root = build_takeout(tmp_path / "Takeout")
     report = EnrichReport()
     index = build_index(root, report)
@@ -1588,16 +1635,41 @@ def test_the_sidecar_accounting_identity_holds(tmp_path):
         if p.is_file() and p.suffix.lower() in {".jpg", ".mp"} and "Trash" not in p.parts
     ]
     claimed: dict[str, str] = {}
+    applied: set[Path] = set()
     for photo in photos:
-        _, match = resolve(photo, index)
+        sidecar, match, _tie = resolve(photo, index)
         if match != "none":
             claimed[photo.paths[0].name.casefold()] = match
-    from rekindle.enrich.takeout import account
+        if sidecar is not None:
+            applied.add(sidecar.path)
 
-    account(index, claimed, report)
+    account(index, claimed, applied, report)
     assert report.sidecars_seen == report.sidecars_accounted
     assert report.orphaned >= 1  # IMG_MISSING
     assert report.ambiguous == 0  # AMBIG resolved by directory preference
+    # AMBIG has two candidates; one is applied, the other is SUPERSEDED. The
+    # first draft of this plan credited both to `matched`, which inflated it
+    # by 3,358 on a real export.
+    assert report.superseded == 1
+    assert report.matched == len(applied)
+
+
+def test_superseded_sidecars_are_reported_not_discarded(tmp_path):
+    """Delete the `superseded` line from account() and this fails.
+
+    The identity above would still pass, because the count would simply move
+    into `matched`. That is the exact shape of v1's bug.
+    """
+    from rekindle.enrich.takeout import account
+
+    root = build_takeout(tmp_path / "Takeout")
+    report = EnrichReport()
+    index = build_index(root, report)
+    year = root / "Photos from 2011"
+    sidecar, _match, _tie = resolve(_photo(year / "AMBIG.jpg"), index)
+    account(index, {"ambig.jpg": "exact"}, {sidecar.path}, report)
+    assert report.matched == 1
+    assert report.superseded == 1
 ```
 
 The 11 sidecars are: `DSC00107` x2, `AMBIG` x2, `IMG_ALBUM`, `IMG_EDIT`,
@@ -1622,12 +1694,16 @@ class EnrichReport:
 
         json_files_seen == sidecars_seen + album_metadata
                            + other_json + excluded_dirs + unparseable
-        sidecars_seen   == matched + orphaned + ambiguous
+        sidecars_seen   == matched + superseded + orphaned + ambiguous
 
-    The spec's section 7 gives only the second. Without the first, the 44
-    non-photo JSON files in a real export - album metadata,
-    shared_album_comments.json, user-generated-memory-titles.json - and every
-    parse failure fall out of the accounting entirely.
+    The spec's section 7 gives only the second, and without `superseded` in it
+    3,358 sidecars on the reference export are parsed and discarded with
+    nothing reporting it.
+
+    Neither identity can catch a bug downstream of indexing on its own - both
+    partition sets that `account()` builds. The check that CAN fail is
+    `matched == photos_enriched`, asserted end to end in Task 11: it ties the
+    accounting to what was actually written to the database.
     """
 
     json_files_seen: int = 0
@@ -1640,8 +1716,17 @@ class EnrichReport:
     matched: int = 0
     orphaned: int = 0
     ambiguous: int = 0
+    # Sidecars that named a photo we DID enrich but were not the one applied -
+    # a second or third candidate for the same file. 3,358 of them on the
+    # reference export; without this bucket they are discarded unreported.
+    superseded: int = 0
 
     photos_enriched: int = 0
+    # Photos where a same-directory candidate was preferred over a DISTANT one
+    # that disagreed with it. Spec-conformant (rule 1 outranks rule 3) but
+    # 942 on the reference export against an `ambiguous` count of 2, so
+    # leaving it unreported makes the hazard look negligible.
+    directory_preference_broke_a_tie: int = 0
     derivatives_enriched: int = 0
     people_added: int = 0
     dates_corrected: int = 0
@@ -1666,7 +1751,7 @@ class EnrichReport:
 
     @property
     def sidecars_accounted(self) -> int:
-        return self.matched + self.orphaned + self.ambiguous
+        return self.matched + self.superseded + self.orphaned + self.ambiguous
 
 
 @dataclass
@@ -1729,12 +1814,21 @@ def _disagree(a: Sidecar, b: Sidecar) -> bool:
     return a.taken_at_utc != b.taken_at_utc or set(a.people) != set(b.people)
 
 
-def resolve(photo: Photo, index: SidecarIndex) -> tuple[Sidecar | None, str]:
+def resolve(photo: Photo, index: SidecarIndex) -> tuple[Sidecar | None, str, bool]:
     """Find the one sidecar describing `photo`, or refuse.
+
+    Returns (sidecar, outcome, preference_broke_a_tie).
 
     1. A candidate in the same directory as one of the photo's paths wins.
     2. Otherwise, if the remaining candidates all agree, take the first.
     3. Otherwise REFUSE, and say so. Never let insertion order decide.
+
+    Rule 1 deliberately outranks rule 3, so a DISTANT candidate that disagrees
+    is overridden rather than refused. Measured on the reference export that
+    happens to 942 photos, and every disagreeing group has its candidates in
+    different directories - so rule 3 fires only 2 times. Left silent, doctor
+    prints an `ambiguous` count of 2 and the hazard looks negligible when it
+    is not. The third return value is what makes the override visible.
     """
     candidates: list[Sidecar] = []
     parents = {p.parent for p in photo.paths}
@@ -1743,35 +1837,49 @@ def resolve(photo: Photo, index: SidecarIndex) -> tuple[Sidecar | None, str]:
             if sidecar not in candidates:
                 candidates.append(sidecar)
     if not candidates:
-        return None, "none"
+        return None, "none", False
 
     same_dir = [s for s in candidates if s.path.parent in parents]
     if same_dir:
-        if all(not _disagree(same_dir[0], s) for s in same_dir[1:]):
-            return same_dir[0], "exact"
-        return None, "ambiguous"
+        chosen = same_dir[0]
+        if any(_disagree(chosen, s) for s in same_dir[1:]):
+            return None, "ambiguous", False
+        tie = any(
+            _disagree(chosen, s) for s in candidates if s.path.parent not in parents
+        )
+        return chosen, "exact", tie
 
     if all(not _disagree(candidates[0], s) for s in candidates[1:]):
-        return candidates[0], "exact"
-    return None, "ambiguous"
+        return candidates[0], "exact", False
+    return None, "ambiguous", False
 
 
-def account(index: SidecarIndex, claimed: dict[str, str], report: EnrichReport) -> None:
-    """Assign every indexed sidecar to exactly one of matched/orphaned/ambiguous.
+def account(
+    index: SidecarIndex,
+    claimed: dict[str, str],
+    applied: set[Path],
+    report: EnrichReport,
+) -> None:
+    """Partition every indexed sidecar into exactly one bucket.
 
-    Done after the photo loop, not during it, so the identity holds by
-    construction rather than by every branch remembering to increment. This is
-    the same post-walk reconciliation FolderSource uses for orphan_sidecars.
+    `claimed` maps a casefolded target to the resolution outcome; `applied`
+    holds the paths of the sidecars actually WRITTEN onto a photo.
 
-    `claimed` maps a casefolded target filename to the resolution outcome for
-    the photo that claimed it.
+    The `superseded` bucket is the whole point. Crediting `matched` with
+    `len(sidecars)` for every claimed target - as the first draft of this plan
+    did - inflated it by 3,358 on the reference export, because a target with
+    three candidates contributes one application and two discards. Those 3,358
+    were parsed and thrown away with nothing reporting it, which is precisely
+    v1's failure mode surviving inside the machinery built to prevent it.
     """
     for target, sidecars in index.by_target.items():
         outcome = claimed.get(target)
-        if outcome == "exact":
-            report.matched += len(sidecars)
-        elif outcome == "ambiguous":
+        if outcome == "ambiguous":
             report.ambiguous += len(sidecars)
+        elif outcome == "exact":
+            used = sum(1 for s in sidecars if s.path in applied)
+            report.matched += used
+            report.superseded += len(sidecars) - used
         else:
             report.orphaned += len(sidecars)
 ```
@@ -2515,11 +2623,31 @@ def test_retitling_is_idempotent():
     assert photo.albums == ["Goa/ Trip"]
 
 
-def test_renames_ignore_directories_with_no_metadata_json():
+def test_collision_resolution_does_not_depend_on_the_platform():
+    """Replaces a first-draft test whose scenario was unrepresentable:
+    index.albums only ever holds directories that HAD a metadata.json, so
+    "ignore directories without one" could not be constructed.
+
+    This one is real. sorted() on Path compares case-folded on Windows and raw
+    on POSIX, so which of two albums claiming one title wins would differ
+    between a contributor's machine and CI. M0 hit this exact bug.
+    """
+    # "Zulu" vs "beta" is chosen deliberately: raw ASCII puts 'Z' (0x5A)
+    # before 'b' (0x62), casefolding puts "beta" before "zulu". A pair like
+    # Alpha/beta orders the same either way and would NOT catch the bug.
+    #
+    # Verified: unfixed, this FAILS on Linux and macOS and PASSES on Windows,
+    # because PureWindowsPath already compares case-insensitively. That is the
+    # bug - the same code picking different albums on different machines - so
+    # do not conclude the test is inert from a green run on Windows. CI covers
+    # all three.
     index = SidecarIndex()
-    index.albums[Path("/lib/Kashmir")] = "Kashmir"
+    index.albums[Path("/lib/Zulu")] = "Shared"
+    index.albums[Path("/lib/beta")] = "Shared"
     report = EnrichReport()
-    assert album_renames(index, report) == {}
+    renames = album_renames(index, report)
+    assert renames == {"beta": "Shared"}
+    assert report.album_title_collisions == [("Zulu", "Shared")]
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -2542,7 +2670,14 @@ def album_renames(index: SidecarIndex, report: EnrichReport) -> dict[str, str]:
     """
     taken = {path.name for path in index.albums}
     renames: dict[str, str] = {}
-    for path, title in sorted(index.albums.items()):
+    # Sort by a stable, platform-independent key. `sorted()` on Path objects
+    # compares a case-folded form on Windows and a raw one on POSIX, so which
+    # album wins a title collision would differ between a contributor's
+    # machine and CI. M0 hit and fixed this exact bug in FolderSource.scan.
+    def _order(item: tuple[Path, str]) -> tuple[str, str]:
+        return str(item[0]).casefold(), str(item[0])
+
+    for path, title in sorted(index.albums.items(), key=_order):
         folder = path.name
         if title == folder:
             continue
@@ -2562,7 +2697,11 @@ def retitle_albums(photo: Photo, renames: dict[str, str], report: EnrichReport) 
     """
     updated = [renames.get(album, album) for album in photo.albums]
     if updated != photo.albums:
-        report.albums_retitled += sum(1 for a, b in zip(photo.albums, updated) if a != b)
+        # strict=True: the lists are the same length by construction, and
+        # bare zip() is `B905` under this project's ruff config.
+        report.albums_retitled += sum(
+            1 for a, b in zip(photo.albums, updated, strict=True) if a != b
+        )
         photo.albums = updated
 ```
 
@@ -2668,9 +2807,24 @@ def test_a_motion_video_inherits_from_its_still():
     report = EnrichReport()
     propagate_to_derivatives([still, video], report)
     assert video.meta.taken_at_utc == TAKEN
+    assert video.meta.taken_at_local == TAKEN
     assert video.meta.people == ["Ada"]
     assert video.sidecar_match == "inherited"
     assert report.derivatives_enriched == 1
+
+
+def test_an_inherited_date_never_claims_an_exif_provenance():
+    """A .MP video has no EXIF at all. Copying the still's `exif_offset`
+    onto it made doctor report a provenance that cannot exist, on 655 files."""
+    lib = Path("/lib/Photos from 2011")
+    meta = _enriched()
+    meta.tz_source = TzSource.EXIF_OFFSET
+    still = _photo("still", lib / "PXL_1.MP.jpg", meta, sidecar_match="exact")
+    video = _photo("vid", lib / "PXL_1.MP", PhotoMeta(), media_type=MediaType.VIDEO)
+    propagate_to_derivatives([still, video], EnrichReport())
+    assert video.meta.tz_source is TzSource.TAKEOUT
+    assert still.meta.tz_source is TzSource.EXIF_OFFSET  # the donor is untouched
+    assert video.meta.taken_at_utc == TAKEN
 
 
 def test_motion_pairing_is_scoped_to_one_directory():
@@ -2760,7 +2914,12 @@ def propagate_to_derivatives(photos: list[Photo], report: EnrichReport) -> list[
         dst = photo.meta
         dst.taken_at_utc = src.taken_at_utc
         dst.taken_at_local = src.taken_at_local
-        dst.tz_source = src.tz_source
+        # NOT src.tz_source. This file has no EXIF of its own, so copying
+        # `exif_offset` onto 655 .MP videos makes doctor report a provenance
+        # that cannot exist. The instant and the wall clock are copied intact -
+        # only the claim about where they came from changes, and for this row
+        # the answer is the Takeout pass, via its sibling.
+        dst.tz_source = TzSource.TAKEOUT
         dst.exif_taken_at_utc = dst.exif_taken_at_utc or src.exif_taken_at_utc
         previous = set(dst.takeout_people)
         kept = [name for name in dst.people if name not in previous]
@@ -2858,6 +3017,34 @@ def test_the_accounting_identities_hold_end_to_end(tmp_path):
     store.close()
 
 
+def test_matched_equals_photos_enriched(tmp_path):
+    """THE assertion that can fail.
+
+    Both identities above partition sets that `account()` builds itself, so
+    neither can see a sidecar parsed and then dropped somewhere downstream.
+    This one ties the accounting to what actually reached the database: every
+    sidecar counted as `matched` was written onto exactly one photo. Credit
+    `matched` with `len(sidecars)` instead of the applied count and this fails
+    immediately - by 3,358 on the reference export.
+    """
+    root, store = _indexed(tmp_path)
+    report = TakeoutEnricher().enrich(root, store)
+    assert report.matched == report.photos_enriched
+    assert report.superseded >= 1  # AMBIG's second candidate
+    store.close()
+
+
+def test_a_distant_disagreeing_candidate_is_reported_as_an_override(tmp_path):
+    """AMBIG.jpg has a same-directory sidecar and a disagreeing one in
+    Goa Trip. Rule 1 wins by design - but silently, doctor would print
+    `ambiguous: 0` and imply nothing was overridden. 942 photos on the
+    reference export."""
+    root, store = _indexed(tmp_path)
+    report = TakeoutEnricher().enrich(root, store)
+    assert report.directory_preference_broke_a_tie == 1
+    store.close()
+
+
 def test_derivatives_are_enriched_and_counted(tmp_path):
     root, store = _indexed(tmp_path)
     report = TakeoutEnricher().enrich(root, store)
@@ -2922,10 +3109,22 @@ def test_enrich_records_when_and_where_it_ran(tmp_path):
     store.close()
 
 
-def test_trashed_photos_are_never_enriched(tmp_path):
+def test_trash_sidecars_are_excluded_by_both_passes(tmp_path):
+    """Delete the EXCLUDED_DIRS check in build_index and this fails.
+
+    The first draft asserted `IMG_GONE.jpg` was absent from the store, which
+    FolderSource guarantees on its own - that test passed with enrich()'s body
+    deleted and said nothing about the enricher. This one pins the enricher's
+    own exclusion, and that the excluded sidecar is not miscounted as an
+    orphan (which would inflate doctor's INCOMPLETE EXPORT warning on a
+    complete library).
+    """
     root, store = _indexed(tmp_path)
-    TakeoutEnricher().enrich(root, store)
-    assert not any(p.paths[0].name == "IMG_GONE.jpg" for p in store.iter_photos())
+    report = TakeoutEnricher().enrich(root, store)
+    assert report.excluded_dirs == 1
+    assert "img_gone.jpg" not in {
+        p.paths[0].name.casefold() for p in store.iter_photos()
+    }
     store.close()
 
 
@@ -2985,17 +3184,21 @@ class TakeoutEnricher:
 
         photos = list(store.iter_photos())
         claimed: dict[str, str] = {}
+        applied: set[Path] = set()
         touched: dict[str, Photo] = {}
 
         for photo in photos:
-            sidecar, match = resolve(photo, index)
+            sidecar, match, tie = resolve(photo, index)
             for path in photo.paths:
                 key = path.name.casefold()
-                if key in index.by_target and match != "none":
-                    # "ambiguous" must not be downgraded by a later photo that
-                    # happens to resolve cleanly against the same key.
-                    if claimed.get(key) != "ambiguous":
-                        claimed[key] = match
+                # "ambiguous" must not be downgraded by a later photo that
+                # happens to resolve cleanly against the same key.
+                if (
+                    key in index.by_target
+                    and match != "none"
+                    and claimed.get(key) != "ambiguous"
+                ):
+                    claimed[key] = match
             if match == "ambiguous":
                 photo.sidecar_match = "ambiguous"
                 touched[photo.file_hash] = photo
@@ -3004,14 +3207,17 @@ class TakeoutEnricher:
                 continue
             apply_sidecar(photo, sidecar, clustered, report, tz_lookup=self._tz_lookup)
             retitle_albums(photo, renames, report)
+            applied.add(sidecar.path)
             report.photos_enriched += 1
+            if tie:
+                report.directory_preference_broke_a_tie += 1
             touched[photo.file_hash] = photo
 
         for photo in propagate_to_derivatives(photos, report):
             retitle_albums(photo, renames, report)
             touched[photo.file_hash] = photo
 
-        account(index, claimed, report)
+        account(index, claimed, applied, report)
 
         store.update_many(touched.values())
         store.set_meta("enrich_root", str(root))
@@ -3235,9 +3441,11 @@ def diagnose_index(store: PhotoStore) -> IndexDiagnosis:
         )
     if counts["ambiguous"]:
         warnings.append(
-            f"{counts['ambiguous']} photos had two or more sidecars that disagreed on "
-            "capture time or people, so they were deliberately NOT enriched. Guessing "
-            "would have put a third of them on the wrong date."
+            f"{counts['ambiguous']} photos had two or more sidecars IN THE SAME FOLDER "
+            "that disagreed on capture time or people, so they were deliberately not "
+            "enriched. This number is small by construction: a disagreeing sidecar in a "
+            "DIFFERENT folder is overridden rather than refused, and `rekindle enrich` "
+            "reports those separately. Do not read a low count here as no conflicts."
         )
     if counts["archived"]:
         warnings.append(
@@ -3282,8 +3490,10 @@ def render_enrich(report: EnrichReport, console: Console) -> None:
         ("JSON files seen", report.json_files_seen),
         ("Sidecars seen", report.sidecars_seen),
         ("  matched", report.matched),
-        ("  [yellow]orphaned[/yellow]", report.orphaned),
+        ("  superseded (another candidate won)", report.superseded),
+        ("  [yellow]orphaned (no row in the index)[/yellow]", report.orphaned),
         ("  [yellow]ambiguous (refused)[/yellow]", report.ambiguous),
+        ("  overridden by directory preference", report.directory_preference_broke_a_tie),
         ("Album metadata", report.album_metadata),
         ("Other JSON", report.other_json),
         ("Excluded (trash/system)", report.excluded_dirs),
@@ -3321,10 +3531,24 @@ def render_enrich(report: EnrichReport, console: Console) -> None:
             console.print(f"  {folder} -> {title}")
     if report.orphaned:
         console.print(
-            f"\n[yellow]![/yellow] {report.orphaned} sidecars name a photo that is not in "
-            "the index. Some belong to archive parts you have not extracted; others are "
+            f"\n[yellow]![/yellow] {report.orphaned} sidecars name a photo that has no row "
+            "in the index. Some belong to archive parts you have not extracted; others are "
             "album copies of photos Takeout did not duplicate. Extract every part into "
             "the SAME folder and re-run if the number is large."
+        )
+        console.print(
+            "  [dim]This deliberately does not equal doctor's own 'Orphan sidecars' row. "
+            "That one compares sidecars against FILES ON DISK during a scan; this one "
+            "compares them against ROWS IN THE INDEX, which excludes whatever the scan "
+            "skipped as non-media or unreadable. On a 45,900-file export the two read "
+            "2,444 and 2,565.[/dim]"
+        )
+    if report.directory_preference_broke_a_tie:
+        console.print(
+            f"\n[yellow]![/yellow] {report.directory_preference_broke_a_tie} photos had a "
+            "sidecar in another album that DISAGREED with the one used; the same-directory "
+            "copy was preferred. That is by design, but it is not the same as no conflict "
+            "existing - 942 of these on a 45,900-file export, against 2 outright refusals."
         )
 ```
 
@@ -3344,8 +3568,25 @@ def doctor(
 ) -> None:
     """Report what metadata a library has. Writes nothing."""
     if from_index:
-        with PhotoStore(data_dir / "rekindle.sqlite") as store:
-            render_index(diagnose_index(store), console)
+        # PhotoStore CREATES its database, so without this check `doctor
+        # --from-index` on a machine that has never indexed silently reports a
+        # healthy library of zero photos - and leaves a stray file behind.
+        db_path = data_dir / "rekindle.sqlite"
+        if not db_path.is_file():
+            console.print(
+                f"[red]No index at[/red] {db_path}. Run `rekindle index {root}` first."
+            )
+            raise typer.Exit(code=2)
+        with PhotoStore(db_path) as store:
+            diagnosis = diagnose_index(store)
+        render_index(diagnosis, console)
+        # `root` is otherwise unused on this path; warn rather than ignore it.
+        if diagnosis.index_root and diagnosis.index_root != str(root):
+            console.print(
+                f"
+[yellow]![/yellow] This index was built from {diagnosis.index_root}, "
+                f"not {root}. The report above describes the former."
+            )
         return
     _check_root(root)
     _photos, report = FolderSource().scan(root)
@@ -3487,7 +3728,16 @@ def test_every_json_file_lands_in_exactly_one_bucket(indexed):
     assert report.json_files_seen == report.files_accounted
 
 
-def test_every_indexed_sidecar_is_matched_orphaned_or_ambiguous(export, indexed):
+def test_every_indexed_sidecar_is_matched_superseded_orphaned_or_ambiguous(export, indexed):
+    """A partition check, and weak on its own - `account()` cannot fail it,
+    because it partitions the very set it is given. It is kept to pin the
+    arithmetic; `test_matched_equals_photos_enriched_on_a_real_export` below is
+    the one that can actually fail.
+
+    Note it applies exactly ONE sidecar per claimed target, so the rest land in
+    `superseded`. Passing `applied=set()` here would put all of them there,
+    which is also a valid partition - that is precisely why this test is weak.
+    """
     index, report = indexed
     media = {
         p.name.casefold()
@@ -3495,32 +3745,58 @@ def test_every_indexed_sidecar_is_matched_orphaned_or_ambiguous(export, indexed)
         if p.is_file() and p.suffix.casefold() != ".json"
     }
     claimed = {target: "exact" for target in index.by_target if target in media}
-    account(index, claimed, report)
+    applied = {index.by_target[target][0].path for target in claimed}
+    account(index, claimed, applied, report)
     assert report.sidecars_seen == report.sidecars_accounted
+    assert report.matched == len(claimed)
 
 
-def test_the_counter_relocation_beats_matching_on_title(export, indexed):
+def test_the_counter_relocation_reduces_collisions(export, indexed):
     """The measurement that falsified v1, re-run on whatever export is here.
 
-    Filename derivation must pair at least as many sidecars as `title` does.
-    On the reference export it is 20,322 against 19,358.
+    NOT a higher raw match count - that is the wrong property, and asserting
+    it fails on the reference export by 4. Relocation moves 993 targets; five
+    of those name a photo in an archive part the user has not extracted and
+    correctly become orphans, one gains, so raw matches fall by 4 while
+    correctness rises.
+
+    The property that actually holds is COLLISION REDUCTION: how many sidecars
+    beyond the first are claiming one photo. On the reference export, 4,737
+    under `title` against 3,772 under the filename - the 965 that `title`
+    mis-pairs, which is the 963-mis-pair figure plus the two (1)/(2) groups
+    with no plain sibling.
     """
     index, _ = indexed
-    media = {
-        p.name.casefold()
-        for p in export.rglob("*")
-        if p.is_file() and p.suffix.casefold() != ".json"
-    }
-    by_filename = sum(
-        len(v) for k, v in index.by_target.items() if k in media
+    name_collisions = sum(len(v) - 1 for v in index.by_target.values())
+
+    by_title: dict[str, int] = {}
+    for sidecars in index.by_target.values():
+        for sidecar in sidecars:
+            key = sidecar.title.casefold()
+            by_title[key] = by_title.get(key, 0) + 1
+    title_collisions = sum(n - 1 for n in by_title.values())
+
+    assert name_collisions < title_collisions
+
+
+def test_disagreeing_candidate_groups_are_detected(export, indexed):
+    """583 groups on the reference export.
+
+    The first draft asserted `(not _disagree(a, s)) or _disagree(a, s)` here -
+    a literal tautology, true for any input including an empty index. If
+    `_disagree` ever stopped working this reads 0 and both the refusal and the
+    override-reporting machinery are silently dead.
+    """
+    from rekindle.enrich.takeout import _disagree
+
+    index, _ = indexed
+    multi = [group for group in index.by_target.values() if len(group) > 1]
+    if not multi:
+        pytest.skip("this export has at most one sidecar per photo")
+    disagreeing = sum(
+        1 for group in multi if any(_disagree(group[0], s) for s in group[1:])
     )
-    by_title = sum(
-        1
-        for sidecars in index.by_target.values()
-        for s in sidecars
-        if s.title.casefold() in media
-    )
-    assert by_filename >= by_title
+    assert disagreeing > 0
 
 
 def test_every_sidecar_parses_and_names_a_target(export):
@@ -3543,20 +3819,61 @@ def test_people_names_are_clean(indexed):
     assert all(n == n.strip() and n for n in names)
 
 
-def test_no_sidecar_claims_a_photo_another_sidecar_disagrees_about_silently(indexed):
-    """Where two sidecars share a target AND disagree, resolution must refuse.
-    This asserts the disagreement is detectable, not that it is absent."""
+@pytest.fixture(scope="module")
+def enriched(export: Path, tmp_path_factory) -> EnrichReport:
+    """Index and enrich the real export once, into pytest's own tmp dir.
+
+    Never inside the export: this must not write a single byte next to
+    anyone's photos.
+    """
+    store = PhotoStore(tmp_path_factory.mktemp("conformance") / "rekindle.sqlite")
+    try:
+        photos, _ = FolderSource().scan(export)
+        store.upsert_many(photos)
+        store.set_meta("index_root", str(export))
+        return TakeoutEnricher().enrich(export, store)
+    finally:
+        store.close()
+
+
+def test_every_disagreeing_group_is_overridden_or_refused_never_silent(indexed, enriched):
+    """No disagreement may be resolved without being counted.
+
+    On the reference export every disagreeing group has its candidates in
+    DIFFERENT directories, so rule 3 fires twice and rule 1 overrides 942
+    times. Either number may move; what must never happen is a disagreement
+    resolved with neither counter incrementing.
+    """
     from rekindle.enrich.takeout import _disagree
 
     index, _ = indexed
-    for sidecars in index.by_target.values():
-        if len(sidecars) < 2:
-            continue
-        # Either they agree (interchangeable) or the difference is visible.
-        assert all(
-            (not _disagree(sidecars[0], s)) or _disagree(sidecars[0], s) for s in sidecars[1:]
-        )
+    disagreeing = sum(
+        1
+        for group in index.by_target.values()
+        if len(group) > 1 and any(_disagree(group[0], s) for s in group[1:])
+    )
+    if not disagreeing:
+        pytest.skip("this export has no disagreeing sidecar groups")
+    assert enriched.directory_preference_broke_a_tie + enriched.ambiguous > 0
+
+
+def test_matched_equals_photos_enriched_on_a_real_export(enriched):
+    """The one assertion here that ties accounting to the database.
+
+    Credit `matched` with `len(sidecars)` rather than the applied count and
+    this fails by 3,358.
+    """
+    assert enriched.matched == enriched.photos_enriched
+    assert enriched.sidecars_seen == enriched.sidecars_accounted
+    assert enriched.json_files_seen == enriched.files_accounted
 ```
+
+The `enriched` fixture indexes the whole export, so it is by far the slowest
+thing in this module — the scan dominates; the enrich itself is ~6.6s on 45,900
+files. It is module-scoped so the cost is paid once. Add to the module imports:
+`from rekindle.db import PhotoStore`,
+`from rekindle.enrich.takeout import EnrichReport, TakeoutEnricher`, and
+`from rekindle.sources.folder import FolderSource`.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -3574,10 +3891,13 @@ reintroduced", append:
 - **Matching a Takeout sidecar on its `title` field.** `title` omits the
   disambiguating counter that Google puts in the sidecar's *filename*:
   `DSC00107.JPG.supplemental-metadata(1).json` says `title: "DSC00107.JPG"` but
-  belongs to `DSC00107(1).JPG`. Measured across 24,248 real sidecars: `title`
-  yields 19,358 correct pairs against filename derivation's 20,322, and the
-  design that used it would have dropped 984 sidecars silently. Match on the
-  filename via `rekindle.sidecars.sidecar_target`; `title` is a cross-check.
+  belongs to `DSC00107(1).JPG`. Measured across 24,248 real sidecars, the
+  property is COLLISION REDUCTION, not a higher raw match count: `title` leaves
+  4,737 sidecars beyond the first claiming one photo, the filename leaves 3,772.
+  Raw matches actually fall by 4, because five `(N)` sidecars name a photo in an
+  un-extracted archive part and correctly become orphans. The design that used
+  `title` would have dropped 984 sidecars silently. Match on the filename via
+  `rekindle.sidecars.sidecar_target`; `title` is a cross-check.
 - **Passing `photoTakenTime` to `timestamps.resolve`.** It is a UTC instant;
   `resolve` expects naive wall-clock time and stamps a zone onto it, so the
   result is `local == utc` and a 21:00 IST photo is relabelled 15:30. Use
@@ -3585,6 +3905,30 @@ reintroduced", append:
 - **A `PhotoMeta` field not added to `merge_meta`.** That function builds a new
   record from an explicit field list, so a field left out is destroyed by the
   next `rekindle index`.
+- **Crediting `matched` with every sidecar claiming a photo.** A photo with
+  three candidates contributes one application and two discards; counting all
+  three inflated `matched` by 3,358 on a real export and hid the discards. The
+  accounting identity cannot catch this on its own - it partitions a set built
+  by the same function - so `matched == photos_enriched` is asserted separately.
+- **Reading a low `ambiguous` count as "no conflicts".** Every disagreeing
+  sidecar group in the reference export has its candidates in different
+  directories, so the same-directory preference resolves 942 of them and the
+  refusal branch fires twice. Both numbers are reported for that reason.
+```
+
+Add a new section recording spec §10's ordering constraint, which this milestone
+delivers half of:
+
+```markdown
+## Carried into M2: person data has arrived before the rules that govern it
+
+`rekindle enrich` now writes 40 real people's names into the index. The person
+exclusion list that is supposed to govern them (main spec §7.2) is M2 work and
+does not exist.
+
+Today's risk is nil: there is no memory engine, so nothing can surface a person
+unprompted. **The exclusion list must land before anything auto-triggers.** This
+is recorded so the ordering stays deliberate rather than accidental.
 ```
 
 Correct the stale entry in the Deferred list:
@@ -3649,8 +3993,18 @@ git commit -m "test: conformance against a real export, asserting the accounting
       and no longer claims the Takeout parser is unimplemented
 - [ ] Both accounting identities hold on the fixture tree and on a real export
 - [ ] No sidecar is matched by `title`. `title` is recorded as a cross-check only
-- [ ] No photo's `taken_at_local` moves when only its timezone was ever in question
-- [ ] Two disagreeing sidecars for one photo cause a refusal, never a coin flip
+- [ ] No photo carrying a real EXIF date has its wall clock moved by more than a
+      minute, except where `metadata_conflict` is set. (The first draft said "no
+      photo's `taken_at_local` moves when only its timezone was in question",
+      which is both unmeasurable as written and false for 135 photos whose EXIF
+      genuinely disagrees with Google.)
+- [ ] Two disagreeing sidecars for one photo cause a refusal or a REPORTED
+      directory-preference override, never a silent coin flip
+- [ ] `report.matched == report.photos_enriched`, on the fixture tree and on a
+      real export. Every sidecar not applied is counted as superseded, orphaned
+      or ambiguous — none is parsed and dropped
+- [ ] `rekindle doctor --from-index` with no index reports that, and creates
+      no database
 - [ ] `-edited` and `.MP` derivatives carry their original's people and date
 - [ ] No new runtime dependency; no network access anywhere in the suite
 - [ ] No personal data committed. `Takeout/` stays git-ignored in every case

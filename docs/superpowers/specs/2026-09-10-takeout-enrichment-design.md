@@ -20,10 +20,21 @@ Google puts the disambiguating counter in the sidecar's *filename*, not in
 `title: "DSC00107.JPG"` but belongs to `DSC00107(1).JPG`. Measured across all
 24,248 sidecars in the reference export:
 
-| Match key | Rate | Correct pairs |
-|---|---|---|
-| `title` (v1's design) | 83.80% | 19,358 |
-| **sidecar filename** | 83.81% | **20,322** |
+The right measure is **collision reduction**, not match count. Filename
+derivation does not find more photos — measured over all 24,248 sidecars it
+matches four *fewer*, because five `(N)` sidecars name a photo absent from this
+export and correctly become orphans. What it does is stop two sidecars claiming
+the same photo:
+
+| Match key | Sidecars beyond the first claiming one photo |
+|---|---|
+| `title` (v1's design) | 4,737 |
+| **sidecar filename** | **3,772** |
+
+That −965 is the 963 mis-pairs below. An earlier draft of this section quoted
+"19,358 vs 20,322 correct pairs"; those figures did not reproduce under the
+definition the conformance test uses, and are corrected here rather than left
+in the repo.
 
 v1 would have silently dropped **984 sidecars**, left **967 photos** with
 sidecars unenriched, and made **963 definite mis-pairs** — avoided in practice
