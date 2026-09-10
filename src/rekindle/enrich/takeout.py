@@ -576,6 +576,75 @@ def album_renames(index: SidecarIndex, report: EnrichReport) -> dict[str, str]:
     return renames
 
 
+_ENRICHED_STATES = frozenset({"exact", "inherited"})
+
+
+def propagate_to_derivatives(photos: list[Photo], report: EnrichReport) -> list[Photo]:
+    """Copy enrichment onto photos Google gives no sidecar.
+
+    Two links, both already established by M0's folder source:
+      - `-edited` variants, persisted as Photo.edited_of
+      - motion-photo halves, NOT persisted (FolderSource only counts them), so
+        re-derived here from the naming rule: the still is the video's full
+        NAME plus ".jpg" - PXL_1.MP pairs with PXL_1.MP.jpg - scoped to one
+        directory, because a .MP in one album must never pair with a
+        same-named still in another.
+    """
+    by_hash = {p.file_hash: p for p in photos}
+    by_dir_name: dict[tuple[Path, str], Photo] = {}
+    for photo in photos:
+        for path in photo.paths:
+            by_dir_name.setdefault((path.parent, path.name.casefold()), photo)
+
+    changed: list[Photo] = []
+    for photo in photos:
+        if photo.sidecar_match in _ENRICHED_STATES:
+            continue
+        donor: Photo | None = None
+        if photo.edited_of:
+            donor = by_hash.get(photo.edited_of)
+        if donor is None:
+            for path in photo.paths:
+                if path.suffix.casefold() != ".mp":
+                    continue
+                donor = by_dir_name.get((path.parent, f"{path.name}.jpg".casefold()))
+                if donor is not None:
+                    break
+        if donor is None or donor.sidecar_match not in _ENRICHED_STATES:
+            continue
+
+        src = donor.meta
+        dst = photo.meta
+        dst.taken_at_utc = src.taken_at_utc
+        dst.taken_at_local = src.taken_at_local
+        # NOT src.tz_source. This file has no EXIF of its own, so copying
+        # `exif_offset` onto 655 .MP videos makes doctor report a provenance
+        # that cannot exist. The instant and the wall clock are copied intact -
+        # only the claim about where they came from changes, and for this row
+        # the answer is the Takeout pass, via its sibling.
+        dst.tz_source = TzSource.TAKEOUT
+        dst.exif_taken_at_utc = dst.exif_taken_at_utc or src.exif_taken_at_utc
+        previous = set(dst.takeout_people)
+        kept = [name for name in dst.people if name not in previous]
+        dst.people = list(dict.fromkeys([*kept, *src.takeout_people]))
+        dst.takeout_people = list(src.takeout_people)
+        if dst.gps is None:
+            dst.gps = src.gps
+        if src.description and (
+            dst.description is None or len(src.description) > len(dst.description)
+        ):
+            dst.description = src.description
+        dst.favorite = dst.favorite or src.favorite
+        dst.archived = dst.archived or src.archived
+        dst.trashed = dst.trashed or src.trashed
+        # A fourth state, distinct from "exact": this photo has no sidecar of
+        # its own and doctor should not claim it does.
+        photo.sidecar_match = "inherited"
+        report.derivatives_enriched += 1
+        changed.append(photo)
+    return changed
+
+
 def retitle_albums(photo: Photo, renames: dict[str, str], report: EnrichReport) -> None:
     """Apply renames wherever the photo lives.
 
