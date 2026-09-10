@@ -865,6 +865,22 @@ hold `metadata.json`, `shared_album_comments.json` and
 `user-generated-memory-titles.json`, and the last of those has a `title` that is
 a **list**, not a string.
 
+> **Post-implementation correction (2026-09-11):** the `classify_json` and
+> `_geo` snippets below were revised from what this plan originally proposed.
+> The original `classify_json` classified PHOTO only when one of
+> `photoTakenTime`/`creationTime`/`geoData`/`imageViews` was present — which
+> misfiles a real (if rare) marker-less sidecar carrying only `title` and
+> `people` as OTHER, caught by this task's own
+> `test_a_sidecar_with_no_taken_time_still_parses`. The fix adds a
+> string-valued `title` as an additional PHOTO signal: that is exactly the
+> field `user-generated-memory-titles.json` (title is a LIST) and
+> `shared_album_comments.json` (no `title` key at all) both lack, so neither
+> is misclassified. The original `_geo` also defaulted a missing `latitude`
+> or `longitude` to `0.0`, which could fabricate a wrong-but-plausible
+> coordinate from a partial block; the fix requires both keys present before
+> reading either. Both corrections and their mutation evidence are recorded
+> in `task-4-report.md`.
+
 **Files:**
 - Create: `src/rekindle/enrich/__init__.py`
 - Create: `src/rekindle/enrich/takeout.py`
@@ -1114,10 +1130,17 @@ def classify_json(path: Path) -> tuple[JsonKind, dict | None]:
         return JsonKind.UNPARSEABLE, None
     if is_album_metadata(path.name):
         return JsonKind.ALBUM, payload
-    # A per-photo sidecar always carries at least one of these. Keying on the
-    # filename alone would misfile `user-generated-memory-titles.json`, whose
-    # `title` is a list.
-    if any(k in payload for k in ("photoTakenTime", "creationTime", "geoData", "imageViews")):
+    # A per-photo sidecar always carries a string `title` (Google's own name
+    # for the file) and/or one of these markers. Checking `title`'s TYPE, not
+    # just its presence, is what keeps `user-generated-memory-titles.json`
+    # (title is a LIST) out of PHOTO; checking the markers too is what lets a
+    # sidecar with no `title` at all - or a genuine export we have not seen -
+    # still classify correctly. `shared_album_comments.json` has neither and
+    # correctly falls through to OTHER.
+    has_marker = any(
+        k in payload for k in ("photoTakenTime", "creationTime", "geoData", "imageViews")
+    )
+    if isinstance(payload.get("title"), str) or has_marker:
         return JsonKind.PHOTO, payload
     return JsonKind.OTHER, payload
 
@@ -1138,9 +1161,16 @@ def _geo(block: object) -> Gps | None:
     rather than zeroed."""
     if not isinstance(block, dict):
         return None
+    # latitude and longitude must BOTH be present. Defaulting a missing half
+    # to 0.0 would fabricate a wrong-but-plausible coordinate rather than
+    # report the absence - not observed in the real export, but the
+    # constraint is "never fabricate a value", not "never seen yet".
+    # Altitude stays optional: it is genuinely optional in the format.
+    if "latitude" not in block or "longitude" not in block:
+        return None
     try:
-        lat = float(block.get("latitude", 0.0))
-        lon = float(block.get("longitude", 0.0))
+        lat = float(block["latitude"])
+        lon = float(block["longitude"])
         alt = float(block.get("altitude", 0.0))
     except (TypeError, ValueError):
         return None

@@ -66,6 +66,21 @@ def test_geodataexif_is_used_when_geodata_is_zero(tmp_path):
     assert parse_sidecar(p, payload).gps.lat == 1.5
 
 
+def test_a_partial_geo_block_does_not_fabricate_a_coordinate(tmp_path):
+    """Missing longitude must not silently default to 0.0 - that would
+    produce a wrong-but-plausible coordinate, not report an absence."""
+    p = _write(
+        tmp_path / "IMG_7.jpg.supplemental-metadata.json",
+        {
+            "title": "IMG_7.jpg",
+            "photoTakenTime": {"timestamp": "1"},
+            "geoData": {"latitude": 5.0},
+        },
+    )
+    _, payload = classify_json(p)
+    assert parse_sidecar(p, payload).gps is None
+
+
 def test_the_counter_is_relocated_when_deriving_the_target(tmp_path):
     p = _write(
         tmp_path / "DSC00107.JPG.supplemental-metadata(1).json",
@@ -130,6 +145,21 @@ def test_malformed_json_is_unparseable_not_an_exception(tmp_path):
 def test_a_json_array_at_the_top_level_is_unparseable(tmp_path):
     p = _write(tmp_path / "arr.json", [1, 2, 3])
     assert classify_json(p)[0] is JsonKind.UNPARSEABLE
+
+
+def test_a_missing_file_is_unparseable_not_an_exception(tmp_path):
+    p = tmp_path / "nope.json"
+    kind, payload = classify_json(p)
+    assert kind is JsonKind.UNPARSEABLE
+    assert payload is None
+
+
+def test_invalid_utf8_bytes_are_unparseable_not_an_exception(tmp_path):
+    p = tmp_path / "badbytes.json"
+    p.write_bytes(b"\xff\xfe\x00bad")
+    kind, payload = classify_json(p)
+    assert kind is JsonKind.UNPARSEABLE
+    assert payload is None
 
 
 def test_a_sidecar_with_no_taken_time_still_parses(tmp_path):

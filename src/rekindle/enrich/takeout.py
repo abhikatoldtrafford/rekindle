@@ -93,9 +93,16 @@ def _geo(block: object) -> Gps | None:
     rather than zeroed."""
     if not isinstance(block, dict):
         return None
+    # latitude and longitude must BOTH be present. Defaulting a missing half
+    # to 0.0 would fabricate a wrong-but-plausible coordinate rather than
+    # report the absence - not observed in the real export, but the
+    # constraint is "never fabricate a value", not "never seen yet".
+    # Altitude stays optional: it is genuinely optional in the format.
+    if "latitude" not in block or "longitude" not in block:
+        return None
     try:
-        lat = float(block.get("latitude", 0.0))
-        lon = float(block.get("longitude", 0.0))
+        lat = float(block["latitude"])
+        lon = float(block["longitude"])
         alt = float(block.get("altitude", 0.0))
     except (TypeError, ValueError):
         return None
