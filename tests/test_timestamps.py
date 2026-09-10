@@ -74,3 +74,12 @@ def test_malformed_offset_falls_back_to_naive():
     utc, _, src = resolve(NAIVE, "banana", None, MTIME)
     assert src is TzSource.EXIF_NAIVE
     assert utc == NAIVE.replace(tzinfo=UTC)
+
+
+def test_out_of_range_offset_falls_back_to_naive():
+    """ "+30:00" matches the offset pattern but is not a valid UTC offset
+    (datetime.timezone rejects anything >= 24h in magnitude); this must
+    degrade to the naive rung, not raise."""
+    utc, _, src = resolve(NAIVE, "+30:00", None, MTIME)
+    assert src is TzSource.EXIF_NAIVE
+    assert utc == NAIVE.replace(tzinfo=UTC)

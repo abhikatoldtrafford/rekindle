@@ -30,7 +30,12 @@ def _parse_offset(raw: str | None) -> timezone | None:
         return None
     sign, hours, minutes = m.groups()
     delta = timedelta(hours=int(hours), minutes=int(minutes))
-    return timezone(-delta if sign == "-" else delta)
+    try:
+        return timezone(-delta if sign == "-" else delta)
+    except ValueError:
+        # e.g. "+30:00": matches the regex but is out of range for
+        # datetime.timezone. Treat it as malformed, same as "banana".
+        return None
 
 
 def resolve(
