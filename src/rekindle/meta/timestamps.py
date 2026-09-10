@@ -83,3 +83,88 @@ def resolve(
         return stamped, stamped, TzSource.FILE_MTIME
 
     return None, None, TzSource.NONE
+
+
+# Real UTC offsets run from -12:00 to +14:00 and are whole quarter-hours.
+_MAX_OFFSET = timedelta(hours=14)
+_OFFSET_QUANTUM = timedelta(minutes=15)
+_QUANTUM_TOLERANCE = timedelta(seconds=90)
+
+
+def is_plausible_offset(delta: timedelta) -> timedelta | None:
+    """Round `delta` to a real UTC offset, or reject it.
+
+    This is the guard that keeps a broken camera clock out of the timezone
+    ladder. On the reference export the EXIF/Google difference is either
+    exactly -05:30 (a timezone) or over a year (a reset clock); nothing in
+    between. Rejecting anything that is not a quarter-hour within 14 hours
+    separates the two cleanly.
+    """
+    if abs(delta) > _MAX_OFFSET:
+        return None
+    quanta = round(delta / _OFFSET_QUANTUM)
+    rounded = _OFFSET_QUANTUM * quanta
+    if abs(delta - rounded) > _QUANTUM_TOLERANCE:
+        return None
+    return rounded
+
+
+def from_takeout(
+    google_utc: datetime,
+    existing_utc: datetime | None,
+    existing_local: datetime | None,
+    existing_tz_source: TzSource,
+    gps: Gps | None = None,
+    tz_lookup: TzLookup | None = None,
+) -> tuple[datetime, datetime, TzSource]:
+    """Derive (utc, local, tz_source) from Google's photoTakenTime.
+
+    photoTakenTime is an INSTANT. It carries no offset, so local time has to
+    come from somewhere else. Passing it to `resolve()` - which expects a
+    naive wall-clock value - silently yields local == utc and relabels a 21:00
+    photo as 15:30. That was v1's most damaging defect.
+
+    Ladder, per spec section 5:
+      1. an offset EXIF already established (OffsetTimeOriginal)
+      2. a GPS timezone
+      3. exif_naive - google_utc, which recovers +05:30 exactly
+      4. UTC
+
+    `TzSource.TAKEOUT` describes the DATE's provenance. When an offset or GPS
+    resolved the zone, that source is kept: conflating the two loses
+    information about how well local time is actually known.
+    """
+    # Rung 1 and 2: M0 already resolved a real zone and stored it on
+    # taken_at_local. Reuse it rather than re-deriving - and note this keeps
+    # `enrich` free of any file or timezonefinder access for these photos.
+    if existing_tz_source in (TzSource.EXIF_OFFSET, TzSource.GPS) and existing_local is not None:
+        offset = existing_local.utcoffset()
+        if offset is not None:
+            zone = timezone(offset)
+            return google_utc, google_utc.astimezone(zone), existing_tz_source
+
+    # Rung 2 for a photo M0 could not date at all but which has coordinates.
+    if gps is not None and tz_lookup is not None:
+        try:
+            name = tz_lookup(gps)
+        except Exception:
+            # An injected third-party callable may raise on odd coordinates.
+            # Any failure degrades to the next rung, exactly as in resolve().
+            name = None
+        if name:
+            try:
+                zone_info = ZoneInfo(name)
+            except (ZoneInfoNotFoundError, ValueError):
+                zone_info = None
+            if zone_info is not None:
+                return google_utc, google_utc.astimezone(zone_info), TzSource.GPS
+
+    # Rung 3: M0 stored the naive EXIF wall clock stamped as UTC. The gap
+    # between that and Google's true instant IS the photo's UTC offset.
+    if existing_tz_source is TzSource.EXIF_NAIVE and existing_utc is not None:
+        offset = is_plausible_offset(existing_utc - google_utc)
+        if offset is not None:
+            return google_utc, google_utc.astimezone(timezone(offset)), TzSource.TAKEOUT
+
+    # Rung 4.
+    return google_utc, google_utc, TzSource.TAKEOUT
