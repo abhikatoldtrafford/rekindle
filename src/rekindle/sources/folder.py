@@ -76,9 +76,22 @@ class FolderSource:
         # does not on POSIX, so bare sorted() visits files in a different order
         # per OS - which decides which copy of a duplicate becomes canonical.
         for path in sorted(
-            (p for p in root.rglob("*") if p.is_file()),
+            root.rglob("*"),
             key=lambda p: tuple(part.casefold() for part in p.relative_to(root).parts),
         ):
+            if not path.is_file():
+                # is_file() swallows a stat() failure and returns False
+                # exactly as it would for an ordinary directory - so a path
+                # beyond Windows' MAX_PATH is otherwise simply invisible:
+                # never counted, never reported. is_dir() is checked too so
+                # a normal (accessible) directory - which correctly returns
+                # False from is_file() - is not miscounted as a file.
+                if not path.is_dir() and is_long_path(path):
+                    report.files_seen += 1
+                    report.long_paths.append(path)
+                    report.skip("long_path_unreadable")
+                continue
+
             report.files_seen += 1
 
             # Deleted photos must never become memories.
@@ -94,6 +107,18 @@ class FolderSource:
                 # "ignored" made doctor warn that data was being discarded three
                 # rows below reporting it as successfully read.
                 if path.suffix.lower() == ".xmp":
+                    continue
+                # Only Google's own .json sidecars feed the orphan check.
+                # .aae (Apple edit sidecars) and .thm (video thumbnails) are
+                # still skipped as non-media, but _sidecar_target only
+                # understands the Google JSON naming convention - feeding an
+                # .AAE through it returns the filename unchanged, which then
+                # never matches anything in media_names and is miscounted as
+                # a permanently orphaned sidecar. An iPhone library emits one
+                # .AAE per edited photo, so this would inflate doctor's
+                # "missing archive parts" warning on a perfectly complete
+                # library.
+                if path.suffix.lower() != ".json":
                     continue
                 report.json_sidecars += 1
                 if path.name != "metadata.json":
@@ -129,7 +154,15 @@ class FolderSource:
             # computed base can never match its original's raw NFD stem.
             base_stem, suffix = _split_edited(path.stem)
             if suffix is None:
-                stem_index[(path.parent, unicodedata.normalize("NFC", path.stem))] = digest
+                stem_key = (path.parent, unicodedata.normalize("NFC", path.stem))
+                # Google's motion photos give a .jpg still and a .MP video the
+                # SAME stem. Whichever is visited first would otherwise win
+                # unconditionally, so on a different sort order the video's
+                # hash could register here and an edited variant of the still
+                # would silently link to the wrong original. The still always
+                # wins, regardless of visit order.
+                if media_type is not MediaType.VIDEO or stem_key not in stem_index:
+                    stem_index[stem_key] = digest
             else:
                 edited_pending.append((digest, path.parent, base_stem))
 
@@ -140,6 +173,7 @@ class FolderSource:
                 existing.paths.append(path)
                 if album and album not in existing.albums:
                     existing.albums.append(album)
+                existing.first_seen = min(existing.first_seen, mtime)
                 existing.last_seen = max(existing.last_seen, mtime)
                 # The second copy must still be READ. In Takeout the sidecar
                 # frequently sits beside only one of the two copies, so

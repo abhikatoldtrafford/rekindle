@@ -203,9 +203,33 @@ def build_library(root: Path) -> Path:
         b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isomiso2" + b"\x00" * 128
     )
 
+    # An edited variant of the motion photo's STILL. Both the .jpg still and
+    # the .MP video share the stem "PXL_0001" - proves the edited variant
+    # links to the still's hash, never the video's, regardless of which one
+    # the scan happens to visit first.
+    make_jpeg(album / "PXL_0001-edited.jpg", color=(75, 145, 95), taken=datetime(2025, 9, 6, 13, 3))
+
     # The counter lands INSIDE the suffix when two photos share a filename.
     (year / "DSC_0880.JPG.supplemental-metadata(1).json").write_text(
         json.dumps({"title": "DSC_0880.JPG"}), encoding="utf-8"
     )
+
+    # A duplicate where only the SECOND-visited copy carries an XMP sidecar -
+    # the exact Takeout layout where an album copy has no sidecar of its own.
+    # "AAA_First" sorts before "ZZZ_Second", so the plain copy is indexed
+    # first and the metadata only shows up when the duplicate is merged.
+    first_copy = make_jpeg(root / "AAA_First" / "IMG_8000.jpg", color=(11, 22, 33))
+    second_copy = root / "ZZZ_Second" / "IMG_8000.jpg"
+    second_copy.parent.mkdir(parents=True, exist_ok=True)
+    second_copy.write_bytes(first_copy.read_bytes())
+    make_xmp_sidecar(second_copy, people=["Carol"], description="second copy only")
+
+    # An Apple edit sidecar (.aae) with no matching photo. _sidecar_target
+    # only understands Google's JSON naming convention, so unlike a .json
+    # sidecar this must NEVER be counted as an orphan (or as a JSON sidecar
+    # at all) - an iPhone library emits one .AAE per edited photo, and
+    # miscounting them would raise a false "missing archive parts" alarm on
+    # a perfectly complete library.
+    (year / "IMG_7000.aae").write_text("dummy Apple edit sidecar", encoding="utf-8")
 
     return root
