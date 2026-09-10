@@ -46,3 +46,6 @@ Thumbs.db
 *.tgz
 !tests/fixtures/**/*.zip
 !tests/fixtures/**/*.tgz
+
+# SDD scratch workspace
+.superpowers/
