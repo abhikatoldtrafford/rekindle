@@ -112,7 +112,16 @@ class PhotoStore:
             (str(SCHEMA_VERSION),),
         )
         self._conn.commit()
-        self._migrate()
+        try:
+            self._migrate()
+        except BaseException:
+            # Same reasoning as the version-mismatch branch below: a raise
+            # from __init__ leaves the caller no handle to close the
+            # connection, which on Windows keeps the file locked until GC or
+            # process exit. Close it ourselves so a retry sees the real error
+            # (e.g. corrupt JSON) instead of "database is locked".
+            self._conn.close()
+            raise
         # CREATE TABLE IF NOT EXISTS silently keeps an old table, so a version
         # check is the only thing standing between a schema change and a
         # baffling OperationalError on the next write.
@@ -135,8 +144,19 @@ class PhotoStore:
             )
 
     def _migrate(self) -> None:
-        """v1 -> v2. Additive only: no row is ever rewritten or dropped."""
-        if self.schema_version() >= SCHEMA_VERSION:
+        """v1 -> v2. Additive only: no row is ever rewritten or dropped.
+
+        Guards on the EXACT starting version (1), not `< SCHEMA_VERSION`: a
+        `>=` guard plus an unconditional bump to `SCHEMA_VERSION` would stamp
+        any older database - including a hypothetical pre-v1 schema this
+        step knows nothing about - straight to v2 and declare success. That
+        leaves the friendly "no migration exists" error in __init__
+        unreachable now, and means a future v3 step would silently skip
+        migrating a v1 database that was never bumped. A database at any
+        version other than 1 is left untouched for __init__'s version check
+        to reject with its explicit error message.
+        """
+        if self.schema_version() != 1:
             return
         existing = {r["name"] for r in self._conn.execute("PRAGMA table_info(photos)")}
         for name, decl in _V2_COLUMNS:
@@ -188,12 +208,18 @@ class PhotoStore:
     def all_hashes(self) -> set[str]:
         return {r["file_hash"] for r in self._conn.execute("SELECT file_hash FROM photos")}
 
-    def hashes_for_filename(self, name_cf: str) -> set[str]:
-        """Every photo having a path whose filename casefolds to `name_cf`."""
+    def hashes_for_filename(self, name: str) -> set[str]:
+        """Every photo having a path whose filename casefolds to `name`.
+
+        Casefolds `name` itself: a caller passing "X.JPG" must match a path
+        stored as "x.jpg" exactly as one passing "x.jpg" would, or this
+        becomes a silent "no match" trap for whichever caller doesn't happen
+        to pre-casefold its input.
+        """
         return {
             r["file_hash"]
             for r in self._conn.execute(
-                "SELECT file_hash FROM photo_paths WHERE name_cf = ?", (name_cf,)
+                "SELECT file_hash FROM photo_paths WHERE name_cf = ?", (name.casefold(),)
             )
         }
 

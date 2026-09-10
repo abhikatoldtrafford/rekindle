@@ -198,6 +198,26 @@ def _write_v1_database(path):
             json.dumps(["Ada"]),
         ),
     )
+    # A second photo with THREE paths across different album directories -
+    # this library routinely has 2+ paths per photo, and one is not ASCII
+    # (a German export directory name and an eszett in the filename), which
+    # exercises str.casefold() rather than str.lower() in the backfill.
+    conn.execute(
+        "INSERT INTO photos (file_hash, media_type, paths, albums, first_seen,"
+        " last_seen, tz_source, people, face_regions, keywords) VALUES"
+        " ('multi1', 'image', ?, ?, '2021-01-01T00:00:00+00:00',"
+        " '2021-01-01T00:00:00+00:00', 'exif_naive', '[]', '[]', '[]')",
+        (
+            json.dumps(
+                [
+                    "/lib/Album A/IMG_0002.jpg",
+                    "/lib/Album B/IMG_0002.jpg",
+                    "/lib/Alben/STRAßE.JPG",
+                ]
+            ),
+            json.dumps(["Album A", "Album B", "Alben"]),
+        ),
+    )
     conn.commit()
     conn.close()
 
@@ -209,7 +229,7 @@ def test_v1_database_migrates_without_losing_rows(tmp_path):
 
     with PhotoStore(db_path) as store:
         assert store.schema_version() == SCHEMA_VERSION == 2
-        assert store.count() == 1
+        assert store.count() == 2
         photo = store.get("abc")
         assert photo is not None
         assert photo.meta.people == ["Ada"]
@@ -231,15 +251,77 @@ def test_migration_backfills_the_photo_paths_table(tmp_path):
     assert hits == {"abc"}
 
 
+def test_migration_backfill_writes_one_row_per_hash_and_path(tmp_path):
+    """The regression the reviewer's mutation caught: indexing only the
+    first path of `json.loads(row["paths"])` still passes every OTHER
+    assertion in this suite. `multi1` (from `_write_v1_database`) has three
+    paths across three album directories, one with a non-ASCII filename
+    (a German eszett), and this library routinely has 2+ paths per photo.
+    """
+    db_path = tmp_path / "data" / "rekindle.sqlite"
+    _write_v1_database(db_path)
+    with PhotoStore(db_path):
+        pass  # migration runs on open; check the raw table afterwards
+
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT path, name_cf, parent FROM photo_paths WHERE file_hash = 'multi1' ORDER BY path"
+        ).fetchall()
+    finally:
+        conn.close()
+
+    # Exactly one row per (file_hash, path): three distinct paths in, three
+    # distinct rows out - not one, and not deduplicated by filename despite
+    # two of the three sharing "IMG_0002.jpg". Compare via Path so the
+    # expected separators match this platform (Path stringifies "/" as "\\"
+    # on Windows).
+    assert len(rows) == 3
+    got = {(path, name_cf, parent) for path, name_cf, parent in rows}
+    assert got == {
+        (
+            str(Path("/lib/Album A/IMG_0002.jpg")),
+            "img_0002.jpg",
+            str(Path("/lib/Album A")),
+        ),
+        (
+            str(Path("/lib/Album B/IMG_0002.jpg")),
+            "img_0002.jpg",
+            str(Path("/lib/Album B")),
+        ),
+        (
+            str(Path("/lib/Alben/STRAßE.JPG")),
+            "strasse.jpg",
+            str(Path("/lib/Alben")),
+        ),
+    }
+
+    with PhotoStore(db_path) as store:
+        # Two of the three paths share a filename: hashes_for_filename must
+        # still resolve to the one photo, not silently drop it.
+        assert store.hashes_for_filename("img_0002.jpg") == {"multi1"}
+        # str.casefold(), not str.lower(): "ß" folds to "ss", so a lookup
+        # spelled with plain ASCII "ss" must still find the eszett filename.
+        assert store.hashes_for_filename("strasse.jpg") == {"multi1"}
+        assert store.hashes_for_filename("STRASSE.JPG") == {"multi1"}
+
+
 def test_new_meta_fields_survive_a_reindex_merge():
-    """merge_meta enumerates fields; one left out is enrichment destroyed."""
+    """merge_meta enumerates fields; one left out is enrichment destroyed.
+
+    `trashed=True` here is purely to exercise the merge line - the model's
+    own comment notes it is expected to be permanently False for a real
+    Takeout export - but `merge_meta` has no way to know that, and a merge
+    that dropped this field would be exactly as broken as one that dropped
+    any other.
+    """
     enriched = PhotoMeta(
         taken_at_utc=datetime(2014, 6, 1, tzinfo=UTC),
         tz_source=TzSource.TAKEOUT,
         people=["Ada"],
         takeout_people=["Ada"],
         archived=True,
-        trashed=False,
+        trashed=True,
         exif_taken_at_utc=datetime(2010, 1, 1, tzinfo=UTC),
     )
     fresh_from_disk = PhotoMeta(
@@ -249,8 +331,80 @@ def test_new_meta_fields_survive_a_reindex_merge():
     merged, _ = merge_meta(enriched, fresh_from_disk)
     assert merged.takeout_people == ["Ada"]
     assert merged.archived is True
+    assert merged.trashed is True
     assert merged.exif_taken_at_utc == datetime(2010, 1, 1, tzinfo=UTC)
 
 
 def test_takeout_is_a_real_tz_source():
     assert TzSource("takeout") is TzSource.TAKEOUT
+
+
+def test_pre_v1_database_raises_instead_of_being_silently_stamped(tmp_path):
+    """`_migrate` guards on the EXACT starting version (1), not `< 2`. A
+    `>=` guard plus an unconditional bump to SCHEMA_VERSION would stamp any
+    older database - including one this migration step knows nothing about
+    - straight to v2 and declare success, making __init__'s friendly
+    "no migration exists" error unreachable.
+    """
+    db_path = tmp_path / "data" / "rekindle.sqlite"
+    _write_v1_database(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE meta SET value = '0' WHERE key = 'schema_version'")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(RuntimeError, match="schema v0"):
+        PhotoStore(db_path)
+
+    # Must not have been silently stamped to v2 on the way to raising.
+    conn = sqlite3.connect(db_path)
+    try:
+        version = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()[0]
+    finally:
+        conn.close()
+    assert version == "0"
+
+
+def test_migration_failure_closes_the_connection_and_propagates_the_real_error(
+    tmp_path,
+):
+    """A `_migrate` failure must not leave the connection open holding a
+    write transaction: on Windows that keeps the file locked until GC or
+    process exit, turning a legible root cause (corrupt JSON, here) into a
+    baffling "database is locked" on the very next attempt.
+
+    Corrupting 'multi1' (not 'abc') matters: the backfill processes rows in
+    insertion order, so 'abc' is INSERTed into photo_paths successfully
+    first - opening an implicit write transaction on the connection - and
+    THEN the loop dies on 'multi1'. That leaves a real uncommitted write
+    transaction behind, which is what actually blocks a second connection's
+    writes on Windows; corrupting 'abc' instead fails before any write ever
+    starts and does not reproduce the lock.
+    """
+    db_path = tmp_path / "data" / "rekindle.sqlite"
+    _write_v1_database(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute("UPDATE photos SET paths = 'not-json' WHERE file_hash = 'multi1'")
+    conn.commit()
+    conn.close()
+
+    with pytest.raises(json.JSONDecodeError):
+        PhotoStore(db_path)
+
+    # The failed attempt must not leave the file locked for a write: an
+    # immediate retry (no del()/gc.collect()) must see the SAME real error
+    # again, not sqlite3.OperationalError("database is locked").
+    with pytest.raises(json.JSONDecodeError):
+        PhotoStore(db_path)
+
+
+def test_hashes_for_filename_casefolds_its_own_argument(tmp_path):
+    """The parameter is named `name`, not `name_cf`: callers should not have
+    to pre-casefold, and one that forgets must not silently get back an
+    empty set instead of the match.
+    """
+    with PhotoStore(tmp_path / "db.sqlite") as s:
+        s.upsert_many([_photo(paths=[Path("/photos/IMG_0001.JPG")])])
+        assert s.hashes_for_filename("img_0001.jpg") == {"abc123"}
+        assert s.hashes_for_filename("IMG_0001.JPG") == {"abc123"}
+        assert s.hashes_for_filename("Img_0001.Jpg") == {"abc123"}
