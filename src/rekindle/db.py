@@ -88,12 +88,17 @@ class PhotoStore:
         # check is the only thing standing between a schema change and a
         # baffling OperationalError on the next write.
         found = self.schema_version()
-        if found > SCHEMA_VERSION:
-            raise RuntimeError(
-                f"{db_path} was written by a newer rekindle "
-                f"(schema v{found} > v{SCHEMA_VERSION}). Upgrade rekindle."
-            )
-        if found < SCHEMA_VERSION:
+        if found != SCHEMA_VERSION:
+            # A raise here means __init__ never returns, so the caller gets no
+            # handle to close the connection - it would otherwise stay open
+            # (and, on Windows, keep the file locked) until GC or process
+            # exit. Close it ourselves before propagating.
+            self._conn.close()
+            if found > SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"{db_path} was written by a newer rekindle "
+                    f"(schema v{found} > v{SCHEMA_VERSION}). Upgrade rekindle."
+                )
             raise RuntimeError(
                 f"{db_path} uses schema v{found}, this rekindle expects "
                 f"v{SCHEMA_VERSION}, and no migration exists yet. Delete the "

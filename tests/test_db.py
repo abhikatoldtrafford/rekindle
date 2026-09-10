@@ -1,6 +1,8 @@
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from rekindle.db import SCHEMA_VERSION, PhotoStore
 from rekindle.models import FaceRegion, Gps, MediaType, Photo, PhotoMeta, TzSource
 
@@ -19,6 +21,8 @@ def _photo(h="abc123", **kw) -> Photo:
         last_seen=kw.pop("last_seen", T0),
         albums=kw.pop("albums", []),
         edited_of=kw.pop("edited_of", None),
+        source=kw.pop("source", "folder"),
+        metadata_conflict=kw.pop("metadata_conflict", False),
     )
 
 
@@ -29,9 +33,11 @@ def test_creates_schema_and_records_version(tmp_path):
 
 
 def test_insert_then_read_back_roundtrips_metadata(tmp_path):
+    # T1 for taken_at_local so it's distinguishable from taken_at_utc in the
+    # assertions below - a swap of the two columns must fail this test.
     meta = PhotoMeta(
         taken_at_utc=T0,
-        taken_at_local=T0,
+        taken_at_local=T1,
         tz_source=TzSource.EXIF_OFFSET,
         gps=Gps(lat=15.3, lon=74.08, alt=12.5),
         people=["Alice", "Bob"],
@@ -45,18 +51,39 @@ def test_insert_then_read_back_roundtrips_metadata(tmp_path):
         height=3000,
     )
     with PhotoStore(tmp_path / "db.sqlite") as s:
-        inserted, updated = s.upsert_many([_photo(meta=meta, albums=["Goa Trip"])])
+        inserted, updated = s.upsert_many(
+            [
+                _photo(
+                    meta=meta,
+                    albums=["Goa Trip"],
+                    # Non-default values: a field that silently fell back to
+                    # its default on read-back would still pass a test that
+                    # merely wrote the default.
+                    source="takeout",
+                    metadata_conflict=True,
+                )
+            ]
+        )
         assert (inserted, updated) == (1, 0)
         got = s.get("abc123")
 
     assert got is not None
+    assert got.albums == ["Goa Trip"]
+    assert got.source == "takeout"
+    assert got.metadata_conflict is True
+    assert got.meta.taken_at_utc == T0
+    assert got.meta.taken_at_local == T1
+    assert got.meta.tz_source is TzSource.EXIF_OFFSET
     assert got.meta.gps == Gps(lat=15.3, lon=74.08, alt=12.5)
     assert got.meta.people == ["Alice", "Bob"]
-    assert got.meta.face_regions[0].name == "Alice"
+    assert got.meta.face_regions == [FaceRegion(name="Alice", x=0.5, y=0.4, w=0.2, h=0.25)]
+    assert got.meta.keywords == ["beach"]
+    assert got.meta.description == "sunset"
     assert got.meta.favorite is True
-    assert got.meta.tz_source is TzSource.EXIF_OFFSET
-    assert got.albums == ["Goa Trip"]
-    assert got.meta.taken_at_utc == T0
+    assert got.meta.camera_make == "Canon"
+    assert got.meta.camera_model == "EOS R"
+    assert got.meta.width == 4000
+    assert got.meta.height == 3000
 
 
 def test_upsert_same_hash_updates_last_seen_and_unions_albums(tmp_path):
@@ -92,3 +119,24 @@ def test_store_persists_across_sessions(tmp_path):
         s.upsert_many([_photo()])
     with PhotoStore(db) as s:
         assert s.count() == 1
+
+
+def test_upsert_many_commits_once_not_per_photo(tmp_path):
+    """A regression guard for "one transaction per run, never one commit per
+    photo": if a commit were moved inside the loop, the two good photos
+    ahead of the failing one would already be durable when the batch blows
+    up, and this test would see count() == 2 instead of 0.
+
+    sqlite3 rolls back an uncommitted transaction when its connection is
+    closed without calling commit(), so a mid-batch failure that never
+    reaches the single end-of-batch commit() leaves nothing persisted -
+    provided nothing committed earlier in the loop.
+    """
+    db = tmp_path / "db.sqlite"
+    with pytest.raises(AttributeError), PhotoStore(db) as s:
+        # object() has no .file_hash: upsert_many's loop raises on the third
+        # item, after two real photos would otherwise have gone in.
+        s.upsert_many([_photo("h1"), _photo("h2"), object()])
+
+    with PhotoStore(db) as s:
+        assert s.count() == 0
