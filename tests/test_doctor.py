@@ -133,3 +133,50 @@ def test_render_caps_unreadable_list_and_shows_a_tail_count():
     for i in range(10, 15):
         assert f"bad{i}.jpg" not in output
     assert "... and 5 more" in output
+
+
+def test_diagnose_index_reports_people_after_enrichment(tmp_path):
+    from rekindle.db import PhotoStore
+    from rekindle.doctor import diagnose_index
+    from rekindle.enrich.takeout import TakeoutEnricher
+    from rekindle.sources.folder import FolderSource
+    from tests.fixtures.takeout import build_takeout
+
+    root = build_takeout(tmp_path / "Takeout")
+    photos, _ = FolderSource().scan(root)
+    store = PhotoStore(tmp_path / "data" / "rekindle.sqlite")
+    store.upsert_many(photos)
+    store.set_meta("index_root", str(root))
+
+    before = diagnose_index(store)
+    assert before.enriched_at is None
+    assert any("has not been enriched" in w for w in before.warnings)
+
+    TakeoutEnricher().enrich(root, store)
+    after = diagnose_index(store)
+    assert after.with_people > 0
+    assert after.enriched_at is not None
+    assert not any("has not been enriched" in w for w in after.warnings)
+    assert not any("No person data found" in w for w in after.warnings)
+    store.close()
+
+
+def test_diagnose_index_warns_about_a_foreign_enrich_root(tmp_path):
+    from rekindle.db import PhotoStore
+    from rekindle.doctor import diagnose_index
+
+    store = PhotoStore(tmp_path / "data" / "rekindle.sqlite")
+    store.set_meta("index_root", str(tmp_path / "A"))
+    store.set_meta("enrich_root", str(tmp_path / "B"))
+    assert any("different folder" in w for w in diagnose_index(store).warnings)
+    store.close()
+
+
+def test_the_unparsed_sidecar_warning_now_points_at_enrich(tmp_path):
+    from rekindle.doctor import diagnose
+    from rekindle.models import SourceReport
+
+    d = diagnose(SourceReport(files_seen=100, media_indexed=50, json_sidecars=50, with_people=1))
+    hits = [w for w in d.warnings if "rekindle enrich" in w]
+    assert len(hits) == 1
+    assert "not implemented yet" not in hits[0]

@@ -9,8 +9,10 @@ from dataclasses import dataclass, field
 from rich.console import Console
 from rich.table import Table
 
+from rekindle.db import PhotoStore
+from rekindle.enrich.takeout import EnrichReport
 from rekindle.meta.exif import HEIF_AVAILABLE
-from rekindle.models import SourceReport
+from rekindle.models import SourceReport, TzSource
 
 _LOW_DATE_PCT = 50.0
 
@@ -59,9 +61,9 @@ def diagnose(report: SourceReport) -> Diagnosis:
         )
     if report.json_sidecars and total and report.json_sidecars >= total * 0.25:
         warnings.append(
-            f"{report.json_sidecars} Google JSON sidecars are present but not yet parsed. "
-            "This looks like a Google Takeout export - the Takeout parser that reads those "
-            "(face tags, descriptions) is not implemented yet."
+            f"{report.json_sidecars} Google JSON sidecars are present but not yet read. "
+            "This looks like a Google Takeout export - run `rekindle enrich <folder>` "
+            "after indexing to read the face tags, dates and album titles they carry."
         )
     if report.excluded_dirs:
         warnings.append(
@@ -119,3 +121,211 @@ def render(diagnosis: Diagnosis, console: Console) -> None:
 
     for warning in diagnosis.warnings:
         console.print(f"\n[yellow]![/yellow] {warning}")
+
+
+@dataclass(frozen=True)
+class IndexDiagnosis:
+    """What the STORED index holds. `diagnose()` above answers a different
+    question - what a fresh scan of the filesystem can see - and after a
+    successful enrich it would still report zero people forever, because a
+    scan cannot see what a prior `enrich` run wrote to the database.
+    """
+
+    photos: int = 0
+    with_date: int = 0
+    with_gps: int = 0
+    with_people: int = 0
+    enriched: int = 0
+    inherited: int = 0
+    ambiguous: int = 0
+    archived: int = 0
+    conflicts: int = 0
+    enriched_at: str | None = None
+    index_root: str | None = None
+    enrich_root: str | None = None
+    warnings: list[str] = field(default_factory=list)
+
+    def pct(self, n: int) -> float:
+        return round(100.0 * n / self.photos, 1) if self.photos else 0.0
+
+
+def diagnose_index(store: PhotoStore) -> IndexDiagnosis:
+    """Read-only. Never writes - `store` is a `PhotoStore` the caller already
+    opened; this function does not create or touch a database of its own.
+    """
+    counts = dict.fromkeys(
+        (
+            "photos",
+            "with_date",
+            "with_gps",
+            "with_people",
+            "enriched",
+            "inherited",
+            "ambiguous",
+            "archived",
+            "conflicts",
+        ),
+        0,
+    )
+    for photo in store.iter_photos():
+        counts["photos"] += 1
+        meta = photo.meta
+        if meta.taken_at_utc and meta.tz_source is not TzSource.FILE_MTIME:
+            counts["with_date"] += 1
+        if meta.gps:
+            counts["with_gps"] += 1
+        if meta.people:
+            counts["with_people"] += 1
+        if photo.sidecar_match == "exact":
+            counts["enriched"] += 1
+        elif photo.sidecar_match == "inherited":
+            counts["inherited"] += 1
+        elif photo.sidecar_match == "ambiguous":
+            counts["ambiguous"] += 1
+        if meta.archived:
+            counts["archived"] += 1
+        if photo.metadata_conflict:
+            counts["conflicts"] += 1
+
+    enriched_at = store.get_meta("enriched_at")
+    index_root = store.get_meta("index_root")
+    enrich_root = store.get_meta("enrich_root")
+    warnings: list[str] = []
+    # `enriched_at` is the only thing that tells "enrich never ran" (None)
+    # apart from "enrich ran and found nothing" (a timestamp, zero counts).
+    # A count-based guard here ("with_people == 0") would conflate the two
+    # and print this warning forever on a library that was correctly
+    # enriched but genuinely has no face tags.
+    if counts["photos"] and enriched_at is None:
+        warnings.append(
+            "This index has not been enriched. If it came from Google Takeout, "
+            "`rekindle enrich <folder>` adds face tags, capture dates and album titles."
+        )
+    if index_root and enrich_root and index_root != enrich_root:
+        warnings.append(
+            f"Enrichment ran against a different folder ({enrich_root}) than the one "
+            f"indexed ({index_root}). Photo paths are absolute, so almost nothing "
+            "will have matched. Re-run both against the same folder."
+        )
+    if counts["ambiguous"]:
+        warnings.append(
+            f"{counts['ambiguous']} photos had two or more sidecars IN THE SAME FOLDER "
+            "that disagreed on capture time or people, so they were deliberately not "
+            "enriched. This number is small by construction: a disagreeing sidecar in a "
+            "DIFFERENT folder is overridden rather than refused, and `rekindle enrich` "
+            "reports those separately. Do not read a low count here as no conflicts."
+        )
+    if counts["archived"]:
+        warnings.append(
+            f"{counts['archived']} photos are marked archived in Google Photos - the user "
+            "deliberately hid them. They must not surface in a montage."
+        )
+    return IndexDiagnosis(
+        **counts,
+        enriched_at=enriched_at,
+        index_root=index_root,
+        enrich_root=enrich_root,
+        warnings=warnings,
+    )
+
+
+def render_index(diagnosis: IndexDiagnosis, console: Console) -> None:
+    table = Table(title="Index report", show_header=True)
+    table.add_column("Metric")
+    table.add_column("Count", justify="right")
+    table.add_column("Coverage", justify="right")
+    d = diagnosis
+    table.add_row("Photos in index", str(d.photos), "")
+    table.add_row("With capture date", str(d.with_date), f"{d.pct(d.with_date)}%")
+    table.add_row("With GPS", str(d.with_gps), f"{d.pct(d.with_gps)}%")
+    table.add_row("With people", str(d.with_people), f"{d.pct(d.with_people)}%")
+    table.add_row("Enriched from a sidecar", str(d.enriched), f"{d.pct(d.enriched)}%")
+    table.add_row("Enriched via a derivative", str(d.inherited), f"{d.pct(d.inherited)}%")
+    table.add_row("[yellow]Ambiguous (not enriched)[/yellow]", str(d.ambiguous), "")
+    table.add_row("[yellow]Archived in Google Photos[/yellow]", str(d.archived), "")
+    table.add_row("[yellow]EXIF/Google date conflicts[/yellow]", str(d.conflicts), "")
+    console.print(table)
+    console.print(f"\n[dim]Last enriched: {d.enriched_at or 'never'}[/dim]")
+    for warning in d.warnings:
+        console.print(f"\n[yellow]![/yellow] {warning}")
+
+
+def render_enrich(report: EnrichReport, console: Console) -> None:
+    table = Table(title="Enrichment report", show_header=True)
+    table.add_column("Metric")
+    table.add_column("Count", justify="right")
+    for label, value in (
+        ("JSON files seen", report.json_files_seen),
+        ("Sidecars seen", report.sidecars_seen),
+        ("  matched", report.matched),
+        ("  superseded (another candidate won)", report.superseded),
+        ("  [yellow]orphaned, vs. rows in the index[/yellow]", report.orphaned),
+        ("  [yellow]ambiguous (refused)[/yellow]", report.ambiguous),
+        ("  overridden by directory preference", report.directory_preference_broke_a_tie),
+        ("  cross-photo collisions caught", report.cross_photo_collisions),
+        ("Album metadata", report.album_metadata),
+        ("Other JSON", report.other_json),
+        ("Excluded (trash/system)", report.excluded_dirs),
+        ("[yellow]Unparseable[/yellow]", report.unparseable),
+        ("Photos enriched", report.photos_enriched),
+        ("Derivatives enriched", report.derivatives_enriched),
+        ("People added", report.people_added),
+        ("Dates corrected", report.dates_corrected),
+        ("GPS added", report.gps_added),
+        ("Descriptions added", report.descriptions_added),
+        ("Favourites added", report.favourites_added),
+        ("Albums retitled", report.albums_retitled),
+        ("[yellow]EXIF/Google conflicts[/yellow]", report.conflicts),
+        ("Clustered dates suppressed", report.clustered_dates_suppressed),
+    ):
+        table.add_row(label, str(value))
+    console.print(table)
+
+    # Report, never silently drop. If either identity fails, say so loudly -
+    # a mismatch here is exactly the class of bug this whole pass was
+    # redesigned to prevent.
+    if report.json_files_seen != report.files_accounted:
+        console.print(
+            f"\n[red]ACCOUNTING BUG:[/red] {report.json_files_seen} JSON files seen but "
+            f"{report.files_accounted} accounted for. Please file an issue."
+        )
+    if report.sidecars_seen != report.sidecars_accounted:
+        console.print(
+            f"\n[red]ACCOUNTING BUG:[/red] {report.sidecars_seen} sidecars seen but "
+            f"{report.sidecars_accounted} accounted for. Please file an issue."
+        )
+    if report.album_title_collisions:
+        console.print("\n[yellow]![/yellow] Album titles that would collide, left as folder names:")
+        for folder, title in report.album_title_collisions:
+            console.print(f"  {folder} -> {title}")
+    if report.orphaned:
+        console.print(
+            f"\n[yellow]![/yellow] {report.orphaned} sidecars name a photo that has no row "
+            "in the index. Some belong to archive parts you have not extracted; others are "
+            "album copies of photos Takeout did not duplicate. Extract every part into "
+            "the SAME folder and re-run if the number is large."
+        )
+        # Two honest numbers for one concept, not one: `doctor <root>` (a live
+        # filesystem scan, BEFORE indexing) reports its own "Orphan sidecars"
+        # row by comparing JSON sidecars against FILES ON DISK. This row
+        # compares them against ROWS IN THE INDEX, which excludes whatever
+        # that scan already dropped as non-media, undecodable, or excluded
+        # (Trash/, etc). They measure different things about the same export
+        # and will not match - reporting only one, unlabelled, would look
+        # like a bug the first time a user runs both commands and compares.
+        console.print(
+            "  [dim]This is not the same number as `doctor`'s 'Orphan sidecars' row from "
+            "a plain scan (files on disk, before indexing) - this one is measured against "
+            "rows actually IN THE INDEX after indexing's own filtering. Both are correct "
+            "for what they measure; they are expected to differ.[/dim]"
+        )
+    if report.directory_preference_broke_a_tie:
+        console.print(
+            f"\n[yellow]![/yellow] {report.directory_preference_broke_a_tie} photos had a "
+            "sidecar in another album that DISAGREED with the one used; the same-directory "
+            "copy was preferred (directory beats a distant disagreement by design). That is "
+            "not the same as no conflict existing: compare it against the "
+            f"'ambiguous (refused)' count above ({report.ambiguous}) - a disagreement in "
+            "the SAME directory is refused outright, but a DISTANT one is silently "
+            "overridden, so this number, not that one, is the true measure of disagreement."
+        )

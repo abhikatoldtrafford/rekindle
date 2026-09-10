@@ -10,7 +10,8 @@ from rich.console import Console
 
 from rekindle import __version__
 from rekindle.db import PhotoStore
-from rekindle.doctor import diagnose, render
+from rekindle.doctor import diagnose, diagnose_index, render, render_enrich, render_index
+from rekindle.enrich.takeout import EmptyIndexError, TakeoutEnricher
 from rekindle.sources.folder import FolderSource
 
 app = typer.Typer(help="Turn your photo library into memories.", no_args_is_help=True)
@@ -43,8 +44,32 @@ def main(
 @app.command()
 def doctor(
     root: Annotated[Path, typer.Argument(help="Folder of photos to inspect.")],
+    from_index: Annotated[
+        bool,
+        typer.Option("--from-index", help="Report on the stored index instead of rescanning."),
+    ] = False,
+    data_dir: DataDir = Path("./data"),
 ) -> None:
     """Report what metadata a library has. Writes nothing."""
+    if from_index:
+        # PhotoStore CREATES its database on open, so without this check
+        # `doctor --from-index` on a machine that has never indexed would
+        # silently report a healthy library of zero photos - and leave a
+        # stray file behind, violating "doctor writes nothing".
+        db_path = data_dir / "rekindle.sqlite"
+        if not db_path.is_file():
+            console.print(f"[red]No index at[/red] {db_path}. Run `rekindle index {root}` first.")
+            raise typer.Exit(code=2)
+        with PhotoStore(db_path) as store:
+            diagnosis = diagnose_index(store)
+        render_index(diagnosis, console)
+        # `root` is otherwise unused on this path; warn rather than ignore it.
+        if diagnosis.index_root and diagnosis.index_root != str(root):
+            console.print(
+                f"\n[yellow]![/yellow] This index was built from {diagnosis.index_root}, "
+                f"not {root}. The report above describes the former."
+            )
+        return
     _check_root(root)
     _photos, report = FolderSource().scan(root)
     render(diagnose(report), console)
@@ -60,8 +85,31 @@ def index(
     photos, report = FolderSource().scan(root)
     with PhotoStore(data_dir / "rekindle.sqlite") as store:
         inserted, updated = store.upsert_many(photos)
+        store.set_meta("index_root", str(root))
         total = store.count()
     render(diagnose(report), console)
     console.print(
         f"\n[green]Indexed[/green] {inserted} new, {updated} updated. {total} photos in the index."
     )
+
+
+@app.command()
+def enrich(
+    root: Annotated[Path, typer.Argument(help="Takeout folder whose sidecars to read.")],
+    data_dir: DataDir = Path("./data"),
+) -> None:
+    """Read Google Takeout JSON sidecars into an index that already exists."""
+    _check_root(root)
+    with PhotoStore(data_dir / "rekindle.sqlite") as store:
+        try:
+            report = TakeoutEnricher().enrich(root, store)
+        except EmptyIndexError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(code=2) from exc
+        indexed_root = store.get_meta("index_root")
+    render_enrich(report, console)
+    if indexed_root and indexed_root != str(root):
+        console.print(
+            f"\n[yellow]![/yellow] The index was built from {indexed_root}, not {root}. "
+            "Photo paths are absolute, so matches will be few."
+        )

@@ -117,3 +117,50 @@ def test_index_twice_does_not_duplicate(tmp_path):
 def test_missing_directory_exits_nonzero(tmp_path):
     result = runner.invoke(app, ["doctor", str(tmp_path / "nope")])
     assert result.exit_code != 0
+
+
+def test_enrich_before_index_tells_the_user_what_to_do(tmp_path):
+    from tests.fixtures.takeout import build_takeout
+
+    root = build_takeout(tmp_path / "Takeout")
+    result = runner.invoke(app, ["enrich", str(root), "--data-dir", str(tmp_path / "data")])
+    assert result.exit_code == 2
+    assert "rekindle index" in result.stdout
+
+
+def test_index_then_enrich_reports_people(tmp_path):
+    from tests.fixtures.takeout import build_takeout
+
+    root = build_takeout(tmp_path / "Takeout")
+    data = str(tmp_path / "data")
+    assert runner.invoke(app, ["index", str(root), "--data-dir", data]).exit_code == 0
+    result = runner.invoke(app, ["enrich", str(root), "--data-dir", data])
+    assert result.exit_code == 0
+    assert "Sidecars seen" in result.stdout
+
+
+def test_doctor_from_index_reads_the_database(tmp_path):
+    from tests.fixtures.takeout import build_takeout
+
+    root = build_takeout(tmp_path / "Takeout")
+    data = str(tmp_path / "data")
+    runner.invoke(app, ["index", str(root), "--data-dir", data])
+    runner.invoke(app, ["enrich", str(root), "--data-dir", data])
+    result = runner.invoke(app, ["doctor", str(root), "--from-index", "--data-dir", data])
+    assert result.exit_code == 0
+    assert "With people" in result.stdout
+
+
+def test_doctor_from_index_without_an_index_creates_nothing(tmp_path):
+    """M0's standing constraint - `doctor` writes nothing - applies to
+    `--from-index` too. `PhotoStore.__init__` creates its file on open, so
+    without an explicit existence check up front, running this against a
+    machine that has never indexed would both report a fraudulent "0 photos,
+    all healthy" and leave a stray database file behind."""
+    root = tmp_path / "lib"
+    root.mkdir()
+    data = tmp_path / "data"
+    result = runner.invoke(app, ["doctor", str(root), "--from-index", "--data-dir", str(data)])
+    assert result.exit_code == 2
+    assert not data.exists()
+    assert not any(tmp_path.rglob("*.sqlite"))

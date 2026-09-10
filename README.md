@@ -9,11 +9,13 @@ music. Ask for one in plain language, or let it surface them on its own.
 ```bash
 uv run rekindle doctor ~/Pictures    # what metadata do you actually have?
 uv run rekindle index ~/Pictures     # build the local index
+uv run rekindle enrich ~/Pictures    # read Google Takeout JSON sidecars into the index
+uv run rekindle doctor ~/Pictures --from-index   # report on the stored index
 ```
 
 Point it at a folder. That's the whole setup.
 
-Those two commands work today. The montage itself is what's being built next:
+Those four commands work today. The montage itself is what's being built next:
 
 ```bash
 rekindle memory "our trip to the coast, 2014"   # planned
@@ -56,8 +58,10 @@ there's no connector — not in rekindle, not in anything else. Export with Goog
 Takeout, extract it, and point rekindle at the folder. You'll get dates, GPS and
 camera data from EXIF.
 
-A dedicated Takeout parser that also reads Google's JSON sidecars — recovering
-face tags and descriptions — is the next source planned.
+`rekindle enrich` then reads Google's own JSON sidecars — recovering face tags,
+corrected capture dates, descriptions and album titles — into an index that
+`rekindle index` already built. Run `rekindle doctor --from-index` afterwards
+to see what it found.
 
 **[→ Exporting from Google Photos](docs/connecting-google-photos.md)**
 
@@ -76,9 +80,13 @@ uv sync
 
 uv run rekindle doctor ~/Pictures    # what metadata do you actually have?
 uv run rekindle index ~/Pictures     # build the local index
+uv run rekindle enrich ~/Pictures    # read Google Takeout JSON sidecars into the index
+uv run rekindle doctor ~/Pictures --from-index   # report on the stored index
 ```
 
 `doctor` writes nothing at all, so it is safe to point at anything.
+`enrich` requires `index` to have run first — it reads the database, not the
+filesystem, so photo rows must already exist.
 
 No `.env` needed unless you want the optional LLM narration.
 
