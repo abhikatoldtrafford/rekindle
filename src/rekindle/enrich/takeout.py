@@ -576,7 +576,35 @@ def album_renames(index: SidecarIndex, report: EnrichReport) -> dict[str, str]:
     return renames
 
 
-_ENRICHED_STATES = frozenset({"exact", "inherited"})
+# "exact" and "ambiguous" are EARNED: the photo's own sidecar resolution ran
+# to a decision, successful or deliberately refused. Neither is touched here.
+# "none" (never resolved) and "inherited" (from a prior propagation) are NOT
+# earned, so both stay eligible below - "inherited" must be reprocessed, not
+# skipped, or a derivative whose donor is later corrected (a retracted face
+# tag, a corrected date) is frozen with stale data forever. Reprocessing is
+# safe: same donor, same result, whenever the donor hasn't actually changed.
+_EARNED_STATES = frozenset({"exact", "ambiguous"})
+# A donor's data is only trustworthy to copy onward once it carries real
+# enrichment of its own, earned or (transitively) inherited.
+_DONOR_STATES = frozenset({"exact", "inherited"})
+
+
+def _meta_snapshot(meta: PhotoMeta) -> tuple[object, ...]:
+    """Every field this function can touch, as a hashable-free tuple, so a
+    reprocessed row can tell whether its donor actually changed anything."""
+    return (
+        meta.taken_at_utc,
+        meta.taken_at_local,
+        meta.tz_source,
+        meta.exif_taken_at_utc,
+        tuple(meta.people),
+        tuple(meta.takeout_people),
+        meta.gps,
+        meta.description,
+        meta.favorite,
+        meta.archived,
+        meta.trashed,
+    )
 
 
 def propagate_to_derivatives(photos: list[Photo], report: EnrichReport) -> list[Photo]:
@@ -588,7 +616,10 @@ def propagate_to_derivatives(photos: list[Photo], report: EnrichReport) -> list[
         re-derived here from the naming rule: the still is the video's full
         NAME plus ".jpg" - PXL_1.MP pairs with PXL_1.MP.jpg - scoped to one
         directory, because a .MP in one album must never pair with a
-        same-named still in another.
+        same-named still in another. Matched case-insensitively throughout:
+        a real export routinely mixes .MP/.mp and .jpg/.JPG, and this exact
+        naming rule is where M0's original pairing bug (0 pairs on real data)
+        lived.
     """
     by_hash = {p.file_hash: p for p in photos}
     by_dir_name: dict[tuple[Path, str], Photo] = {}
@@ -598,11 +629,13 @@ def propagate_to_derivatives(photos: list[Photo], report: EnrichReport) -> list[
 
     changed: list[Photo] = []
     for photo in photos:
-        if photo.sidecar_match in _ENRICHED_STATES:
+        if photo.sidecar_match in _EARNED_STATES:
             continue
         donor: Photo | None = None
+        via_edited = False
         if photo.edited_of:
             donor = by_hash.get(photo.edited_of)
+            via_edited = donor is not None
         if donor is None:
             for path in photo.paths:
                 if path.suffix.casefold() != ".mp":
@@ -610,11 +643,13 @@ def propagate_to_derivatives(photos: list[Photo], report: EnrichReport) -> list[
                 donor = by_dir_name.get((path.parent, f"{path.name}.jpg".casefold()))
                 if donor is not None:
                     break
-        if donor is None or donor.sidecar_match not in _ENRICHED_STATES:
+        if donor is None or donor.sidecar_match not in _DONOR_STATES:
             continue
 
         src = donor.meta
         dst = photo.meta
+        before = _meta_snapshot(dst)
+
         dst.taken_at_utc = src.taken_at_utc
         dst.taken_at_local = src.taken_at_local
         # NOT src.tz_source. This file has no EXIF of its own, so copying
@@ -623,7 +658,13 @@ def propagate_to_derivatives(photos: list[Photo], report: EnrichReport) -> list[
         # only the claim about where they came from changes, and for this row
         # the answer is the Takeout pass, via its sibling.
         dst.tz_source = TzSource.TAKEOUT
-        dst.exif_taken_at_utc = dst.exif_taken_at_utc or src.exif_taken_at_utc
+        # Same fabrication risk, milder: a .MP video has no EXIF at all, not
+        # even a displaced one, so it never inherits `exif_taken_at_utc`. An
+        # `-edited` variant IS the same shot re-encoded, so it plausibly
+        # shares its original's EXIF lineage - that copy stays conditional
+        # only on "don't clobber a value this row already has".
+        if via_edited:
+            dst.exif_taken_at_utc = dst.exif_taken_at_utc or src.exif_taken_at_utc
         previous = set(dst.takeout_people)
         kept = [name for name in dst.people if name not in previous]
         dst.people = list(dict.fromkeys([*kept, *src.takeout_people]))
@@ -638,10 +679,13 @@ def propagate_to_derivatives(photos: list[Photo], report: EnrichReport) -> list[
         dst.archived = dst.archived or src.archived
         dst.trashed = dst.trashed or src.trashed
         # A fourth state, distinct from "exact": this photo has no sidecar of
-        # its own and doctor should not claim it does.
+        # its own and doctor should not claim it does. Written every time
+        # this row is (re)processed, including when nothing below changed.
         photo.sidecar_match = "inherited"
-        report.derivatives_enriched += 1
-        changed.append(photo)
+
+        if _meta_snapshot(dst) != before:
+            report.derivatives_enriched += 1
+            changed.append(photo)
     return changed
 
 

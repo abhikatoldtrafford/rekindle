@@ -105,6 +105,10 @@ class Photo:
     metadata_conflict: bool = False
     # "exact"     - a sidecar was resolved for this photo
     # "ambiguous" - candidates disagreed and enrichment was REFUSED
+    # "inherited" - this photo had no sidecar of its own; its enrichment was
+    #               copied from an -edited original or a motion-photo still
+    #               (rekindle.enrich.takeout.propagate_to_derivatives). Never
+    #               "exact" - it did not itself match a sidecar.
     # "none"      - no sidecar, or enrich has never run. Distinguish the two by
     #               the `enriched_at` key in the meta table, not by this field.
     sidecar_match: str = "none"
