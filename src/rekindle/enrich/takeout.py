@@ -538,3 +538,56 @@ def apply_sidecar(
     meta.trashed = meta.trashed or sidecar.trashed
 
     photo.sidecar_match = "exact"
+
+
+def album_renames(index: SidecarIndex, report: EnrichReport) -> dict[str, str]:
+    """Folder name -> the album's real title, for titles that actually differ.
+
+    A title identical to its folder is not a rename. A title that would
+    collide with another album's name is REPORTED and skipped: merging two
+    albums the user kept apart is not a decision this pass gets to make
+    (spec section 11).
+
+    `index.albums` is built by `build_index`, which already excludes a null,
+    empty or whitespace-only title - but this function does not trust that as
+    its ONLY line of defence. "Never fabricate a value" applies here too: an
+    empty title is not a title, so it is skipped rather than ever becoming a
+    rename target, even if a future caller populates `SidecarIndex.albums`
+    directly (as this module's own platform-collision test does).
+    """
+    taken = {path.name for path in index.albums}
+    renames: dict[str, str] = {}
+
+    # Sort by a stable, platform-independent key. `sorted()` on Path objects
+    # compares a case-folded form on Windows and a raw one on POSIX, so which
+    # album wins a title collision would differ between a contributor's
+    # machine and CI. M0 hit and fixed this exact bug in FolderSource.scan.
+    def _order(item: tuple[Path, str]) -> tuple[str, str]:
+        return str(item[0]).casefold(), str(item[0])
+
+    for path, title in sorted(index.albums.items(), key=_order):
+        folder = path.name
+        if not title or title == folder:
+            continue
+        if title in taken or title in renames.values():
+            report.album_title_collisions.append((folder, title))
+            continue
+        renames[folder] = title
+    return renames
+
+
+def retitle_albums(photo: Photo, renames: dict[str, str], report: EnrichReport) -> None:
+    """Apply renames wherever the photo lives.
+
+    Not scoped to the album's own directory: 8 album folders in the reference
+    export hold sidecars and zero media, so a directory-scoped rule would
+    never fire for them.
+    """
+    updated = [renames.get(album, album) for album in photo.albums]
+    if updated != photo.albums:
+        # strict=True: the lists are the same length by construction, and
+        # bare zip() is `B905` under this project's ruff config.
+        report.albums_retitled += sum(
+            1 for a, b in zip(photo.albums, updated, strict=True) if a != b
+        )
+        photo.albums = updated
