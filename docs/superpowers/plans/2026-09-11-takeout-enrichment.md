@@ -1247,8 +1247,12 @@ git commit -m "feat: parse and classify Takeout JSON sidecars"
 ### Task 5: Takeout fixture generator
 
 M0's motion-photo bug came from a fixture that invented a convention Google does
-not use. Every structure below was **measured** on a real 45,900-file export, not
-assumed. This tree is the behavioural spec for Tasks 6-12; changing it breaks
+not use. Most structures below were **measured** on the real 24,292-file export
+at `Takeout/Google Photos`; a small, explicitly-labelled set (`broken.json`, the
+orphaned `IMG_MISSING.jpg` sidecar, and a root-level `metadata.json`/`title: null`
+shape not actually present in that export) are deliberately injected edge cases,
+not observations — see the docstring in `tests/fixtures/takeout.py` for which is
+which. This tree is the behavioural spec for Tasks 6-12; changing it breaks
 several tasks at once.
 
 **Files:**
