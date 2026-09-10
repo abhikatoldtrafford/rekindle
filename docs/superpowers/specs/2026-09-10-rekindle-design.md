@@ -188,6 +188,25 @@ types, and anything unreadable.
 keyed, so re-scanning a directory is idempotent and only new files cost work.
 Files that disappear are never deleted from the index; `last_seen` is retained.
 
+#### Takeout-shaped folders
+
+An extracted Takeout export is the single most likely thing a user will point
+this source at, so the folder source handles that shape without needing the
+parser of §5.1:
+
+- **Ignore `*.json`** — sidecars are not media. They are counted and reported by
+  `doctor` as "metadata available, parser not yet implemented", so the value
+  sitting unused is visible rather than silent.
+- **Dedupe across year and album folders** by `file_hash`, unioning the
+  directory names as pseudo-albums. This recovers album membership for free.
+- **Handle `-edited`** — link the edit to its original, prefer the edit, exclude
+  the original from selection. Without this, montages show visible near-duplicate
+  pairs.
+
+Because identity is `file_hash`, a later re-index with the Takeout parser
+enriches the **existing** records in place. No re-export, no re-download, no
+duplicate photos.
+
 ### 5.1 Takeout parser (deferred past v1)
 
 Retained here because it is the next source planned, and because the audit's
