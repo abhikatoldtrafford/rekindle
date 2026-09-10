@@ -83,3 +83,25 @@ def test_out_of_range_offset_falls_back_to_naive():
     utc, _, src = resolve(NAIVE, "+30:00", None, MTIME)
     assert src is TzSource.EXIF_NAIVE
     assert utc == NAIVE.replace(tzinfo=UTC)
+
+
+def test_offset_minutes_out_of_range_falls_back_to_naive():
+    """ "+05:99" matches the offset pattern (minutes is any two digits) but
+    99 is not a valid minutes value; this must degrade to the naive rung,
+    not be silently accepted as UTC+06:39."""
+    utc, _, src = resolve(NAIVE, "+05:99", None, MTIME)
+    assert src is TzSource.EXIF_NAIVE
+    assert utc == NAIVE.replace(tzinfo=UTC)
+
+
+def test_gps_lookup_raising_falls_back_to_naive():
+    """An injected tz_lookup is a third-party callable (e.g. timezonefinder)
+    that may raise on malformed coordinates. That must degrade to the naive
+    rung, not propagate out of resolve()."""
+
+    def _raising_lookup(_gps: Gps) -> str | None:
+        raise RuntimeError("boom")
+
+    utc, _, src = resolve(NAIVE, None, Gps(200.0, 200.0), MTIME, tz_lookup=_raising_lookup)
+    assert src is TzSource.EXIF_NAIVE
+    assert utc == NAIVE.replace(tzinfo=UTC)

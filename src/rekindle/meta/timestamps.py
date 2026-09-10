@@ -29,7 +29,12 @@ def _parse_offset(raw: str | None) -> timezone | None:
     if not m:
         return None
     sign, hours, minutes = m.groups()
-    delta = timedelta(hours=int(hours), minutes=int(minutes))
+    minutes_val = int(minutes)
+    if not 0 <= minutes_val < 60:
+        # e.g. "+05:99": matches the regex (any two digits) but is not a
+        # valid minutes value. Treat it as malformed, same as "banana".
+        return None
+    delta = timedelta(hours=int(hours), minutes=minutes_val)
     try:
         return timezone(-delta if sign == "-" else delta)
     except ValueError:
@@ -53,7 +58,14 @@ def resolve(
             return local.astimezone(UTC), local, TzSource.EXIF_OFFSET
 
         if gps is not None and tz_lookup is not None:
-            name = tz_lookup(gps)
+            try:
+                name = tz_lookup(gps)
+            except Exception:
+                # tz_lookup is an injected third-party callable (e.g. a
+                # timezonefinder-backed lookup); it may raise on malformed
+                # coordinates. Any failure here degrades to the naive rung,
+                # same as a None return or an unresolvable zone name.
+                name = None
             if name:
                 try:
                     zone = ZoneInfo(name)
