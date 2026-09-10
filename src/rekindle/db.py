@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from datetime import datetime
 from pathlib import Path
 from types import TracebackType
@@ -208,6 +208,31 @@ class PhotoStore:
     def all_hashes(self) -> set[str]:
         return {r["file_hash"] for r in self._conn.execute("SELECT file_hash FROM photos")}
 
+    def iter_photos(self) -> Iterator[Photo]:
+        """Every row, streamed. The enricher needs all of them and `get()` per
+        hash would be one SELECT per photo - 19,480 of them on a real export.
+
+        WARNING: this yields from a LIVE cursor. Writing to this store while
+        iterating it is undefined behaviour in SQLite - the same hazard
+        `_migrate` calls `.fetchall()` to avoid. Callers that write must
+        materialise first: `photos = list(store.iter_photos())`, which is what
+        TakeoutEnricher does.
+        """
+        for row in self._conn.execute("SELECT * FROM photos"):
+            yield self._row_to_photo(row)
+
+    def get_meta(self, key: str) -> str | None:
+        row = self._conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        self._conn.execute(
+            "INSERT INTO meta(key, value) VALUES(?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value),
+        )
+        self._conn.commit()
+
     def hashes_for_filename(self, name: str) -> set[str]:
         """Every photo having a path whose filename casefolds to `name`.
 
@@ -237,6 +262,27 @@ class PhotoStore:
                 updated += 1
         self._conn.commit()
         return inserted, updated
+
+    def update_photo(self, photo: Photo) -> None:
+        """Write a photo AS GIVEN. No merge, no conflict detection.
+
+        Deliberately not upsert_many: merge_meta encodes "earliest real date
+        wins", a tiebreak between sources of EQUAL authority. Takeout is not
+        equal - it is Google's own record - and routing enrichment through
+        that rule would silently discard every date correction.
+        """
+        self._insert(self._conn.cursor(), photo)
+        self._conn.commit()
+
+    def update_many(self, photos: Iterable[Photo]) -> int:
+        """update_photo for a batch, in one transaction."""
+        cur = self._conn.cursor()
+        n = 0
+        for photo in photos:
+            self._insert(cur, photo)
+            n += 1
+        self._conn.commit()
+        return n
 
     @staticmethod
     def _merge(old: Photo, new: Photo) -> Photo:

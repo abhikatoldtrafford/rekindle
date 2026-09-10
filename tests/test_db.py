@@ -408,3 +408,107 @@ def test_hashes_for_filename_casefolds_its_own_argument(tmp_path):
         assert s.hashes_for_filename("img_0001.jpg") == {"abc123"}
         assert s.hashes_for_filename("IMG_0001.JPG") == {"abc123"}
         assert s.hashes_for_filename("Img_0001.Jpg") == {"abc123"}
+
+
+def test_iter_photos_yields_every_row(tmp_path):
+    store = PhotoStore(tmp_path / "d" / "r.sqlite")
+    now = datetime(2020, 1, 1, tzinfo=UTC)
+    store.upsert_many(
+        [
+            Photo(
+                file_hash=h,
+                paths=[tmp_path / f"{h}.jpg"],
+                media_type=MediaType.IMAGE,
+                meta=PhotoMeta(),
+                first_seen=now,
+                last_seen=now,
+            )
+            for h in ("aa", "bb", "cc")
+        ]
+    )
+    assert {p.file_hash for p in store.iter_photos()} == {"aa", "bb", "cc"}
+    store.close()
+
+
+def test_update_photo_does_not_merge(tmp_path):
+    """merge_meta keeps the EARLIEST real date. Enrichment must be able to
+    move a date FORWARD when Google says so, which upsert_many cannot do."""
+    store = PhotoStore(tmp_path / "d" / "r.sqlite")
+    now = datetime(2020, 1, 1, tzinfo=UTC)
+    original = Photo(
+        file_hash="aa",
+        paths=[tmp_path / "aa.jpg"],
+        media_type=MediaType.IMAGE,
+        meta=PhotoMeta(
+            taken_at_utc=datetime(2010, 1, 1, tzinfo=UTC),
+            tz_source=TzSource.EXIF_NAIVE,
+            people=["Ada", "Grace"],
+        ),
+        first_seen=now,
+        last_seen=now,
+    )
+    store.upsert_many([original])
+
+    original.meta.taken_at_utc = datetime(2015, 6, 1, tzinfo=UTC)
+    original.meta.tz_source = TzSource.TAKEOUT
+    original.meta.people = ["Grace"]
+    original.sidecar_match = "exact"
+    store.update_photo(original)
+
+    reloaded = store.get("aa")
+    assert reloaded.meta.taken_at_utc == datetime(2015, 6, 1, tzinfo=UTC)
+    assert reloaded.meta.tz_source is TzSource.TAKEOUT
+    assert reloaded.meta.people == ["Grace"]  # not unioned back to two
+    assert reloaded.sidecar_match == "exact"
+    store.close()
+
+
+def test_meta_keys_round_trip(tmp_path):
+    store = PhotoStore(tmp_path / "d" / "r.sqlite")
+    assert store.get_meta("enriched_at") is None
+    store.set_meta("enriched_at", "2026-09-11T10:00:00+00:00")
+    store.set_meta("enriched_at", "2026-09-12T10:00:00+00:00")
+    assert store.get_meta("enriched_at") == "2026-09-12T10:00:00+00:00"
+    store.close()
+
+
+def test_update_many_does_not_merge_and_commits_once(tmp_path):
+    """update_many is update_photo batched: writes must land AS GIVEN (no
+    merge_meta tiebreak) and all-or-nothing in one transaction, exactly like
+    upsert_many's crash-mid-batch guarantee above.
+    """
+    db = tmp_path / "db.sqlite"
+    now = datetime(2020, 1, 1, tzinfo=UTC)
+    with PhotoStore(db) as s:
+        original = Photo(
+            file_hash="aa",
+            paths=[tmp_path / "aa.jpg"],
+            media_type=MediaType.IMAGE,
+            meta=PhotoMeta(
+                taken_at_utc=datetime(2010, 1, 1, tzinfo=UTC),
+                tz_source=TzSource.EXIF_NAIVE,
+            ),
+            first_seen=now,
+            last_seen=now,
+        )
+        s.upsert_many([original])
+
+        original.meta.taken_at_utc = datetime(2015, 6, 1, tzinfo=UTC)
+        original.meta.tz_source = TzSource.TAKEOUT
+        n = s.update_many([original])
+        assert n == 1
+        reloaded = s.get("aa")
+        assert reloaded.meta.taken_at_utc == datetime(2015, 6, 1, tzinfo=UTC)
+
+    with pytest.raises(AttributeError), PhotoStore(db) as s:
+        second = s.get("aa")
+        second.meta.taken_at_utc = datetime(2016, 1, 1, tzinfo=UTC)
+        # object() has no .meta/.file_hash: the loop raises on the second
+        # item, after the first would otherwise have gone in.
+        s.update_many([second, object()])
+
+    with PhotoStore(db) as s:
+        # The half-applied batch above must not have been committed: the
+        # date must still read back as the LAST value durably committed
+        # before the failing update_many call, not 2016.
+        assert s.get("aa").meta.taken_at_utc == datetime(2015, 6, 1, tzinfo=UTC)
