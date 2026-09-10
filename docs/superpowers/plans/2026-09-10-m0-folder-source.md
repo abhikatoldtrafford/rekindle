@@ -10,6 +10,33 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-10-rekindle-design.md`
 
+## Revision history
+
+**v2 (2026-09-10)** — after (a) running the algorithm against a real 4.3 GB
+Takeout export and (b) an independent audit that built and executed the entire
+plan (16 of 69 tests failed as originally written).
+
+Defects fixed: EXIF rationals must be `IFDRational` or Pillow raises (this
+crashed the fixture generator and cascaded into 14 failures); Windows needs
+`tzdata` or the GPS→timezone rung silently dies; `_merge` contradicted the
+spec's merge policy on every field and destroyed enrichment on every re-index;
+duplicate copies never had their metadata read; `edited_linked` double-counted;
+XMP element-style areas fabricated a (0,0) zero-size face box; `dc:description`
+ignored `x-default`; corrupt images indexed as healthy; `.xmp` files were
+counted as "ignored" while being read; HEIC support was installed but never
+registered; `Path` sort order differs per OS; `-edited` matching missed
+uppercase and NFD filenames.
+
+### Explicit scope cuts (v1 promised these; M0 does not deliver them)
+
+- **No IPTC-IIM parsing and no embedded XMP.** Only *sidecar* `.xmp` files are
+  read. Most modern tools write person tags into the image's own XMP packet, so
+  a library tagged that way will report "no person data". `doctor` must say
+  "no XMP **sidecars** found" rather than implying no person data exists.
+- **No incremental scan.** Every run re-hashes every file. `PhotoStore.all_hashes()`
+  exists for a later `(path, size, mtime_ns) → cached hash` layer, but nothing
+  calls it in M0. Do not claim incrementality in docs or `doctor` output.
+
 ## Global Constraints
 
 - **Python floor is 3.12.** Set `requires-python = ">=3.12"`. Do not use 3.13-only syntax.
@@ -34,6 +61,9 @@
 - Create: `tests/__init__.py`
 - Create: `tests/test_smoke.py`
 - Create: `.github/workflows/ci.yml`
+- Requires: `README.md` must exist — `readme = "README.md"` in `pyproject.toml`
+  makes the hatchling build hard-fail with
+  `OSError: Readme file does not exist` if it is missing.
 
 **Interfaces:**
 - Consumes: nothing
@@ -71,6 +101,9 @@ dependencies = [
     "defusedxml>=0.7.1",
     "typer>=0.15.0",
     "rich>=13.9.0",
+    # Windows ships no tz database, so zoneinfo cannot resolve "Asia/Kolkata"
+    # and the GPS->timezone rung silently degrades to "assume UTC".
+    "tzdata>=2024.1; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]
@@ -144,12 +177,32 @@ jobs:
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run pytest -v
+
+  # --all-extras above means the no-HEIC path is never exercised. It is a
+  # supported configuration, so it needs a job.
+  test-minimal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv sync
+      - run: uv run pytest -v
 ```
 
-- [ ] **Step 7: Verify lint and format pass**
+- [ ] **Step 7: Format, then verify lint and format pass**
 
-Run: `uv run ruff check . && uv run ruff format --check .`
-Expected: no errors. If format fails, run `uv run ruff format .` and re-check.
+```bash
+uv run ruff format .
+uv run ruff check . --fix
+uv run ruff format --check .
+```
+
+Expected: clean.
+
+**Do this after every task, before committing.** The code blocks in this plan
+are hand-wrapped for readability and ruff-format will rewrite many of them —
+that is expected and correct, not a sign you typed something wrong. CI runs
+`ruff format --check`, so an unformatted commit is a red build.
 
 - [ ] **Step 8: Commit**
 
@@ -326,6 +379,60 @@ class Photo:
     last_seen: datetime
     albums: list[str] = field(default_factory=list)
     edited_of: str | None = None
+    # Which Source produced this record. Load-bearing for later sources
+    # (Takeout, Immich, Apple Photos) enriching existing rows in place -
+    # and impossible to add later without a migration we don't have.
+    source: str = "folder"
+    # Set when two sightings of the same bytes disagree on a real capture date
+    # or carry different non-empty descriptions.
+    metadata_conflict: bool = False
+
+
+def merge_meta(old: PhotoMeta, new: PhotoMeta) -> tuple[PhotoMeta, bool]:
+    """Field-by-field merge per spec 4.2. Returns (merged, conflict).
+
+    Lives here, not in the store, because both the store (re-index) and the
+    folder source (the same bytes seen in two folders) need it.
+
+    A wholesale `new if new.taken_at_utc else old` swap would be WRONG: the
+    folder source always sets taken_at_utc via its mtime fallback, so `new`
+    would always win and every re-index would destroy prior enrichment.
+    """
+
+    def _real(m: PhotoMeta) -> bool:
+        return m.taken_at_utc is not None and m.tz_source is not TzSource.FILE_MTIME
+
+    conflict = False
+    if _real(old) and _real(new):
+        conflict = old.taken_at_utc != new.taken_at_utc
+        keep = old if old.taken_at_utc <= new.taken_at_utc else new  # earliest wins
+    elif _real(old):
+        keep = old
+    elif _real(new):
+        keep = new
+    else:
+        keep = new
+
+    descs = [d for d in (old.description, new.description) if d]
+    if len(descs) == 2 and descs[0] != descs[1]:
+        conflict = True
+
+    merged = PhotoMeta(
+        taken_at_utc=keep.taken_at_utc,
+        taken_at_local=keep.taken_at_local,
+        tz_source=keep.tz_source,
+        gps=old.gps or new.gps,
+        people=list(dict.fromkeys([*old.people, *new.people])),
+        face_regions=list(dict.fromkeys([*old.face_regions, *new.face_regions])),
+        keywords=list(dict.fromkeys([*old.keywords, *new.keywords])),
+        description=max(descs, key=len) if descs else None,
+        favorite=old.favorite or new.favorite,
+        camera_make=old.camera_make or new.camera_make,
+        camera_model=old.camera_model or new.camera_model,
+        width=old.width or new.width,
+        height=old.height or new.height,
+    )
+    return merged, conflict
 
 
 @dataclass
@@ -339,7 +446,7 @@ class SourceReport:
     media_indexed: int = 0
     duplicates_merged: int = 0
     edited_linked: int = 0
-    sidecars_ignored: int = 0
+    json_sidecars: int = 0
     orphan_sidecars: int = 0
     motion_pairs: int = 0
     excluded_dirs: int = 0
@@ -526,6 +633,8 @@ def sniff(path: Path) -> tuple[MediaType, str]:
         return (MediaType.IMAGE, "bmp")
     if head.startswith(b"RIFF") and head[8:12] == b"WEBP":
         return (MediaType.IMAGE, "webp")
+    if head.startswith(b"RIFF") and head[8:12] == b"AVI ":
+        return (MediaType.VIDEO, "avi")
     if head.startswith((b"II*\x00", b"MM\x00*")):
         return (MediaType.IMAGE, "tiff")
 
@@ -539,7 +648,10 @@ def sniff(path: Path) -> tuple[MediaType, str]:
             return (MediaType.VIDEO, "mov")
         if brand in _VIDEO_BRANDS:
             return (MediaType.VIDEO, "mp4")
-        return (MediaType.VIDEO, "mp4")
+        # An unrecognised ISO-BMFF brand might be a raw camera format (crx) or
+        # anything else. Guessing "video" would file it wrongly and silently;
+        # UNKNOWN gets it counted and surfaced instead.
+        return (MediaType.UNKNOWN, f"ftyp:{brand}")
 
     return (MediaType.UNKNOWN, "unknown")
 
@@ -655,7 +767,8 @@ def test_upsert_same_hash_updates_last_seen_and_unions_albums(tmp_path):
         got = s.get("abc123")
 
     assert sorted(got.albums) == ["Goa Trip", "Year 2014"]
-    assert sorted(str(p) for p in got.paths) == sorted(["/a/x.jpg", "/b/x.jpg"])
+    # Compare Paths, not strings: Path("/a/x.jpg") is "\a\x.jpg" on Windows.
+    assert sorted(got.paths) == sorted([Path("/a/x.jpg"), Path("/b/x.jpg")])
     assert got.first_seen == T0  # earliest wins
     assert got.last_seen == T1   # latest wins
 
@@ -703,7 +816,15 @@ from datetime import datetime
 from pathlib import Path
 from types import TracebackType
 
-from rekindle.models import FaceRegion, Gps, MediaType, Photo, PhotoMeta, TzSource
+from rekindle.models import (
+    FaceRegion,
+    Gps,
+    MediaType,
+    Photo,
+    PhotoMeta,
+    TzSource,
+    merge_meta,
+)
 
 SCHEMA_VERSION = 1
 
@@ -735,7 +856,9 @@ CREATE TABLE IF NOT EXISTS photos (
     camera_make   TEXT,
     camera_model  TEXT,
     width         INTEGER,
-    height        INTEGER
+    height        INTEGER,
+    source        TEXT NOT NULL DEFAULT 'folder',
+    metadata_conflict INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_photos_taken ON photos(taken_at_utc);
@@ -764,6 +887,21 @@ class PhotoStore:
             (str(SCHEMA_VERSION),),
         )
         self._conn.commit()
+        # CREATE TABLE IF NOT EXISTS silently keeps an old table, so a version
+        # check is the only thing standing between a schema change and a
+        # baffling OperationalError on the next write.
+        found = self.schema_version()
+        if found > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"{db_path} was written by a newer rekindle "
+                f"(schema v{found} > v{SCHEMA_VERSION}). Upgrade rekindle."
+            )
+        if found < SCHEMA_VERSION:
+            raise RuntimeError(
+                f"{db_path} uses schema v{found}, this rekindle expects "
+                f"v{SCHEMA_VERSION}, and no migration exists yet. Delete the "
+                "file and re-index."
+            )
 
     def __enter__(self) -> PhotoStore:
         return self
@@ -803,28 +941,40 @@ class PhotoStore:
     @staticmethod
     def _merge(old: Photo, new: Photo) -> Photo:
         """Union paths and albums; keep the widest time window."""
-        paths = list(dict.fromkeys([*[str(x) for x in old.paths], *[str(x) for x in new.paths]]))
+        paths = list(dict.fromkeys([*old.paths, *new.paths]))
         albums = list(dict.fromkeys([*old.albums, *new.albums]))
+        meta, conflict = merge_meta(old.meta, new.meta)
         return Photo(
             file_hash=old.file_hash,
-            paths=[Path(x) for x in paths],
+            paths=paths,
             media_type=new.media_type,
-            meta=new.meta if new.meta.taken_at_utc else old.meta,
+            meta=meta,
             first_seen=min(old.first_seen, new.first_seen),
             last_seen=max(old.last_seen, new.last_seen),
             albums=albums,
             edited_of=new.edited_of or old.edited_of,
+            source=new.source or old.source,
+            metadata_conflict=old.metadata_conflict or new.metadata_conflict or conflict,
         )
 
     @staticmethod
     def _insert(cur: sqlite3.Cursor, p: Photo) -> None:
         m = p.meta
+        # Columns are named explicitly. Positional VALUES(...) breaks silently
+        # the moment a column is added or reordered.
         cur.execute(
-            """INSERT OR REPLACE INTO photos VALUES
-               (:file_hash,:media_type,:paths,:albums,:edited_of,:first_seen,:last_seen,
-                :taken_at_utc,:taken_at_local,:tz_source,:gps_lat,:gps_lon,:gps_alt,
-                :people,:face_regions,:keywords,:description,:favorite,
-                :camera_make,:camera_model,:width,:height)""",
+            """INSERT OR REPLACE INTO photos
+               (file_hash, media_type, paths, albums, edited_of, first_seen,
+                last_seen, taken_at_utc, taken_at_local, tz_source, gps_lat,
+                gps_lon, gps_alt, people, face_regions, keywords, description,
+                favorite, camera_make, camera_model, width, height, source,
+                metadata_conflict)
+               VALUES
+               (:file_hash,:media_type,:paths,:albums,:edited_of,:first_seen,
+                :last_seen,:taken_at_utc,:taken_at_local,:tz_source,:gps_lat,
+                :gps_lon,:gps_alt,:people,:face_regions,:keywords,:description,
+                :favorite,:camera_make,:camera_model,:width,:height,:source,
+                :metadata_conflict)""",
             {
                 "file_hash": p.file_hash,
                 "media_type": str(p.media_type),
@@ -851,6 +1001,8 @@ class PhotoStore:
                 "camera_model": m.camera_model,
                 "width": m.width,
                 "height": m.height,
+                "source": p.source,
+                "metadata_conflict": int(p.metadata_conflict),
             },
         )
 
@@ -893,6 +1045,8 @@ class PhotoStore:
             last_seen=_undt(row["last_seen"]),
             albums=json.loads(row["albums"]),
             edited_of=row["edited_of"],
+            source=row["source"],
+            metadata_conflict=bool(row["metadata_conflict"]),
         )
 ```
 
@@ -1009,6 +1163,7 @@ from datetime import datetime
 from pathlib import Path
 
 from PIL import Image
+from PIL.TiffImagePlugin import IFDRational
 
 _XMP_TEMPLATE = """<?xpacket begin="\ufeff" id="W5M0MpCehiHzreSzNTczkc9d"?>
 <x:xmpmeta xmlns:x="adobe:ns:meta/">
@@ -1068,12 +1223,19 @@ def make_jpeg(
     return path
 
 
-def _deg_to_dms(deg: float) -> tuple[tuple[int, int], tuple[int, int], tuple[int, int]]:
+def _deg_to_dms(deg: float) -> tuple[IFDRational, IFDRational, IFDRational]:
+    """EXIF rationals MUST be IFDRational.
+
+    Passing raw (num, den) tuples makes Pillow raise
+    `TypeError: bad operand type for abs(): 'tuple'` inside _limit_rational.
+    Verified: IFDRational round-trips to 0.000000 degrees of error in both
+    hemispheres, on Pillow 11.1.0, 11.3.0 and 12.3.0.
+    """
     d = int(deg)
     m_full = (deg - d) * 60
     m = int(m_full)
     s = round((m_full - m) * 60 * 100)
-    return ((d, 1), (m, 1), (s, 100))
+    return (IFDRational(d, 1), IFDRational(m, 1), IFDRational(s, 100))
 
 
 def make_xmp_sidecar(
@@ -1277,10 +1439,22 @@ def test_photo_without_exif_returns_empty_not_error(tmp_path):
     assert d.gps is None
 
 
-def test_unreadable_file_returns_empty_not_error(tmp_path):
+def test_undecodable_file_is_flagged_not_silently_empty(tmp_path):
+    """A corrupt image must be distinguishable from one that simply lacks EXIF."""
     p = tmp_path / "broken.jpg"
     p.write_bytes(b"\xff\xd8\xff" + b"garbage")
-    assert read_exif(p) == ExifData()
+    d = read_exif(p)
+    assert d.decode_ok is False
+    assert d.error
+    assert d.taken_naive is None
+
+
+def test_healthy_file_without_exif_is_decode_ok(tmp_path):
+    from tests.fixtures.gen import make_jpeg
+
+    d = read_exif(make_jpeg(tmp_path / "plain.jpg"))
+    assert d.decode_ok is True
+    assert d.taken_naive is None
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -1304,6 +1478,17 @@ from PIL import Image
 
 from rekindle.models import Gps
 
+# Without this, Image.open on a HEIC raises, read_exif swallows it, and every
+# iPhone photo indexes with no date, no GPS and no dimensions - silently.
+# The `heic` extra installs pillow-heif; absence is a supported configuration.
+try:
+    from pillow_heif import register_heif_opener
+
+    register_heif_opener()
+    HEIF_AVAILABLE = True
+except ImportError:  # pragma: no cover - depends on optional extra
+    HEIF_AVAILABLE = False
+
 _EXIF_IFD = 0x8769
 _GPS_IFD = 0x8825
 _MAKE, _MODEL = 0x010F, 0x0110
@@ -1320,6 +1505,11 @@ class ExifData:
     camera_model: str | None = None
     width: int | None = None
     height: int | None = None
+    # False when the image could not be decoded at all. Without this, a
+    # truncated JPEG is indistinguishable from a photo that merely lacks EXIF,
+    # and doctor reports perfect health on a library of corrupt files.
+    decode_ok: bool = True
+    error: str | None = None
 
 
 def _rational(value: object) -> float:
@@ -1356,8 +1546,10 @@ def read_exif(path: Path) -> ExifData:
             exif = im.getexif()
             sub = exif.get_ifd(_EXIF_IFD)
             gps_ifd = exif.get_ifd(_GPS_IFD)
-    except Exception:
-        return ExifData()
+    except Image.DecompressionBombError as exc:
+        return ExifData(decode_ok=False, error=f"decompression bomb: {exc}")
+    except Exception as exc:
+        return ExifData(decode_ok=False, error=f"{type(exc).__name__}: {exc}")
 
     taken = _parse_dt(sub.get(_DATETIME_ORIGINAL)) or _parse_dt(sub.get(_DATETIME_DIGITIZED))
     offset = sub.get(_OFFSET_ORIGINAL) or sub.get(_OFFSET_DIGITIZED)
@@ -1474,6 +1666,68 @@ def test_region_names_also_count_as_people(tmp_path):
     assert "Carol" in read_xmp(side).people
 
 
+def test_area_as_child_elements_is_read_not_zeroed(tmp_path):
+    """digiKam writes stArea as child elements, not attributes."""
+    side = tmp_path / "d.xmp"
+    side.write_text(
+        """<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:mwg-rs="http://www.metadataworkinggroup.com/schemas/regions/"
+    xmlns:stArea="http://ns.adobe.com/xmp/sType/Area#">
+   <mwg-rs:Regions rdf:parseType='Resource'><mwg-rs:RegionList><rdf:Bag>
+    <rdf:li rdf:parseType='Resource'>
+      <mwg-rs:Name>Alice</mwg-rs:Name>
+      <mwg-rs:Area rdf:parseType='Resource'>
+        <stArea:x>0.4</stArea:x><stArea:y>0.35</stArea:y>
+        <stArea:w>0.18</stArea:w><stArea:h>0.24</stArea:h>
+      </mwg-rs:Area>
+    </rdf:li>
+   </rdf:Bag></mwg-rs:RegionList></mwg-rs:Regions>
+  </rdf:Description></rdf:RDF></x:xmpmeta>""",
+        encoding="utf-8",
+    )
+    r = read_xmp(side).face_regions
+    assert len(r) == 1
+    assert abs(r[0].x - 0.4) < 1e-6
+    assert abs(r[0].h - 0.24) < 1e-6
+
+
+def test_region_with_no_coordinates_is_rejected_not_zeroed(tmp_path):
+    side = tmp_path / "e.xmp"
+    side.write_text(
+        """<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about=""
+    xmlns:mwg-rs="http://www.metadataworkinggroup.com/schemas/regions/"
+    xmlns:stArea="http://ns.adobe.com/xmp/sType/Area#">
+   <mwg-rs:Regions rdf:parseType='Resource'><mwg-rs:RegionList><rdf:Bag>
+    <rdf:li rdf:parseType='Resource'>
+      <mwg-rs:Name>Alice</mwg-rs:Name><mwg-rs:Area/>
+    </rdf:li>
+   </rdf:Bag></mwg-rs:RegionList></mwg-rs:Regions>
+  </rdf:Description></rdf:RDF></x:xmpmeta>""",
+        encoding="utf-8",
+    )
+    assert read_xmp(side).face_regions == ()
+
+
+def test_description_prefers_x_default_language(tmp_path):
+    side = tmp_path / "f.xmp"
+    side.write_text(
+        """<x:xmpmeta xmlns:x="adobe:ns:meta/">
+ <rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">
+  <rdf:Description rdf:about="" xmlns:dc="http://purl.org/dc/elements/1.1/">
+   <dc:description><rdf:Alt>
+     <rdf:li xml:lang='de'>Deutsch zuerst</rdf:li>
+     <rdf:li xml:lang='x-default'>the real one</rdf:li>
+   </rdf:Alt></dc:description>
+  </rdf:Description></rdf:RDF></x:xmpmeta>""",
+        encoding="utf-8",
+    )
+    assert read_xmp(side).description == "the real one"
+
+
 def test_malformed_xmp_returns_empty_not_error(tmp_path):
     bad = tmp_path / "bad.xmp"
     bad.write_text("<not-closed>", encoding="utf-8")
@@ -1519,6 +1773,8 @@ _NS = {
     "Iptc4xmpExt": "http://iptc.org/std/Iptc4xmpExt/2008-02-29/",
 }
 
+_XML_LANG = "{http://www.w3.org/XML/1998/namespace}lang"
+
 
 @dataclass(frozen=True)
 class XmpData:
@@ -1553,6 +1809,24 @@ def _q(ns: str, name: str) -> str:
     return f"{{{_NS[ns]}}}{name}"
 
 
+def _area_value(area, key: str) -> float | None:
+    """MWG areas appear as attributes (Lightroom) or child elements (digiKam).
+
+    Returns None when absent, so the caller can reject the region instead of
+    defaulting a coordinate to 0.0.
+    """
+    raw = area.get(_q("stArea", key))
+    if raw is None:
+        child = area.find(f"stArea:{key}", _NS)
+        raw = child.text if child is not None else None
+    if raw is None:
+        return None
+    try:
+        return float(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+
+
 def read_xmp(path: Path) -> XmpData:
     try:
         root = DefusedET.parse(path).getroot()
@@ -1562,12 +1836,12 @@ def read_xmp(path: Path) -> XmpData:
     people = _bag_items(root, "Iptc4xmpExt:PersonInImage")
     keywords = _bag_items(root, "dc:subject")
 
-    description = None
-    for node in root.iterfind(".//dc:description//rdf:li", _NS):
-        text = (node.text or "").strip()
-        if text:
-            description = text
-            break
+    # x-default is the canonical entry in an XMP language alternative. Taking
+    # the first rdf:li returns whichever language happens to be serialised
+    # first, which in a multi-language Lightroom catalog is arbitrary.
+    alts = [n for n in root.iterfind(".//dc:description//rdf:li", _NS) if (n.text or "").strip()]
+    chosen = next((n for n in alts if n.get(_XML_LANG) == "x-default"), alts[0] if alts else None)
+    description = chosen.text.strip() if chosen is not None else None
 
     regions: list[FaceRegion] = []
     for li in root.iterfind(".//mwg-rs:RegionList//rdf:li", _NS):
@@ -1579,18 +1853,14 @@ def read_xmp(path: Path) -> XmpData:
         if name_node is None or area is None:
             continue
         name = (name_node.text or "").strip()
-        try:
-            region = FaceRegion(
-                name=name,
-                x=float(area.get(_q("stArea", "x"), "0")),
-                y=float(area.get(_q("stArea", "y"), "0")),
-                w=float(area.get(_q("stArea", "w"), "0")),
-                h=float(area.get(_q("stArea", "h"), "0")),
-            )
-        except (TypeError, ValueError):
+        if not name:
             continue
-        if name:
-            regions.append(region)
+        vals = {k: _area_value(area, k) for k in ("x", "y", "w", "h")}
+        if any(v is None for v in vals.values()):
+            # Never invent 0.0. A fabricated box at the origin with zero area
+            # would be handed to face-aware cropping as if it were real.
+            continue
+        regions.append(FaceRegion(name=name, **vals))
 
     named = list(dict.fromkeys([*people, *(r.name for r in regions)]))
     return XmpData(
@@ -1821,7 +2091,7 @@ def test_indexes_images_and_skips_non_media(tmp_path):
 def test_json_sidecars_are_ignored_but_counted(tmp_path):
     root = build_library(tmp_path / "lib")
     _, report = _scan(root)
-    assert report.sidecars_ignored >= 1
+    assert report.json_sidecars >= 1
 
 
 def test_duplicate_across_folders_becomes_one_photo_with_both_albums(tmp_path):
@@ -1889,14 +2159,20 @@ def test_photo_directly_in_root_has_no_album(tmp_path):
     assert photos[0].albums == []
 
 
-def test_unreadable_file_is_reported_not_fatal(tmp_path):
+def test_corrupt_file_is_indexed_but_reported_as_unreadable(tmp_path):
+    """It must not pass as a healthy photo - doctor would report false health."""
     root = tmp_path / "lib"
     root.mkdir(parents=True)
     make_jpeg(root / "good.jpg")
     (root / "truncated.jpg").write_bytes(b"\xff\xd8\xff" + b"\x00" * 20)
     photos, report = _scan(root)
     assert any("good.jpg" in x.name for p in photos for x in p.paths)
-    assert report.files_seen >= 2
+    assert report.files_seen == 2
+    assert len(report.unreadable) == 1
+    bad_path, reason = report.unreadable[0]
+    assert bad_path.name == "truncated.jpg"
+    assert reason
+    assert report.skipped.get("undecodable") == 1
 
 
 def test_rescan_is_idempotent(tmp_path):
@@ -1989,6 +2265,7 @@ Also create an empty `src/rekindle/sources/__init__.py`.
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -1996,9 +2273,17 @@ from rekindle.identity import file_hash, is_long_path, sniff
 from rekindle.meta.exif import read_exif
 from rekindle.meta.timestamps import TzLookup, resolve
 from rekindle.meta.xmp import find_sidecar, read_xmp
-from rekindle.models import MediaType, Photo, PhotoMeta, SourceReport, TzSource
+from rekindle.models import (
+    MediaType,
+    Photo,
+    PhotoMeta,
+    SourceReport,
+    TzSource,
+    merge_meta,
+)
 
 # Google localises the edited suffix, so this is a list, not a single string.
+# It also emits several derived-image suffixes beyond plain edits.
 EDITED_SUFFIXES: tuple[str, ...] = (
     "-edited",
     "-bearbeitet",
@@ -2007,6 +2292,12 @@ EDITED_SUFFIXES: tuple[str, ...] = (
     "-modificato",
     "-bewerkt",
     "-redigerad",
+    "-effects",
+    "-collage",
+    "-animation",
+    "-mix",
+    "-pano",
+    "-smile",
 )
 
 _SIDECAR_EXTS = {".json", ".xmp", ".aae", ".thm"}
@@ -2033,8 +2324,15 @@ class FolderSource:
 
         media_names: set[str] = set()
         sidecar_stems: list[str] = []
+        saw_xmp: set[str] = set()
 
-        for path in sorted(p for p in root.rglob("*") if p.is_file()):
+        # Explicit, platform-stable key. Path.__lt__ case-folds on Windows and
+        # does not on POSIX, so bare sorted() visits files in a different order
+        # per OS - which decides which copy of a duplicate becomes canonical.
+        for path in sorted(
+            (p for p in root.rglob("*") if p.is_file()),
+            key=lambda p: tuple(part.casefold() for part in p.relative_to(root).parts),
+        ):
             report.files_seen += 1
 
             # Deleted photos must never become memories.
@@ -2046,7 +2344,12 @@ class FolderSource:
                 report.long_paths.append(path)
 
             if path.suffix.lower() in _SIDECAR_EXTS:
-                report.sidecars_ignored += 1
+                # .xmp files ARE read (find_sidecar/read_xmp). Counting them as
+                # "ignored" made doctor warn that data was being discarded three
+                # rows below reporting it as successfully read.
+                if path.suffix.lower() == ".xmp":
+                    continue
+                report.json_sidecars += 1
                 if path.name != "metadata.json":
                     sidecar_stems.append(_sidecar_target(path.name))
                 continue
@@ -2078,19 +2381,33 @@ class FolderSource:
             else:
                 edited_pending.append((digest, path.parent, base_stem))
 
+            has_xmp = find_sidecar(path) is not None
+
             if digest in by_hash:
                 existing = by_hash[digest]
                 existing.paths.append(path)
                 if album and album not in existing.albums:
                     existing.albums.append(album)
                 existing.last_seen = max(existing.last_seen, mtime)
+                # The second copy must still be READ. In Takeout the sidecar
+                # frequently sits beside only one of the two copies, so
+                # skipping this silently loses the metadata half of dedupe.
+                merged, conflict = merge_meta(
+                    existing.meta, self._read_meta(path, media_type, mtime, report)
+                )
+                existing.meta = merged
+                existing.metadata_conflict = existing.metadata_conflict or conflict
+                if has_xmp and digest not in saw_xmp:
+                    saw_xmp.add(digest)
+                    report.with_xmp += 1
                 report.duplicates_merged += 1
                 continue
 
-            if find_sidecar(path) is not None:
+            if has_xmp:
+                saw_xmp.add(digest)
                 report.with_xmp += 1
 
-            meta = self._read_meta(path, media_type, mtime)
+            meta = self._read_meta(path, media_type, mtime, report)
             by_hash[digest] = Photo(
                 file_hash=digest,
                 paths=[path],
@@ -2101,10 +2418,17 @@ class FolderSource:
                 albums=[album] if album else [],
             )
 
+        # edited_pending holds one entry per PATH, but only one Photo exists per
+        # hash. An edited variant living in both a year folder and an album -
+        # entirely ordinary in Takeout - would otherwise be counted twice, and
+        # doctor would report more edits linked than photos exist.
         for digest, parent, base_stem in edited_pending:
+            photo = by_hash.get(digest)
+            if photo is None or photo.edited_of is not None:
+                continue
             original = stem_index.get((parent, base_stem))
             if original and original != digest:
-                by_hash[digest].edited_of = original
+                photo.edited_of = original
                 report.edited_linked += 1
 
         # A sidecar with no media file means that photo is in an archive part
@@ -2134,8 +2458,15 @@ class FolderSource:
                 report.with_people += 1
         return photos, report
 
-    def _read_meta(self, path: Path, media_type: MediaType, mtime: datetime) -> PhotoMeta:
+    def _read_meta(
+        self, path: Path, media_type: MediaType, mtime: datetime, report: SourceReport
+    ) -> PhotoMeta:
         exif = read_exif(path) if media_type is MediaType.IMAGE else None
+        if exif is not None and not exif.decode_ok:
+            # Still index it - the file exists and the user should see it - but
+            # never let it pass as healthy.
+            report.unreadable.append((path, exif.error or "undecodable"))
+            report.skip("undecodable")
         sidecar = find_sidecar(path)
         xmp = read_xmp(sidecar) if sidecar else None
 
@@ -2163,9 +2494,17 @@ class FolderSource:
 
 
 def _split_edited(stem: str) -> tuple[str, str | None]:
+    """Case- and Unicode-insensitive.
+
+    Google emits -EDITED as well as -edited, and APFS/HFS+ hand back
+    decomposed (NFD) filenames - so a French Takeout on macOS would never
+    match the NFC '-modifié' in the list above.
+    """
+    norm = unicodedata.normalize("NFC", stem).casefold()
     for suffix in EDITED_SUFFIXES:
-        if stem.lower().endswith(suffix):
-            return stem[: -len(suffix)], suffix
+        s = unicodedata.normalize("NFC", suffix).casefold()
+        if norm.endswith(s):
+            return stem[: len(stem) - len(suffix)], suffix
     return stem, None
 
 
@@ -2266,7 +2605,7 @@ def test_warns_about_long_paths(tmp_path):
 
 
 def test_warns_about_unignored_json_sidecars():
-    d = diagnose(_report(media_indexed=100, with_date=100, sidecars_ignored=40))
+    d = diagnose(_report(media_indexed=100, with_date=100, json_sidecars=40))
     assert any("takeout" in w.lower() or "sidecar" in w.lower() for w in d.warnings)
 
 
@@ -2279,7 +2618,7 @@ def test_healthy_library_has_no_warnings():
 def test_orphan_sidecars_produce_an_incomplete_export_warning():
     """The single most common way a library comes out half-empty."""
     d = diagnose(_report(media_indexed=2802, with_date=2802, with_people=1,
-                         sidecars_ignored=5013, orphan_sidecars=2211))
+                         json_sidecars=5013, orphan_sidecars=2211))
     hits = [w for w in d.warnings if "INCOMPLETE EXPORT" in w]
     assert len(hits) == 1
     assert "2211" in hits[0]
@@ -2288,7 +2627,7 @@ def test_orphan_sidecars_produce_an_incomplete_export_warning():
 
 def test_no_orphan_warning_when_export_is_complete():
     d = diagnose(_report(media_indexed=100, with_date=100, with_people=5,
-                         sidecars_ignored=100, orphan_sidecars=0))
+                         json_sidecars=100, orphan_sidecars=0))
     assert not any("INCOMPLETE EXPORT" in w for w in d.warnings)
 
 
@@ -2311,10 +2650,16 @@ runner = CliRunner()
 def test_doctor_reports_without_writing_a_database(tmp_path):
     root = build_library(tmp_path / "lib")
     data = tmp_path / "data"
-    result = runner.invoke(app, ["doctor", str(root), "--data-dir", str(data)])
+    result = runner.invoke(app, ["doctor", str(root)])
     assert result.exit_code == 0
     assert "photos" in result.stdout.lower()
-    assert not (data / "rekindle.sqlite").exists()
+    assert not data.exists()
+
+
+def test_version_flag_works(tmp_path):
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0
+    assert result.stdout.strip()
 
 
 def test_index_writes_photos_to_the_database(tmp_path):
@@ -2368,6 +2713,7 @@ from dataclasses import dataclass, field
 from rich.console import Console
 from rich.table import Table
 
+from rekindle.meta.exif import HEIF_AVAILABLE
 from rekindle.models import SourceReport
 
 _LOW_DATE_PCT = 50.0
@@ -2405,7 +2751,7 @@ def diagnose(report: SourceReport) -> Diagnosis:
             "enable LongPathsEnabled or some files may be unreadable."
         )
     if report.orphan_sidecars:
-        matched = max(report.sidecars_ignored - report.orphan_sidecars, 0)
+        matched = max(report.json_sidecars - report.orphan_sidecars, 0)
         denom = matched + report.orphan_sidecars
         rate = round(100.0 * report.orphan_sidecars / denom, 1) if denom else 0.0
         warnings.append(
@@ -2415,9 +2761,9 @@ def diagnose(report: SourceReport) -> Diagnosis:
             "part into the SAME folder before indexing, or your library will be "
             "silently missing photos."
         )
-    if report.sidecars_ignored and total and report.sidecars_ignored >= total * 0.25:
+    if report.json_sidecars and total and report.json_sidecars >= total * 0.25:
         warnings.append(
-            f"{report.sidecars_ignored} JSON/XMP sidecars were ignored. This looks "
+            f"{report.json_sidecars} Google JSON sidecars are present but not yet parsed. This looks "
             "like a Google Takeout export - the Takeout parser that reads those "
             "(face tags, descriptions) is not implemented yet."
         )
@@ -2445,7 +2791,7 @@ def render(diagnosis: Diagnosis, console: Console) -> None:
     table.add_row("Duplicates merged", str(r.duplicates_merged), "")
     table.add_row("Edited variants linked", str(r.edited_linked), "")
     table.add_row("Motion photo pairs", str(r.motion_pairs), "")
-    table.add_row("Sidecars ignored", str(r.sidecars_ignored), "")
+    table.add_row("JSON sidecars (unparsed)", str(r.json_sidecars), "")
     table.add_row("[yellow]Orphan sidecars[/yellow]", str(r.orphan_sidecars), "")
     table.add_row("Excluded (trash/system)", str(r.excluded_dirs), "")
     table.add_row("Skipped", str(r.total_skipped), "")
@@ -2455,6 +2801,21 @@ def render(diagnosis: Diagnosis, console: Console) -> None:
         console.print("\n[dim]Skipped by reason:[/dim]")
         for reason, count in sorted(r.skipped.items()):
             console.print(f"  {reason}: {count}")
+
+    # Spec 5.0 requires doctor report anything unreadable. Collecting these and
+    # never showing them would be the silent drop the whole design forbids.
+    if r.unreadable:
+        console.print(f"\n[red]Unreadable ({len(r.unreadable)}):[/red]")
+        for path, reason in r.unreadable[:10]:
+            console.print(f"  {path.name}: {reason}")
+        if len(r.unreadable) > 10:
+            console.print(f"  ... and {len(r.unreadable) - 10} more")
+
+    if not HEIF_AVAILABLE:
+        console.print(
+            "\n[dim]HEIC support: disabled. Install with "
+            "`uv sync --extra heic` if your library has iPhone photos.[/dim]"
+        )
 
     for warning in diagnosis.warnings:
         console.print(f"\n[yellow]![/yellow] {warning}")
@@ -2491,16 +2852,24 @@ def _check_root(root: Path) -> None:
         raise typer.Exit(code=2)
 
 
-@app.command()
-def version() -> None:
-    """Print the version."""
-    console.print(__version__)
+def _version_callback(value: bool) -> None:
+    if value:
+        console.print(__version__)
+        raise typer.Exit()
+
+
+@app.callback()
+def main(
+    _version: Annotated[
+        bool, typer.Option("--version", callback=_version_callback, is_eager=True)
+    ] = False,
+) -> None:
+    """Turn your photo library into memories."""
 
 
 @app.command()
 def doctor(
     root: Annotated[Path, typer.Argument(help="Folder of photos to inspect.")],
-    data_dir: DataDir = Path("./data"),
 ) -> None:
     """Report what metadata a library has. Writes nothing."""
     _check_root(root)
@@ -2566,12 +2935,36 @@ git commit -m "feat: doctor and index commands"
 
 ---
 
+## A note on Task 9 and Task 10 size
+
+Task 9 is by far the largest — walk, classify, hash, dedupe, edit-linking,
+metadata ladder and report accounting in one commit. The two most serious
+defects the audit found (duplicate copies losing metadata, `edited_linked`
+double-counting) live exactly at the seam a single-task framing hides. If you
+prefer smaller units, split it:
+
+- **9a** walk + classify + hash → `Photo` stubs
+- **9b** dedupe + merge + edited linking
+- **9c** metadata ladder assembly
+
+Task 10 is openly two: `doctor.py` (pure logic, trivially testable) and
+`cli.py` (typer wiring). They have separate test files already.
+
+Also note that `build_library()` from Task 5 is the de-facto behavioural spec
+for Tasks 6, 7, 9 and 10 — changing that tree breaks four tasks at once.
+
 ## Definition of done for M0
 
 - [ ] `uv run pytest` passes on Windows, macOS and Linux in CI
+- [ ] The no-extras job passes too (HEIC absent is a supported configuration)
 - [ ] `uv run ruff check .` and `ruff format --check .` clean
 - [ ] `rekindle doctor <folder>` reports coverage and writes nothing
-- [ ] `rekindle index <folder>` populates SQLite and is idempotent on re-run
+- [ ] `rekindle --version` works
+- [ ] `rekindle index <folder>` populates SQLite; re-running yields the same
+      row count and does not destroy previously merged metadata
 - [ ] No network access anywhere in the test suite
 - [ ] No torch, numpy, or model dependency in `pyproject.toml`
-- [ ] Every skipped file is counted with a reason
+- [ ] Every skipped file is counted with a reason, and `report.unreadable` is
+      both populated and rendered
+- [ ] No fabricated data anywhere: a missing coordinate is a rejected region,
+      not a zero; an undecodable image is flagged, not silently empty
