@@ -186,7 +186,7 @@ conflating them loses information.
 |---|---|
 | `taken_at_utc` | Google's `photoTakenTime`, subject to the cluster bound above |
 | `taken_at_local` | Derived as above — never via the naive ladder |
-| `people` | Union on first enrich; **replace** on re-enrich for the same source (see below) |
+| `people` | `(existing − previous_takeout) + new_takeout`, tracked via `PhotoMeta.takeout_people` (see below) |
 | `gps` | Fills only when absent; `(0,0)` treated as absent |
 | `description` | Longest non-empty |
 | `favorite` | From `favorited`; absent means false |
@@ -200,8 +200,22 @@ conflating them loses information.
 v1's union/OR merges are non-retractable: a face tag corrected in Google Photos,
 or a photo un-favourited, could never be fixed by re-exporting. For a tool
 holding 40 real people's names, an index with no way to retract a wrong
-identification is a defect, not a simplification. Enrichment is keyed on source
-provenance so a second run replaces what the first wrote.
+identification is a defect, not a simplification.
+
+v1 said "union on first enrich, replace on re-enrich", which **is not
+implementable against a flat list** — with only a merged `people` list there is
+nothing to subtract, so a second run cannot tell which names it contributed
+last time from which came from another source.
+
+**`PhotoMeta.takeout_people` holds the last enrich's contribution**, making the
+rule computable:
+
+```
+people = (existing − previous_takeout) + new_takeout
+```
+
+A name Google no longer reports is removed; a name from any other source
+survives untouched.
 
 ### Why `metadata_conflict` changed
 
@@ -228,8 +242,14 @@ respectively in the reference export, zero matched by any key. Each is a separat
 `file_hash` and therefore a separate `Photo` row, so the version a user most
 likely wants in a montage is the one with no date and no face tags.
 
-M0 already links them via `edited_of` and motion pairing. After matching,
-enrichment **propagates along those links**.
+M0 links `-edited` files to their originals via `edited_of`, which **is**
+persisted. Its `.MP` pairing is **not** — `motion_pairs` is a report counter, an
+integer, never an edge stored on any row. v1 asserted "M0 already links them"
+about both; that is only half true, and it was asserted without checking.
+
+Enrichment therefore propagates along `edited_of` where the edge exists, and
+**re-derives** the motion-photo pairing from the naming rule
+(`PXL_x.MP` ↔ `PXL_x.MP.jpg`) where it does not.
 
 ## 7. Reporting, with an enforced invariant
 
@@ -241,10 +261,18 @@ EnrichReport:
   conflicts, clustered_dates_suppressed
 ```
 
-**An accounting-invariant test, mirroring M0's:**
+**Accounting-invariant tests, mirroring M0's.** Note there are *two* identities,
+not one: v1 specified a single equation that **cannot hold**, because it had no
+bucket for the 44 non-photo JSON files (`shared_album_comments.json`,
+`user-generated-memory-titles.json`, the root `metadata.json`) or for parse
+failures. An invariant that cannot balance is worse than none — it would have
+been "fixed" by loosening it.
 
 ```
-sidecars_seen == matched + orphaned + ambiguous + excluded_dirs
+json_files_seen == sidecars_seen + album_metadata + other_json
+                   + excluded_dirs + unparseable
+
+sidecars_seen  == matched + orphaned + ambiguous
 ```
 
 M0's equivalent test is what makes a whole class of silent drop impossible to
