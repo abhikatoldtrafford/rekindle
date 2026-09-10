@@ -1,14 +1,50 @@
-"""A Takeout export reproducing structure MEASURED on a real 45,900-file
-export. Nothing here is invented: every pathology below was counted.
+"""A Takeout export reproducing structure MEASURED on a real 24,292-file
+export at `Takeout/Google Photos`. Most of what follows was counted, not
+assumed - after two earlier defects in this project came from exactly that
+shortcut (M0's `.jpg`+`.MP` motion-photo naming, and this milestone's own
+first-draft spec claiming sidecars match on `title`), every shape below was
+re-verified against the real export before being written into this file.
+
+MEASURED (counted against all 24,248 real sidecars unless noted):
 
     (N) collisions with differing people   833 groups, 100 with differing people
     album folders holding zero media       8
-    -edited files with no sidecar          177
-    .MP halves with no sidecar             692
-    geoDataExif key-absent                 89.6% of sidecars
-    favorited absent when false            all but 7 sidecars
-    non-photo JSON at album level          metadata.json, shared_album_comments,
-                                           user-generated-memory-titles
+    -edited files with no sidecar          177 (0 have one)
+    .MP halves with no sidecar             692 (0 have one); .MP.jpg: 729/729 do
+    geoData/geoDataExif                    a strict bijection - 2,532 sidecars
+                                           have BOTH non-zero, 21,716 have
+                                           NEITHER key, 0 have exactly one
+    favorited=true                         7 sidecars (0 carry `favorited: false`)
+    archived=true                          162 sidecars
+    trashed=true                           12 sidecars, all under Trash/
+    non-photo JSON at album level          42 metadata.json (4 titles differ
+                                           from the folder name, 2 empty),
+                                           1 shared_album_comments.json,
+                                           1 user-generated-memory-titles.json
+                                           (`title` is a list) - 44 total,
+                                           zero bare per-photo `.json` sidecars
+    per-photo sidecar naming schemes       exactly two: `.supplemental-metadata`
+                                           and `.supplemental-metadata(N)` -
+                                           no third scheme, no truncated forms
+
+DELIBERATELY INJECTED (not observed in the export; added so parsing/matching
+code has something to fail on - do not read these as measured facts):
+
+    broken.json                            malformed JSON, to exercise
+                                           `unparseable` classification
+    IMG_MISSING.jpg sidecar with no photo  simulates a Takeout part that
+                                           wasn't extracted
+    root-level metadata.json,              a plausible non-photo JSON at the
+    title: null                           export root. An earlier draft of
+                                           this file presented this as
+                                           MEASURED; scanning all 24,292 files
+                                           in the reference export found no
+                                           root-level metadata.json at all.
+                                           Kept only as a synthetic case for
+                                           "non-photo JSON must not be
+                                           mistaken for a sidecar" - its shape
+                                           (a top-level metadata.json with a
+                                           null title) is invented, not seen.
 """
 
 from __future__ import annotations
@@ -82,6 +118,10 @@ def build_takeout(root: Path) -> Path:
     )
 
     # --- derivatives Google never writes a sidecar for ---------------------
+    # geoData is left at the `_sidecar` default (zeroed): the real export is a
+    # strict bijection between geoData and geoDataExif - 2,532 sidecars have
+    # BOTH non-zero, 21,716 have NEITHER key, 0 have exactly one. A zeroed
+    # geoData is the case that actually produces a key-absent geoDataExif.
     make_jpeg(year / "IMG_EDIT.jpg", size=(28, 28))
     make_jpeg(year / "IMG_EDIT-edited.jpg", size=(29, 29))
     _sidecar(
@@ -89,24 +129,32 @@ def build_takeout(root: Path) -> Path:
         title="IMG_EDIT.jpg",
         photoTakenTime={"timestamp": "1400000000"},
         people=[{"name": "Grace"}],
-        geoData={"latitude": 22.5, "longitude": 88.3, "altitude": 9.0},
     )
     make_jpeg(year / "PXL_1.MP.jpg", size=(30, 30))
-    (year / "PXL_1.MP").write_bytes(b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 32)
+    (year / "PXL_1.MP").write_bytes(b"\x00\x00\x00\x18ftypisom" + b"\x00" * 32)
     _sidecar(
         year / "PXL_1.MP.jpg.supplemental-metadata.json",
         title="PXL_1.MP.jpg",
         photoTakenTime={"timestamp": "1700000000"},
         people=[{"name": "Ada"}],
+        # The other half of the bijection above: when geoData is non-zero,
+        # geoDataExif is always present too, and the two never disagree
+        # (measured across 2,532 real pairs).
+        geoData={"latitude": 22.5, "longitude": 88.3, "altitude": 9.0},
+        geoDataExif={"latitude": 22.5, "longitude": 88.3, "altitude": 9.0},
     )
 
     # --- an orphan: a sidecar whose photo is in an un-extracted part -------
     _sidecar(year / "IMG_MISSING.jpg.supplemental-metadata.json", title="IMG_MISSING.jpg")
 
-    # --- flags, and a bare `.json` sidecar --------------------------------
+    # --- flags, on the ONLY sidecar naming scheme Google writes -------------
+    # `.supplemental-metadata.json` is the correct scheme here too - a bare
+    # `.json` per-photo sidecar does not exist anywhere in the real export
+    # (measured: 0 of 24,292 files; the only non-`supplemental-metadata` JSON
+    # is the 44 album/root-level files handled elsewhere in this tree).
     make_jpeg(year / "IMG_FLAGS.jpg", size=(31, 31))
     _sidecar(
-        year / "IMG_FLAGS.jpg.json",
+        year / "IMG_FLAGS.jpg.supplemental-metadata.json",
         title="IMG_FLAGS.jpg",
         photoTakenTime={"timestamp": "1450000000"},
         description="a real caption",
@@ -136,10 +184,14 @@ def build_takeout(root: Path) -> Path:
     _sidecar(root / "Untitled" / "IMG_U0.jpg.supplemental-metadata.json", title="IMG_U0.jpg")
     _sidecar(root / "Untitled(1)" / "IMG_U1.jpg.supplemental-metadata.json", title="IMG_U1.jpg")
 
-    # --- Trash: never parsed ----------------------------------------------
+    # --- Trash: never parsed ------------------------------------------------
+    # Folder placement alone is enough for FolderSource to exclude this, but
+    # all 12 real trashed sidecars also carry `trashed: true` (present only
+    # when true, like `favorited` and `archived`) - so the enricher's own
+    # JSON-field exclusion path needs data to exercise it too.
     trash = root / "Trash"
     trash.mkdir(parents=True, exist_ok=True)
     make_jpeg(trash / "IMG_GONE.jpg", size=(34, 34))
-    _sidecar(trash / "IMG_GONE.jpg.supplemental-metadata.json", title="IMG_GONE.jpg")
+    _sidecar(trash / "IMG_GONE.jpg.supplemental-metadata.json", title="IMG_GONE.jpg", trashed=True)
 
     return root
