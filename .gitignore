@@ -10,8 +10,6 @@ token*.json
 # Personal data — never commit
 data/
 takeout/
-*.zip
-*.tgz
 photos/
 thumbnails/
 index/
@@ -42,3 +40,9 @@ models/
 Thumbs.db
 .idea/
 .vscode/
+
+# Archives, except test fixtures
+*.zip
+*.tgz
+!tests/fixtures/**/*.zip
+!tests/fixtures/**/*.tgz
