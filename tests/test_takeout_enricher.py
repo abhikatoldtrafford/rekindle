@@ -184,6 +184,68 @@ def test_re_enrich_of_an_exif_naive_photo_stays_idempotent(tmp_path):
     store.close()
 
 
+def test_a_sidecar_is_never_applied_to_two_distinct_photos(tmp_path):
+    """Found by running the enricher against the real export (task 11's own
+    instruction), not by inspection: `matched` came out 3 lower than
+    `photos_enriched` (18,306 vs 18,309), for exactly this reason. 342
+    filenames are shared by distinct photos even after content-hash dedup
+    (`tests/fixtures/takeout.py`); when only ONE of them has a sidecar of
+    its own, `resolve()` cannot see the OTHER, unrelated photo of the same
+    name - its single-global-candidate fallback (rule 2) has nothing to
+    disagree with, so it happily hands the SAME sidecar to both. That is a
+    real misattribution (someone else's face tag and capture time written
+    onto this photo), not just a bookkeeping gap - `resolve()` only ever
+    sees one photo at a time, so only the enricher, which sees all of them,
+    can catch it.
+
+    A same-directory match is `resolve()`'s reliable branch (rule 1); the
+    photo actually living beside the sidecar must win, and the coincidental
+    namesake must be refused rather than silently tagged too.
+    """
+    root = tmp_path / "Takeout"
+    (root / "A").mkdir(parents=True)
+    (root / "B").mkdir(parents=True)
+    # These exact sizes are load-bearing, not arbitrary: B's content hash
+    # sorts LOWER than A's (verified directly against `identity.file_hash`).
+    # A must still win, because it lives beside the sidecar - if the
+    # same-directory preference were ever dropped in favour of a bare
+    # lowest-file_hash tiebreak, B would wrongly win and this test would
+    # catch it. Picking sizes at random would make that mutant pass by
+    # accident roughly half the time.
+    make_jpeg(root / "A" / "Photo0288.jpg", size=(38, 38))
+    make_jpeg(root / "B" / "Photo0288.jpg", size=(40, 40))
+    (root / "A" / "Photo0288.jpg.supplemental-metadata.json").write_text(
+        json.dumps(
+            {
+                "title": "Photo0288.jpg",
+                "photoTakenTime": {"timestamp": "1400000000"},
+                "people": [{"name": "Priya"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    photos, _ = FolderSource().scan(root)
+    store = PhotoStore(tmp_path / "data" / "rekindle.sqlite")
+    store.upsert_many(photos)
+
+    report = TakeoutEnricher().enrich(root, store)
+
+    assert report.matched == report.photos_enriched == 1
+    by_dir = {p.paths[0].parent.name: p for p in store.iter_photos()}
+    assert by_dir["A"].meta.people == ["Priya"]
+    assert by_dir["A"].sidecar_match == "exact"
+    # The namesake in B is a DIFFERENT photo (different bytes). It must not
+    # receive A's face tag or capture time, and must not be reported as
+    # enriched.
+    assert by_dir["B"].meta.people == []
+    # FolderSource always sets SOME taken_at_utc via the mtime fallback; the
+    # thing that must NOT happen is Takeout's date landing on it.
+    assert by_dir["B"].meta.tz_source == TzSource.FILE_MTIME
+    assert by_dir["B"].sidecar_match == "ambiguous"
+    store.close()
+
+
 def test_enrich_against_an_empty_index_refuses(tmp_path):
     root = build_takeout(tmp_path / "Takeout")
     store = PhotoStore(tmp_path / "data" / "rekindle.sqlite")

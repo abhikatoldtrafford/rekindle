@@ -707,6 +707,55 @@ def retitle_albums(photo: Photo, renames: dict[str, str], report: EnrichReport) 
         photo.albums = updated
 
 
+def _resolve_without_cross_photo_collisions(
+    photos: list[Photo], index: SidecarIndex
+) -> list[tuple[Photo, Sidecar | None, str, bool]]:
+    """`resolve()` per photo, then correct for what it cannot see on its own.
+
+    A sidecar describes exactly one real photo. 342 filenames are shared by
+    distinct photos even after content-hash dedup (see
+    `tests/fixtures/takeout.py`); when only one of those photos has a
+    sidecar of its own, `resolve()`'s single-global-candidate fallback (rule
+    2) has nothing to disagree with, so it hands that SAME sidecar to every
+    other same-named photo too - a real misattribution (a face tag and
+    capture time written onto a photo they were never about), not merely an
+    accounting gap. First found by running the enricher against the
+    reference export: `matched` read 3 lower than a naive per-photo tally of
+    "resolve() said exact".
+
+    `resolve()` cannot see this on its own - it is handed one photo at a
+    time. Only here, with every photo's resolution in hand, can the
+    collision even be detected. It is broken by preferring whichever photo
+    actually lives in the sidecar's own directory (rule 1, `resolve()`'s
+    reliable branch - at most one candidate ever can, since two different
+    files cannot share one name in one directory) and falling back to the
+    lowest `file_hash` for a deterministic, idempotent choice when neither
+    does. Whoever loses is demoted to "ambiguous", exactly as if `resolve()`
+    had refused it directly.
+    """
+    resolved = [(photo, *resolve(photo, index)) for photo in photos]
+
+    claims: dict[Path, list[int]] = {}
+    for i, (_photo, sidecar, _match, _tie) in enumerate(resolved):
+        if sidecar is not None:
+            claims.setdefault(sidecar.path, []).append(i)
+
+    demoted: set[int] = set()
+    for sidecar_path, indices in claims.items():
+        if len(indices) < 2:
+            continue
+        reliable = [
+            i for i in indices if sidecar_path.parent in {p.parent for p in resolved[i][0].paths}
+        ]
+        winner = reliable[0] if reliable else min(indices, key=lambda i: resolved[i][0].file_hash)
+        demoted.update(i for i in indices if i != winner)
+
+    return [
+        (photo, None, "ambiguous", False) if i in demoted else (photo, sidecar, match, tie)
+        for i, (photo, sidecar, match, tie) in enumerate(resolved)
+    ]
+
+
 class EmptyIndexError(RuntimeError):
     """`enrich` ran before `index`. Enriching nothing is not a success."""
 
@@ -748,8 +797,7 @@ class TakeoutEnricher:
         applied: set[Path] = set()
         touched: dict[str, Photo] = {}
 
-        for photo in photos:
-            sidecar, match, tie = resolve(photo, index)
+        for photo, sidecar, match, tie in _resolve_without_cross_photo_collisions(photos, index):
             # Keyed on EVERY one of the photo's paths, not just paths[0]:
             # `PhotoStore`'s dedup unions paths by content hash with no
             # guarantee they share a filename, and `resolve()` itself already
