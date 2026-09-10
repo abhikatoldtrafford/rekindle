@@ -512,3 +512,62 @@ def test_update_many_does_not_merge_and_commits_once(tmp_path):
         # date must still read back as the LAST value durably committed
         # before the failing update_many call, not 2016.
         assert s.get("aa").meta.taken_at_utc == datetime(2015, 6, 1, tzinfo=UTC)
+
+
+def test_update_photo_retires_stale_photo_paths_row_on_rename(tmp_path):
+    """`photo_paths` must stay consistent with `photos` on ANY write path,
+    not just `upsert_many`/migration. Both `update_photo` and `update_many`
+    are correct today only because they route through `_insert`, which does
+    the DELETE + re-INSERT upkeep; a future hand-rolled `UPDATE photos SET
+    ...` for either writer would silently stop retiring old rows, and
+    nothing else in this suite would notice.
+    """
+    with PhotoStore(tmp_path / "db.sqlite") as s:
+        original = _photo("aa", paths=[tmp_path / "old_name.jpg"])
+        s.upsert_many([original])
+        assert s.hashes_for_filename("old_name.jpg") == {"aa"}
+
+        renamed = _photo("aa", paths=[tmp_path / "new_name.jpg"])
+        s.update_photo(renamed)
+
+        assert s.hashes_for_filename("old_name.jpg") == set()
+        assert s.hashes_for_filename("new_name.jpg") == {"aa"}
+
+        rows = s._conn.execute("SELECT path FROM photo_paths WHERE file_hash = 'aa'").fetchall()
+        # Exactly one row: the stale "old_name.jpg" row must be GONE, not
+        # merely shadowed by a second row for "new_name.jpg".
+        assert [r["path"] for r in rows] == [str(tmp_path / "new_name.jpg")]
+
+
+def test_update_many_keeps_photo_paths_consistent_for_multi_path_photos(tmp_path):
+    """Same guarantee as above, batched, with multi-path photos: a partial
+    delete (e.g. only the first path's row retired) would only show up when
+    a photo has more than one path.
+    """
+    with PhotoStore(tmp_path / "db.sqlite") as s:
+        m1 = _photo("m1", paths=[tmp_path / "m1_old_a.jpg", tmp_path / "m1_old_b.jpg"])
+        m2 = _photo("m2", paths=[tmp_path / "m2_old.jpg"])
+        s.upsert_many([m1, m2])
+
+        m1_renamed = _photo("m1", paths=[tmp_path / "m1_new.jpg"])
+        m2_renamed = _photo("m2", paths=[tmp_path / "m2_new_a.jpg", tmp_path / "m2_new_b.jpg"])
+        n = s.update_many([m1_renamed, m2_renamed])
+        assert n == 2
+
+        assert s.hashes_for_filename("m1_old_a.jpg") == set()
+        assert s.hashes_for_filename("m1_old_b.jpg") == set()
+        assert s.hashes_for_filename("m1_new.jpg") == {"m1"}
+        assert s.hashes_for_filename("m2_old.jpg") == set()
+        assert s.hashes_for_filename("m2_new_a.jpg") == {"m2"}
+        assert s.hashes_for_filename("m2_new_b.jpg") == {"m2"}
+
+        m1_rows = s._conn.execute("SELECT path FROM photo_paths WHERE file_hash = 'm1'").fetchall()
+        assert [r["path"] for r in m1_rows] == [str(tmp_path / "m1_new.jpg")]
+
+        m2_rows = {
+            r["path"]
+            for r in s._conn.execute(
+                "SELECT path FROM photo_paths WHERE file_hash = 'm2'"
+            ).fetchall()
+        }
+        assert m2_rows == {str(tmp_path / "m2_new_a.jpg"), str(tmp_path / "m2_new_b.jpg")}

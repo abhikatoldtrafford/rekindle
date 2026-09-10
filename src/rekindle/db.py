@@ -215,8 +215,8 @@ class PhotoStore:
         WARNING: this yields from a LIVE cursor. Writing to this store while
         iterating it is undefined behaviour in SQLite - the same hazard
         `_migrate` calls `.fetchall()` to avoid. Callers that write must
-        materialise first: `photos = list(store.iter_photos())`, which is what
-        TakeoutEnricher does.
+        materialise first: `photos = list(store.iter_photos())`, as any
+        writing caller must - including the planned Takeout enricher.
         """
         for row in self._conn.execute("SELECT * FROM photos"):
             yield self._row_to_photo(row)
