@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import NamedTuple
 
 from rekindle.models import Gps, Photo
 from rekindle.sidecars import is_album_metadata, sidecar_target
@@ -286,16 +287,39 @@ def build_index(root: Path, report: EnrichReport) -> SidecarIndex:
 def _disagree(a: Sidecar, b: Sidecar) -> bool:
     """Do two candidates for one photo tell different stories?
 
-    Only the fields that would change the photo's record. Two sidecars
-    agreeing on date and people are interchangeable, however many there are.
+    Every field `EnrichReport` can credit as a real change to the record:
+    date, people, GPS, description, and favourite. Originally checked only
+    date and people; on the reference export, among applied-vs-discarded
+    candidate pairs that agreed on those two, 9 disagreed on GPS and 2 on
+    favourite - each silently overridden with `tie=False` and no counter,
+    which made the docstring's claim false. `archived`/`trashed` are
+    deliberately excluded: EnrichReport has no counter that credits either as
+    a change, so widening this far would flag disagreements nothing reports.
     """
-    return a.taken_at_utc != b.taken_at_utc or set(a.people) != set(b.people)
+    return (
+        a.taken_at_utc != b.taken_at_utc
+        or set(a.people) != set(b.people)
+        or a.gps != b.gps
+        or a.description != b.description
+        or a.favorite != b.favorite
+    )
 
 
-def resolve(photo: Photo, index: SidecarIndex) -> tuple[Sidecar | None, str, bool]:
+class Resolution(NamedTuple):
+    """`resolve()`'s result. A NamedTuple, not a bare 3-tuple, so a caller
+    that only cares about the sidecar cannot drop `directory_preference_broke_a_tie`
+    without a positional `_` that is visible in review - the exact silence
+    that let the override go unreported before. Unpacks like a plain tuple,
+    so `sidecar, outcome, tie = resolve(...)` still works unchanged.
+    """
+
+    sidecar: Sidecar | None
+    outcome: str
+    directory_preference_broke_a_tie: bool
+
+
+def resolve(photo: Photo, index: SidecarIndex) -> Resolution:
     """Find the one sidecar describing `photo`, or refuse.
-
-    Returns (sidecar, outcome, preference_broke_a_tie).
 
     1. A candidate in the same directory as one of the photo's paths wins.
     2. Otherwise, if the remaining candidates all agree, take the first.
@@ -306,7 +330,8 @@ def resolve(photo: Photo, index: SidecarIndex) -> tuple[Sidecar | None, str, boo
     happens to 942 photos, and every disagreeing group has its candidates in
     different directories - so rule 3 fires only 2 times. Left silent, doctor
     prints an `ambiguous` count of 2 and the hazard looks negligible when it
-    is not. The third return value is what makes the override visible.
+    is not. `Resolution.directory_preference_broke_a_tie` is what makes the
+    override visible.
     """
     candidates: list[Sidecar] = []
     parents = {p.parent for p in photo.paths}
@@ -315,19 +340,19 @@ def resolve(photo: Photo, index: SidecarIndex) -> tuple[Sidecar | None, str, boo
             if sidecar not in candidates:
                 candidates.append(sidecar)
     if not candidates:
-        return None, "none", False
+        return Resolution(None, "none", False)
 
     same_dir = [s for s in candidates if s.path.parent in parents]
     if same_dir:
         chosen = same_dir[0]
         if any(_disagree(chosen, s) for s in same_dir[1:]):
-            return None, "ambiguous", False
+            return Resolution(None, "ambiguous", False)
         tie = any(_disagree(chosen, s) for s in candidates if s.path.parent not in parents)
-        return chosen, "exact", tie
+        return Resolution(chosen, "exact", tie)
 
     if all(not _disagree(candidates[0], s) for s in candidates[1:]):
-        return candidates[0], "exact", False
-    return None, "ambiguous", False
+        return Resolution(candidates[0], "exact", False)
+    return Resolution(None, "ambiguous", False)
 
 
 def account(
@@ -339,21 +364,36 @@ def account(
     """Partition every indexed sidecar into exactly one bucket.
 
     `claimed` maps a casefolded target to the resolution outcome; `applied`
-    holds the paths of the sidecars actually WRITTEN onto a photo.
+    holds the paths of the sidecars actually WRITTEN onto a photo. `claimed`
+    is keyed by target, not by photo, because `account()` only ever sees
+    target-level groups - but a target's outcome must still be trusted as
+    "ambiguous" if ANY photo sharing that name was refused, even if another
+    photo sharing it resolved exact. 342 filenames are shared by distinct
+    photos on the reference export even after content-hash dedup; a caller
+    that lets a later `claimed[target] = "exact"` overwrite an earlier
+    `"ambiguous"` erases the refusal here with nothing left to catch it -
+    the caller MUST make that assignment sticky (see
+    `tests/test_takeout_index.py`).
 
-    The `superseded` bucket is the whole point. Crediting `matched` with
-    `len(sidecars)` for every claimed target - as the first draft of this plan
-    did - inflated it by 3,358 on the reference export, because a target with
-    three candidates contributes one application and two discards. Those 3,358
-    were parsed and thrown away with nothing reporting it, which is precisely
-    v1's failure mode surviving inside the machinery built to prevent it.
+    Both non-orphan branches scan `applied` for the same reason: `matched`
+    counts only sidecars that were actually WRITTEN, never merely claimed.
+    An outcome of "exact" without a matching entry in `applied` is
+    `superseded`, not `matched` - crediting `len(sidecars)` to `matched` for
+    every claimed target, as the first draft of this plan did, inflated it
+    by 3,358 on the reference export. An outcome of "ambiguous" is symmetric:
+    if one of its sidecars WAS applied (to a different photo that shared the
+    target name and legitimately resolved exact), that one is `matched`, and
+    only the rest count as the refusal - crediting the whole group to
+    `ambiguous` regardless of `applied`, as an earlier draft of THIS fix did,
+    undercounts `matched` and breaks `matched == len(applied)`.
     """
     for target, sidecars in index.by_target.items():
         outcome = claimed.get(target)
+        used = sum(1 for s in sidecars if s.path in applied)
         if outcome == "ambiguous":
-            report.ambiguous += len(sidecars)
+            report.matched += used
+            report.ambiguous += len(sidecars) - used
         elif outcome == "exact":
-            used = sum(1 for s in sidecars if s.path in applied)
             report.matched += used
             report.superseded += len(sidecars) - used
         else:

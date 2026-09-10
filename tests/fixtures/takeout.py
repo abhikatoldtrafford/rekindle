@@ -34,6 +34,14 @@ code has something to fail on - do not read these as measured facts):
                                            `unparseable` classification
     IMG_MISSING.jpg sidecar with no photo  simulates a Takeout part that
                                            wasn't extracted
+    two SHARED.jpg photos, one directory   342 real filenames ARE shared by
+    resolving exact and one ambiguous      distinct photos even after
+                                           content-hash dedup (measured); this
+                                           specific pairing - one photo's
+                                           resolution overwriting another's
+                                           refusal in a target-keyed `claimed`
+                                           dict - is the synthetic case that
+                                           exercises it deterministically
     root-level metadata.json,              a plausible non-photo JSON at the
     title: null                           export root. An earlier draft of
                                            this file presented this as
@@ -106,6 +114,33 @@ def build_takeout(root: Path) -> Path:
         photoTakenTime={"timestamp": "1200000000"},
         people=[{"name": "Grace"}],
     )
+
+    # --- two DISTINCT photos sharing one target filename --------------------
+    # 342 filenames are shared by distinct photos on the reference export
+    # even after content-hash dedup. `SHARED.jpg` names two different real
+    # files here: one next to a same-directory candidate (resolves exact,
+    # with the directory-preference tie against Goa Trip's disagreeing
+    # candidate), one in a directory with no candidate of its own (falls
+    # back to the two global candidates, which disagree, and is refused).
+    # `account()`'s `claimed` dict is keyed by target, not by photo - a
+    # caller that lets the second resolution overwrite the first's refusal
+    # reproduces "984 sidecars vanished into dict.__setitem__" one level up.
+    make_jpeg(year / "SHARED.jpg", size=(35, 35))
+    _sidecar(
+        year / "SHARED.jpg.supplemental-metadata.json",
+        title="SHARED.jpg",
+        photoTakenTime={"timestamp": "1100000000"},
+        people=[{"name": "Ada"}],
+    )
+    _sidecar(
+        root / "Goa Trip" / "SHARED.jpg.supplemental-metadata.json",
+        title="SHARED.jpg",
+        photoTakenTime={"timestamp": "1500000000"},
+        people=[{"name": "Grace"}],
+    )
+    kolkata = root / "Kolkata Trip"
+    kolkata.mkdir(parents=True, exist_ok=True)
+    make_jpeg(kolkata / "SHARED.jpg", size=(37, 37))
 
     # --- a photo whose only sidecar lives in an album with no media --------
     # 1,204 real photos are in this position; per-directory keying loses them.
