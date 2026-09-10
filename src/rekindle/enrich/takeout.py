@@ -9,13 +9,14 @@ count everything - which `EnrichReport` enforces in Task 6.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
 
-from rekindle.models import Gps
+from rekindle.models import Gps, Photo
 from rekindle.sidecars import is_album_metadata, sidecar_target
+from rekindle.sources.folder import EXCLUDED_DIRS
 
 
 class JsonKind(StrEnum):
@@ -163,3 +164,197 @@ def album_title(payload: dict | None) -> str | None:
     if not isinstance(title, str):
         return None
     return title.strip() or None
+
+
+@dataclass
+class EnrichReport:
+    """What the enrichment pass found. Two identities, both pinned by a test.
+
+        json_files_seen == sidecars_seen + album_metadata
+                           + other_json + excluded_dirs + unparseable
+        sidecars_seen   == matched + superseded + orphaned + ambiguous
+
+    The spec's section 7 gives only the second, and without `superseded` in it
+    3,358 sidecars on the reference export are parsed and discarded with
+    nothing reporting it.
+
+    Neither identity can catch a bug downstream of indexing on its own - both
+    partition sets that `account()` builds. The check that CAN fail is
+    `matched == photos_enriched`, asserted end to end in Task 11: it ties the
+    accounting to what was actually written to the database.
+    """
+
+    json_files_seen: int = 0
+    sidecars_seen: int = 0
+    album_metadata: int = 0
+    other_json: int = 0
+    excluded_dirs: int = 0
+    unparseable: int = 0
+
+    matched: int = 0
+    orphaned: int = 0
+    ambiguous: int = 0
+    # Sidecars that named a photo we DID enrich but were not the one applied -
+    # a second or third candidate for the same file. 3,358 of them on the
+    # reference export; without this bucket they are discarded unreported.
+    superseded: int = 0
+
+    photos_enriched: int = 0
+    # Photos where a same-directory candidate was preferred over a DISTANT one
+    # that disagreed with it. Spec-conformant (rule 1 outranks rule 3) but
+    # 942 on the reference export against an `ambiguous` count of 2, so
+    # leaving it unreported makes the hazard look negligible.
+    directory_preference_broke_a_tie: int = 0
+    derivatives_enriched: int = 0
+    people_added: int = 0
+    dates_corrected: int = 0
+    gps_added: int = 0
+    descriptions_added: int = 0
+    favourites_added: int = 0
+    albums_retitled: int = 0
+    conflicts: int = 0
+    clustered_dates_suppressed: int = 0
+    title_disagreements: int = 0
+    album_title_collisions: list[tuple[str, str]] = field(default_factory=list)
+
+    @property
+    def files_accounted(self) -> int:
+        return (
+            self.sidecars_seen
+            + self.album_metadata
+            + self.other_json
+            + self.excluded_dirs
+            + self.unparseable
+        )
+
+    @property
+    def sidecars_accounted(self) -> int:
+        return self.matched + self.superseded + self.orphaned + self.ambiguous
+
+
+@dataclass
+class SidecarIndex:
+    """Global, keyed on the casefolded target filename.
+
+    v1 keyed on (directory, title). That is wrong twice over: `title` omits
+    the (N) counter, and Takeout writes a sidecar into every album a photo
+    belongs to WITHOUT duplicating the pixels there - 8 album folders in the
+    reference export hold sidecars and zero media.
+    """
+
+    by_target: dict[str, list[Sidecar]] = field(default_factory=dict)
+    albums: dict[Path, str] = field(default_factory=dict)
+
+    def add(self, sidecar: Sidecar) -> None:
+        self.by_target.setdefault(sidecar.target_cf, []).append(sidecar)
+
+
+def build_index(root: Path, report: EnrichReport) -> SidecarIndex:
+    """Walk every .json under `root`, classify it, and bucket it.
+
+    EXCLUDED_DIRS is inherited from FolderSource: parsing Trash/'s sidecars
+    and counting them against an index that correctly excludes those photos
+    would inflate the orphan count on a perfectly complete library.
+    """
+    index = SidecarIndex()
+    for path in sorted(root.rglob("*.json")):
+        report.json_files_seen += 1
+        if any(part.casefold() in EXCLUDED_DIRS for part in path.relative_to(root).parts[:-1]):
+            report.excluded_dirs += 1
+            continue
+        kind, payload = classify_json(path)
+        if kind is JsonKind.UNPARSEABLE:
+            report.unparseable += 1
+            continue
+        if kind is JsonKind.ALBUM:
+            report.album_metadata += 1
+            title = album_title(payload)
+            if title:
+                index.albums[path.parent] = title
+            continue
+        if kind is JsonKind.OTHER:
+            report.other_json += 1
+            continue
+        report.sidecars_seen += 1
+        sidecar = parse_sidecar(path, payload)
+        if sidecar.title_disagrees:
+            report.title_disagreements += 1
+        index.add(sidecar)
+    return index
+
+
+def _disagree(a: Sidecar, b: Sidecar) -> bool:
+    """Do two candidates for one photo tell different stories?
+
+    Only the fields that would change the photo's record. Two sidecars
+    agreeing on date and people are interchangeable, however many there are.
+    """
+    return a.taken_at_utc != b.taken_at_utc or set(a.people) != set(b.people)
+
+
+def resolve(photo: Photo, index: SidecarIndex) -> tuple[Sidecar | None, str, bool]:
+    """Find the one sidecar describing `photo`, or refuse.
+
+    Returns (sidecar, outcome, preference_broke_a_tie).
+
+    1. A candidate in the same directory as one of the photo's paths wins.
+    2. Otherwise, if the remaining candidates all agree, take the first.
+    3. Otherwise REFUSE, and say so. Never let insertion order decide.
+
+    Rule 1 deliberately outranks rule 3, so a DISTANT candidate that disagrees
+    is overridden rather than refused. Measured on the reference export that
+    happens to 942 photos, and every disagreeing group has its candidates in
+    different directories - so rule 3 fires only 2 times. Left silent, doctor
+    prints an `ambiguous` count of 2 and the hazard looks negligible when it
+    is not. The third return value is what makes the override visible.
+    """
+    candidates: list[Sidecar] = []
+    parents = {p.parent for p in photo.paths}
+    for path in photo.paths:
+        for sidecar in index.by_target.get(path.name.casefold(), ()):
+            if sidecar not in candidates:
+                candidates.append(sidecar)
+    if not candidates:
+        return None, "none", False
+
+    same_dir = [s for s in candidates if s.path.parent in parents]
+    if same_dir:
+        chosen = same_dir[0]
+        if any(_disagree(chosen, s) for s in same_dir[1:]):
+            return None, "ambiguous", False
+        tie = any(_disagree(chosen, s) for s in candidates if s.path.parent not in parents)
+        return chosen, "exact", tie
+
+    if all(not _disagree(candidates[0], s) for s in candidates[1:]):
+        return candidates[0], "exact", False
+    return None, "ambiguous", False
+
+
+def account(
+    index: SidecarIndex,
+    claimed: dict[str, str],
+    applied: set[Path],
+    report: EnrichReport,
+) -> None:
+    """Partition every indexed sidecar into exactly one bucket.
+
+    `claimed` maps a casefolded target to the resolution outcome; `applied`
+    holds the paths of the sidecars actually WRITTEN onto a photo.
+
+    The `superseded` bucket is the whole point. Crediting `matched` with
+    `len(sidecars)` for every claimed target - as the first draft of this plan
+    did - inflated it by 3,358 on the reference export, because a target with
+    three candidates contributes one application and two discards. Those 3,358
+    were parsed and thrown away with nothing reporting it, which is precisely
+    v1's failure mode surviving inside the machinery built to prevent it.
+    """
+    for target, sidecars in index.by_target.items():
+        outcome = claimed.get(target)
+        if outcome == "ambiguous":
+            report.ambiguous += len(sidecars)
+        elif outcome == "exact":
+            used = sum(1 for s in sidecars if s.path in applied)
+            report.matched += used
+            report.superseded += len(sidecars) - used
+        else:
+            report.orphaned += len(sidecars)
