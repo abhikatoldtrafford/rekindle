@@ -133,9 +133,14 @@ where it can't guarantee that:
 
 We'd rather tell you than let you find out:
 
-- **Person features need person data.** Without XMP sidecars, rekindle doesn't
-  know who is in a photo, so person-based memories and person exclusions are
-  unavailable. **Date-range and folder exclusions always work** — prefer them.
+- **Person features need person data.** XMP sidecars give it (with face
+  regions); `rekindle enrich` recovers it from a Google Takeout export too
+  (names only, no regions). Without either, rekindle doesn't know who is in a
+  photo, so person-based memories and person exclusions are unavailable.
+  **Date-range and folder exclusions always work** — prefer them. The
+  exclusion list that is meant to govern person data doesn't exist yet (see
+  `docs/known-limitations.md`) — today nothing surfaces a person unprompted,
+  but that must land before anything does.
 - **GPS is sparse** in most libraries, so trip detection falls back to clustering
   by time alone.
 - **Sensitive-context detection is weak on the cases that hurt most.** It can

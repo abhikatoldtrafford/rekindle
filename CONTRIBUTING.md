@@ -73,6 +73,19 @@ uv run ruff check .
 uv run ruff format .
 ```
 
+### Testing against a real Takeout export
+
+Two of this project's three worst bugs were invisible to a green test suite and
+obvious within one run against real data. If you have a Google Takeout export:
+
+```bash
+REKINDLE_TAKEOUT_DIR="/path/to/Takeout/Google Photos" uv run pytest \
+    tests/test_takeout_conformance.py -v
+```
+
+Those tests skip without the variable, so CI never needs your photos. Never
+commit an export, or any file from one.
+
 ## Pull requests
 
 Keep them focused, explain the why, and add tests. If you're planning something

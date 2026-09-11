@@ -51,6 +51,9 @@ source of person data in the design and it backs `doctor`'s headline
 **Before M1 leans on person data, commit one real sidecar** — exported from
 Lightroom, digiKam or osxphotos — as a test asset.
 
+XMP still has no real-world coverage. Takeout now does, via
+`tests/test_takeout_conformance.py` — the same treatment is still owed to XMP.
+
 ## Fixed during M0, recorded so they are not reintroduced
 
 - Motion-photo pairing matched `{stem}.jpg`; Google names the still
@@ -67,3 +70,60 @@ Lightroom, digiKam or osxphotos — as a test asset.
 - `.gitignore` matched `takeout/` but not `Takeout/`, so on a case-sensitive
   filesystem a contributor's `git add .` would have committed a personal photo
   library to a public repo.
+
+## Fixed during M1, recorded so they are not reintroduced
+
+*These four bugs were found and fixed during M1 (the Takeout enrichment
+milestone this document otherwise predates), not M0 - the "Fixed during M0"
+heading above already means something specific (M0 task numbers T2-T10), so
+these get their own heading rather than being misfiled under it.*
+
+- **Matching a Takeout sidecar on its `title` field.** `title` omits the
+  disambiguating counter that Google puts in the sidecar's *filename*:
+  `DSC00107.JPG.supplemental-metadata(1).json` says `title: "DSC00107.JPG"` but
+  belongs to `DSC00107(1).JPG`. Measured across 24,248 real sidecars, the
+  property is COLLISION REDUCTION, not a higher raw match count: `title` leaves
+  4,737 sidecars beyond the first claiming one photo, the filename leaves 3,772.
+  Raw matches actually fall by 4, because five `(N)` sidecars name a photo in an
+  un-extracted archive part and correctly become orphans. The design that used
+  `title` would have dropped 984 sidecars silently. Match on the filename via
+  `rekindle.sidecars.sidecar_target`; `title` is a cross-check.
+- **Passing `photoTakenTime` to `timestamps.resolve`.** It is a UTC instant;
+  `resolve` expects naive wall-clock time and stamps a zone onto it, so the
+  result is `local == utc` and a 21:00 IST photo is relabelled 15:30. Use
+  `timestamps.from_takeout`, which derives the offset instead.
+- **A `PhotoMeta` field not added to `merge_meta`.** That function builds a new
+  record from an explicit field list, so a field left out is destroyed by the
+  next `rekindle index`.
+- **Crediting `matched` with every sidecar claiming a photo.** A photo with
+  three candidates contributes one application and two discards; counting all
+  three inflated `matched` by 3,358 on a real export and hid the discards. The
+  accounting identity cannot catch this on its own - it partitions a set built
+  by the same function - so `matched == photos_enriched` is asserted separately.
+- **Reading a low `ambiguous` count as "no conflicts".** Every disagreeing
+  sidecar group in the reference export has its candidates in different
+  directories, so the same-directory preference resolves 942 of them and the
+  refusal branch fires twice. Both numbers are reported for that reason.
+
+## Carried into M2: person data has arrived before the rules that govern it
+
+`rekindle enrich` now writes 40 real people's names into the index. The person
+exclusion list that is supposed to govern them (main spec §7.2) is M2 work and
+does not exist.
+
+Today's risk is nil: there is no memory engine, so nothing can surface a person
+unprompted. **The exclusion list must land before anything auto-triggers.** This
+is recorded so the ordering stays deliberate rather than accidental.
+
+## Album collision detection is metadata-only, not folder-name-complete
+
+`SidecarIndex.albums` (the `taken` set in `album_renames`) is built only from
+folders that have a parseable, non-empty `metadata.json` — a folder without
+one is invisible to collision detection in both directions: it can neither
+block a rename nor have its own title recovered. A photo set split across
+export parts (`Dida` / `Dida(1)`, produced when Google splits one album across
+multiple Takeout archives) is detected as a collision only when *both* halves
+carry their own `metadata.json`; if one part lost its metadata file (or hasn't
+been extracted yet), the split is silently invisible to `album_renames`. Not
+observed live on the reference export — recorded so it is not rediscovered by
+a future contributor staring at an unrenamed pair of album folders.
