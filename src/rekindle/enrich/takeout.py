@@ -9,6 +9,7 @@ count everything - which `EnrichReport` enforces in Task 6.
 from __future__ import annotations
 
 import json
+import math
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -105,17 +106,29 @@ def _geo(block: object) -> Gps | None:
     # to 0.0 would fabricate a wrong-but-plausible coordinate rather than
     # report the absence - not observed in the real export, but the
     # constraint is "never fabricate a value", not "never seen yet".
-    # Altitude stays optional: it is genuinely optional in the format.
     if "latitude" not in block or "longitude" not in block:
         return None
     try:
         lat = float(block["latitude"])
         lon = float(block["longitude"])
-        alt = float(block.get("altitude", 0.0))
     except (TypeError, ValueError):
         return None
     if abs(lat) < 1e-9 and abs(lon) < 1e-9:
         return None
+    # Altitude is genuinely optional, and is treated as optional: ABSENT means
+    # None, never 0.0 - sea level is a real reading this library must be able
+    # to tell apart from "not recorded". Parsed in its own `try` so a
+    # malformed altitude cannot reject a perfectly good lat/lon pair; the same
+    # field is handled exactly this way in `meta.exif`.
+    alt: float | None = None
+    raw_alt = block.get("altitude")
+    if raw_alt is not None:
+        try:
+            alt = float(raw_alt)
+        except (TypeError, ValueError):
+            alt = None
+        else:
+            alt = alt if math.isfinite(alt) else None
     return Gps(lat=lat, lon=lon, alt=alt)
 
 
@@ -225,6 +238,11 @@ class EnrichReport:
     favourites_added: int = 0
     albums_retitled: int = 0
     conflicts: int = 0
+    # Rows whose EXIF/Google date conflict this run CLEARED, because Google's
+    # record no longer disagrees. Retraction is a real change to the record;
+    # unreported it would be exactly the silent write `derivatives_enriched`
+    # was added to stop.
+    conflicts_retracted: int = 0
     clustered_dates_suppressed: int = 0
     title_disagreements: int = 0
     album_title_collisions: list[tuple[str, str]] = field(default_factory=list)
@@ -515,18 +533,36 @@ def apply_sidecar(
                 conflict = abs(normalised - utc) > CONFLICT_TOLERANCE
                 if conflict and not photo.metadata_conflict:
                     report.conflicts += 1
-                photo.metadata_conflict = photo.metadata_conflict or conflict
+                elif photo.metadata_conflict and not conflict:
+                    report.conflicts_retracted += 1
+                # ASSIGNED, not OR-ed. `or` is monotonic, so a date the user
+                # later corrects in Google Photos stays flagged forever - and
+                # a corrected date is an obvious, realistic retraction event,
+                # unlike `favorite`/`archived`/`trashed`, which Takeout cannot
+                # encode an un-set for. This branch is the only place the
+                # EXIF-vs-Google comparison is made, and it only runs once
+                # `exif_taken_at_utc` exists, so enrichment takes the flag
+                # over exactly when it is in a position to judge it; a photo
+                # it never dated keeps whatever the folder source stored.
+                # Residual, recorded in docs/known-limitations.md: the flag is
+                # one boolean for two causes, so a DESCRIPTION conflict
+                # `merge_meta` set on a photo enrich also dates is cleared
+                # here along with the date verdict.
+                photo.metadata_conflict = conflict
 
     # People: REPLACE the previous Takeout contribution, keep everything else.
     # A union can only grow, so a face tag corrected in Google Photos could
     # never be retracted.
     previous = set(meta.takeout_people)
     kept = [name for name in meta.people if name not in previous]
-    before = len(meta.people)
+    before = set(meta.people)
     meta.people = list(dict.fromkeys([*kept, *sidecar.people]))
     meta.takeout_people = list(sidecar.people)
-    if len(meta.people) > before:
-        report.people_added += len(meta.people) - before
+    # Count the names actually ADDED, not the change in list LENGTH. A length
+    # guard (`if len(people) > before`) reports 0 new whenever a retraction
+    # and an addition land in the same run: Google drops "Ada", adds "Grace",
+    # the list is still one name long and a real new face tag goes uncredited.
+    report.people_added += len(set(meta.people) - before)
 
     if meta.gps is None and sidecar.gps is not None:
         meta.gps = sidecar.gps
@@ -658,6 +694,11 @@ def propagate_to_derivatives(photos: list[Photo], report: EnrichReport) -> list[
         src = donor.meta
         dst = photo.meta
         before = _meta_snapshot(dst)
+        before_date = dst.taken_at_utc
+        before_people = set(dst.people)
+        before_gps = dst.gps
+        before_description = dst.description
+        before_favorite = dst.favorite
 
         dst.taken_at_utc = src.taken_at_utc
         dst.taken_at_local = src.taken_at_local
@@ -692,6 +733,23 @@ def propagate_to_derivatives(photos: list[Photo], report: EnrichReport) -> list[
         # this row is (re)processed, including when nothing below changed.
         photo.sidecar_match = "inherited"
 
+        # Credit the SAME counters `apply_sidecar` credits. This path writes
+        # the same fields; crediting only `derivatives_enriched` (a per-PHOTO
+        # count) made "GPS added" print 38 against 337 rows actually written
+        # on the reference export - an 8.9x understatement the user can catch
+        # with `doctor --from-index`'s own `with_gps` delta. Every increment
+        # is conditional on an observed change, so a re-run that changes
+        # nothing credits nothing and the totals stay idempotent.
+        if dst.taken_at_utc != before_date:
+            report.dates_corrected += 1
+        report.people_added += len(set(dst.people) - before_people)
+        if dst.gps is not None and before_gps is None:
+            report.gps_added += 1
+        if dst.description != before_description:
+            report.descriptions_added += 1
+        if dst.favorite and not before_favorite:
+            report.favourites_added += 1
+
         if _meta_snapshot(dst) != before:
             report.derivatives_enriched += 1
             changed.append(photo)
@@ -707,12 +765,21 @@ def retitle_albums(photo: Photo, renames: dict[str, str], report: EnrichReport) 
     """
     updated = [renames.get(album, album) for album in photo.albums]
     if updated != photo.albums:
-        # strict=True: the lists are the same length by construction, and
-        # bare zip() is `B905` under this project's ruff config.
+        # Counted BEFORE the dedup below, and positionally: `updated` is the
+        # same length as `photo.albums` by construction, so strict=True holds
+        # (bare zip() is `B905` under this project's ruff config).
         report.albums_retitled += sum(
             1 for a, b in zip(photo.albums, updated, strict=True) if a != b
         )
-        photo.albums = updated
+        # Deduped, order-preserving. A re-index unions the already-retitled
+        # title with the raw folder name the scan re-derives; retitling then
+        # maps the folder name onto the title that is ALREADY there, and a
+        # plain list comprehension leaves `['Our Coast Trip', 'Our Coast
+        # Trip']` stored forever. 0 such rows today because only one
+        # index+enrich has ever run against the reference export - the defect
+        # is latent until the first re-index, which doctor's own orphan
+        # warning tells users to perform.
+        photo.albums = list(dict.fromkeys(updated))
 
 
 _REFUSED = Resolution(None, "ambiguous", False)
@@ -835,7 +902,20 @@ class TakeoutEnricher:
         # live cursor, and this loop writes back through the same connection
         # via `update_many_with_meta` below - the exact hazard
         # `iter_photos`'s own docstring warns callers off.
-        photos = list(store.iter_photos())
+        # Sorted, not merely materialised: `iter_photos()` gives no ORDER BY
+        # guarantee and `INSERT OR REPLACE` churns rowids, so run-to-run order
+        # is arbitrary. Two things below depend on order - the sticky
+        # "ambiguous" claim a few lines down (a refusal must be recorded
+        # before another photo sharing the target name resolves cleanly) and
+        # `propagate_to_derivatives`'s `by_dir_name.setdefault` - so an
+        # arbitrary order makes both unreproducible, and makes the mutation
+        # that proves the sticky guard alive pass or fail by luck. Keyed on
+        # the lexicographically first path, with `file_hash` to break ties,
+        # because `paths` is a set-like union with no stable order of its own.
+        photos = sorted(
+            store.iter_photos(),
+            key=lambda p: (min(str(x).casefold() for x in p.paths), p.file_hash),
+        )
         claimed: dict[str, str] = {}
         applied: set[Path] = set()
         touched: dict[str, Photo] = {}

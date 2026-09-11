@@ -2,8 +2,10 @@ import json
 from datetime import UTC, datetime
 from pathlib import Path
 
-from rekindle.enrich.takeout import EnrichReport, build_index, resolve
+from rekindle.db import PhotoStore
+from rekindle.enrich.takeout import EnrichReport, TakeoutEnricher, build_index, resolve
 from rekindle.models import MediaType, Photo, PhotoMeta
+from rekindle.sources.folder import FolderSource
 from tests.fixtures.takeout import build_takeout
 
 
@@ -111,44 +113,35 @@ def test_build_index_buckets_every_json_file(tmp_path):
 def test_the_sidecar_accounting_identity_holds(tmp_path):
     """v1 would have failed this by 984.
 
-    On its own the identity is weak - `account()` partitions a set it builds
-    itself, so it cannot see anything downstream of indexing. The assertion
-    that actually bites is `matched == photos_enriched`, in
-    tests/test_takeout_enricher.py. This one pins the partition; that one ties
-    the partition to what reached the database.
+    Runs the SHIPPED algorithm: `TakeoutEnricher().enrich()`, not a
+    re-implementation of it. The previous version of this test built its own
+    claiming loop in the test body, including its own copy of the sticky
+    refusal guard - so its docstring's claim that "deleting it reproduces the
+    defect inside THIS test" was true only of the test's copy. Verified live
+    at final review: deleting `claimed.get(key) != "ambiguous"` from
+    `enrich()` left the whole suite green (241 passed). It was also keying on
+    `photo.paths[0].name`, an algorithm production stopped using in Task 11,
+    so it certified something that was no longer shipped.
 
     `claimed` is keyed by target, not by photo, and SHARED.jpg is two
-    DISTINCT real photos here - one refused (Kolkata Trip, processed first
-    because "Kolkata Trip" sorts before "Photos from 2011"), one resolved
-    exact (Photos from 2011). A plain `claimed[key] = match` would let the
-    second overwrite the first's refusal - 342 real filenames are shared by
-    distinct photos even after content-hash dedup, and on the reference
-    export that overwrite hid 13 refusals behind a reported `ambiguous` of 0.
-    The sticky assignment below (never downgrade an "ambiguous" claim) is
-    the fix; deleting it reproduces the defect inside THIS test.
+    DISTINCT real photos here - one refused (Kolkata Trip, which `enrich()`
+    reaches first: it sorts photos by their lexicographically first path and
+    "Kolkata Trip" precedes "Photos from 2011"), one resolved exact (Photos
+    from 2011). Without the sticky guard the second overwrites the first's
+    refusal - 342 real filenames are shared by distinct photos even after
+    content-hash dedup, and on the reference export that overwrite hid 13
+    refusals behind a reported `ambiguous` of 0.
+
+    MUTATION (run, not assumed): delete `claimed.get(key) != "ambiguous"`
+    from `TakeoutEnricher.enrich` and this test fails on
+    `assert report.ambiguous == 1` with ambiguous 0, superseded 2.
     """
-    from rekindle.enrich.takeout import account
-
     root = build_takeout(tmp_path / "Takeout")
-    report = EnrichReport()
-    index = build_index(root, report)
-    photos = [
-        _photo(p)
-        for p in sorted(root.rglob("*"))
-        if p.is_file() and p.suffix.lower() in {".jpg", ".mp"} and "Trash" not in p.parts
-    ]
-    claimed: dict[str, str] = {}
-    applied: set[Path] = set()
-    for photo in photos:
-        sidecar, match, _tie = resolve(photo, index)
-        if match != "none":
-            key = photo.paths[0].name.casefold()
-            if claimed.get(key) != "ambiguous":
-                claimed[key] = match
-        if sidecar is not None:
-            applied.add(sidecar.path)
+    photos, _ = FolderSource().scan(root)
+    store = PhotoStore(tmp_path / "data" / "rekindle.sqlite")
+    store.upsert_many(photos)
+    report = TakeoutEnricher().enrich(root, store)
 
-    account(index, claimed, applied, report)
     assert report.sidecars_seen == report.sidecars_accounted
     assert report.orphaned == 1  # IMG_MISSING
     # SHARED.jpg's Kolkata Trip photo is genuinely refused - and the refusal
@@ -159,8 +152,9 @@ def test_the_sidecar_accounting_identity_holds(tmp_path):
     # first draft of this plan credited both to `matched`, which inflated it
     # by 3,358 on a real export.
     assert report.superseded == 1
-    assert report.matched == len(applied)
+    assert report.matched == report.photos_enriched
     assert report.matched == 10
+    store.close()
 
 
 def test_superseded_sidecars_are_reported_not_discarded(tmp_path):

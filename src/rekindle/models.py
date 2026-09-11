@@ -128,10 +128,51 @@ def merge_meta(old: PhotoMeta, new: PhotoMeta) -> tuple[PhotoMeta, bool]:
     def _real(m: PhotoMeta) -> bool:
         return m.taken_at_utc is not None and m.tz_source is not TzSource.FILE_MTIME
 
+    def _enriched(m: PhotoMeta) -> bool:
+        """Did a Takeout enrich pass write this date?
+
+        Enrichment is Google's OWN record and outranks a folder scan; the
+        earliest-wins tiebreak below is between sources of EQUAL authority
+        and must never be handed a date correction to overrule (see
+        `PhotoStore.update_photo`'s docstring). Without this, `index ->
+        enrich -> index` reverts every photo whose camera clock ran EARLY -
+        108 of them on the reference export, 100 by more than a day.
+
+        `tz_source is TAKEOUT` alone is NOT sufficient: an enriched row's
+        zone may still come from an EXIF offset or GPS (see
+        `meta.timestamps.from_takeout`), leaving tz_source EXIF_OFFSET or
+        GPS. `exif_taken_at_utc` alone is not sufficient either: only
+        `enrich` ever writes it (enrich/takeout.py) but it stays None for a
+        photo that had no real date to displace, and THAT photo's tz_source
+        IS takeout. Verified by grepping every write site of both fields;
+        the union covers all three shapes and nothing else sets either.
+        """
+        return m.exif_taken_at_utc is not None or m.tz_source is TzSource.TAKEOUT
+
+    def _exif_instant(m: PhotoMeta) -> datetime | None:
+        """The EXIF instant `m` still carries: the one enrichment displaced
+        when it has one, otherwise its own date."""
+        return m.exif_taken_at_utc or m.taken_at_utc
+
     conflict = False
     if _real(old) and _real(new):
-        conflict = old.taken_at_utc != new.taken_at_utc
-        keep = old if old.taken_at_utc <= new.taken_at_utc else new  # earliest wins
+        # An enriched date wins outright rather than entering the tiebreak.
+        # The conflict question is then a DIFFERENT one: has the unenriched
+        # side's EXIF instant moved away from the one enrichment already
+        # arbitrated? Asking the crude question (`old.taken_at_utc !=
+        # new.taken_at_utc`, exact, no offset normalisation) instead flags
+        # every photo whose local zone is not UTC - 10,062 rows on the
+        # reference export, which `doctor` would print as "EXIF/Google date
+        # conflicts" until the next enrich recomputed them away.
+        if _enriched(old) and not _enriched(new):
+            keep = old
+            conflict = _exif_instant(old) != new.taken_at_utc
+        elif _enriched(new) and not _enriched(old):
+            keep = new
+            conflict = _exif_instant(new) != old.taken_at_utc
+        else:
+            conflict = old.taken_at_utc != new.taken_at_utc
+            keep = old if old.taken_at_utc <= new.taken_at_utc else new  # earliest wins
     elif _real(old):
         keep = old
     elif _real(new):

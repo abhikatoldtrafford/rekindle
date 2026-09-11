@@ -582,3 +582,265 @@ def test_a_sidecar_found_via_a_non_first_path_still_counts_as_matched(tmp_path):
     assert stored.meta.people == ["Zoe"]
     assert stored.sidecar_match == "exact"
     store.close()
+
+
+def _reindex(root, store):
+    """A second `rekindle index` over the same folder, exactly as the CLI
+    does it: scan, then `upsert_many` (which merges via `models.merge_meta`)."""
+    photos, _ = FolderSource().scan(root)
+    store.upsert_many(photos)
+
+
+def _dated_export(tmp_path, *, exif, google, name="CLOCK.jpg"):
+    """A photo whose camera clock ran EARLY, with Google's correction."""
+    root = tmp_path / "Takeout"
+    year = root / "Photos from 2016"
+    make_jpeg(year / name, taken=exif)
+    (year / f"{name}.supplemental-metadata.json").write_text(
+        json.dumps({"title": name, "photoTakenTime": {"timestamp": str(int(google.timestamp()))}}),
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_a_re_index_does_not_revert_a_takeout_date_correction(tmp_path):
+    """`index -> enrich -> index` must leave the enriched date in place.
+
+    `upsert_many` merges through `models.merge_meta`, which encodes "earliest
+    real date wins" - a tiebreak between sources of EQUAL authority. Takeout
+    is not equal: it is Google's own record. Without the `_enriched` branch,
+    a re-index pits Google's corrected 2020 date against the freshly re-read
+    2016 EXIF date and the BROKEN CAMERA CLOCK wins.
+
+    Measured on the reference export before this fix: 108 photos have
+    `taken_at_utc > exif_taken_at_utc` and every one of them reverted on the
+    next `rekindle index` (100 by more than a day). It self-heals on the next
+    `enrich`, but `doctor --from-index` reports from exactly that window, and
+    doctor's own orphan warning tells users to "Extract every part into the
+    SAME folder and re-run" - which is this flow.
+
+    MUTATION (run, not assumed): delete the `_enriched(old) and not
+    _enriched(new)` branch from `models.merge_meta` and this test fails on
+    `after_reindex.meta.taken_at_utc == google` - it comes back as the 2016
+    EXIF instant with tz_source `exif_naive`.
+    """
+    exif_instant = datetime(2016, 3, 1, 12, 0)
+    google = datetime(2020, 7, 4, 9, 30, tzinfo=UTC)
+    root = _dated_export(tmp_path, exif=exif_instant, google=google)
+
+    photos, _ = FolderSource().scan(root)
+    store = PhotoStore(tmp_path / "data" / "rekindle.sqlite")
+    store.upsert_many(photos)
+    digest = photos[0].file_hash
+    assert store.get(digest).meta.taken_at_utc == exif_instant.replace(tzinfo=UTC)
+
+    TakeoutEnricher().enrich(root, store)
+    after_enrich = store.get(digest)
+    assert after_enrich.meta.taken_at_utc == google
+    assert after_enrich.meta.tz_source is TzSource.TAKEOUT
+    assert after_enrich.meta.exif_taken_at_utc == exif_instant.replace(tzinfo=UTC)
+    assert after_enrich.metadata_conflict is True
+
+    _reindex(root, store)
+    after_reindex = store.get(digest)
+    assert after_reindex.meta.taken_at_utc == google
+    assert after_reindex.meta.tz_source is TzSource.TAKEOUT
+    assert after_reindex.meta.taken_at_local == after_enrich.meta.taken_at_local
+    # The displaced EXIF instant survives too - it is the flag's only payload.
+    assert after_reindex.meta.exif_taken_at_utc == exif_instant.replace(tzinfo=UTC)
+    # A real disagreement between Google and the re-read EXIF is still a real
+    # disagreement: outranking the date must not retract the flag.
+    assert after_reindex.metadata_conflict is True
+    store.close()
+
+
+def test_a_re_index_does_not_invent_a_conflict_out_of_a_timezone(tmp_path):
+    """The other half of the `_enriched` branch.
+
+    Once enrichment has run, the re-read EXIF instant is the one it ALREADY
+    arbitrated (with offset normalisation and a one-minute tolerance) and
+    recorded in `exif_taken_at_utc`. Asking the crude question here instead -
+    `old.taken_at_utc != new.taken_at_utc`, exact, on a Google instant versus
+    a naive wall clock - flags the photo's UTC offset as a disagreement.
+    Measured on the reference export: a re-index raised `metadata_conflict`
+    on 10,065 rows that `enrich` had deliberately left clear, all of them the
+    +05:30 artefact, which `doctor --from-index` would print as "EXIF/Google
+    date conflicts" until the next enrich recomputed them away.
+
+    MUTATION (run, not assumed): change the enriched branch's `conflict` back
+    to `old.taken_at_utc != new.taken_at_utc` and this test fails on
+    `after_reindex.metadata_conflict is False`.
+    """
+    naive = datetime(2019, 5, 1, 15, 30)
+    google = datetime(2019, 5, 1, 10, 0, tzinfo=UTC)  # 5:30 earlier: IST
+    root = _dated_export(tmp_path, exif=naive, google=google, name="IST.jpg")
+
+    photos, _ = FolderSource().scan(root)
+    store = PhotoStore(tmp_path / "data" / "rekindle.sqlite")
+    store.upsert_many(photos)
+    digest = photos[0].file_hash
+
+    TakeoutEnricher().enrich(root, store)
+    assert store.get(digest).metadata_conflict is False
+
+    _reindex(root, store)
+    after_reindex = store.get(digest)
+    assert after_reindex.metadata_conflict is False
+    assert after_reindex.meta.taken_at_utc == google
+    assert after_reindex.meta.taken_at_local.utcoffset() == timedelta(hours=5, minutes=30)
+    store.close()
+
+
+def test_a_resolved_conflict_is_retracted_and_a_live_one_is_not(tmp_path):
+    """`metadata_conflict` was `photo.metadata_conflict or conflict`.
+
+    `or` is monotonic, so a date the user later corrects in Google Photos
+    stays flagged forever - 119 rows carry the flag on the reference export
+    and none of them could ever lose it. This is NOT the same case as
+    `favorite`/`archived`/`trashed`, whose deferral rested on "Takeout cannot
+    encode an un-favourite, so there is no retraction event": a corrected
+    date is an obvious, realistic retraction event.
+
+    MUTATION (run, not assumed): restore `photo.metadata_conflict =
+    photo.metadata_conflict or conflict` and this test fails on
+    `fixed.metadata_conflict is False`.
+    """
+    root = tmp_path / "Takeout"
+    year = root / "Photos from 2016"
+    exif_instant = datetime(2016, 3, 1, 12, 0)
+    wrong = datetime(2020, 7, 4, 9, 30, tzinfo=UTC)
+    for name, size in (("FIXED.jpg", (24, 24)), ("STILLWRONG.jpg", (26, 26))):
+        make_jpeg(year / name, taken=exif_instant, size=size)
+        (year / f"{name}.supplemental-metadata.json").write_text(
+            json.dumps(
+                {"title": name, "photoTakenTime": {"timestamp": str(int(wrong.timestamp()))}}
+            ),
+            encoding="utf-8",
+        )
+
+    photos, _ = FolderSource().scan(root)
+    store = PhotoStore(tmp_path / "data" / "rekindle.sqlite")
+    store.upsert_many(photos)
+    by_name = {p.paths[0].name: p.file_hash for p in photos}
+
+    first = TakeoutEnricher().enrich(root, store)
+    assert first.conflicts == 2
+    assert first.conflicts_retracted == 0
+    assert store.get(by_name["FIXED.jpg"]).metadata_conflict is True
+    assert store.get(by_name["STILLWRONG.jpg"]).metadata_conflict is True
+
+    # The user corrects FIXED.jpg's date in Google Photos and re-exports.
+    (year / "FIXED.jpg.supplemental-metadata.json").write_text(
+        json.dumps(
+            {
+                "title": "FIXED.jpg",
+                "photoTakenTime": {
+                    "timestamp": str(int(exif_instant.replace(tzinfo=UTC).timestamp()))
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    second = TakeoutEnricher().enrich(root, store)
+
+    fixed = store.get(by_name["FIXED.jpg"])
+    assert fixed.metadata_conflict is False
+    assert fixed.meta.taken_at_utc == exif_instant.replace(tzinfo=UTC)
+    # A retraction is a real change to the record; it gets a counter of its
+    # own rather than happening silently.
+    assert second.conflicts_retracted == 1
+    # The photo Google never corrected keeps its flag.
+    assert store.get(by_name["STILLWRONG.jpg"]).metadata_conflict is True
+    store.close()
+
+
+def test_every_reported_total_equals_the_rows_actually_changed(tmp_path):
+    """The printed numbers must reconcile with what was written.
+
+    `apply_sidecar` credits `gps_added`/`people_added`/`dates_corrected`/
+    `descriptions_added`/`favourites_added`; `propagate_to_derivatives` wrote
+    the same fields and credited NONE of them, so only `derivatives_enriched`
+    (a per-photo count) moved. Measured by instrumenting a real run: the
+    report printed "GPS added: 38" against 337 rows actually written (299 via
+    derivatives), "People added: 18,562" against 19,730 person tags, and
+    "Dates corrected: 12,212" against 13,010. The GPS row was off by 8.9x,
+    and a user can catch it with the product's own two commands -
+    `doctor --from-index` reads `with_gps` 1,993 before and 2,330 after.
+
+    `build_takeout` has two derivatives (IMG_EDIT-edited.jpg and PXL_1.MP),
+    and PXL_1.MP.jpg's sidecar carries real coordinates, so the GPS row here
+    is exactly the one that was wrong on the real export.
+
+    MUTATION (run, not assumed): drop `report.gps_added += 1` from
+    `propagate_to_derivatives` and this fails with `gps_added 1 != 2`; drop
+    `report.people_added += ...` there and it fails on the people total.
+    """
+    root, store = _indexed(tmp_path)
+
+    def snapshot():
+        return {
+            p.file_hash: (
+                p.meta.taken_at_utc,
+                frozenset(p.meta.people),
+                p.meta.gps,
+                p.meta.description,
+                p.meta.favorite,
+            )
+            for p in store.iter_photos()
+        }
+
+    before = snapshot()
+    report = TakeoutEnricher().enrich(root, store)
+    after = snapshot()
+
+    assert report.derivatives_enriched >= 1, "fixture must exercise the derivative path"
+    written_dates = sum(1 for h, a in after.items() if a[0] != before[h][0])
+    written_people = sum(len(a[1] - before[h][1]) for h, a in after.items())
+    written_gps = sum(1 for h, a in after.items() if a[2] is not None and before[h][2] is None)
+    written_desc = sum(1 for h, a in after.items() if a[3] != before[h][3])
+    written_favs = sum(1 for h, a in after.items() if a[4] and not before[h][4])
+
+    assert report.dates_corrected == written_dates
+    assert report.people_added == written_people
+    assert report.gps_added == written_gps
+    assert report.descriptions_added == written_desc
+    assert report.favourites_added == written_favs
+    # Not a vacuous pass: the derivative really did contribute to the GPS row.
+    assert written_gps == 2
+    store.close()
+
+
+def test_people_added_counts_a_retraction_and_an_addition_together(tmp_path):
+    """`if len(people) > before` reported 0 new for a net-neutral change.
+
+    Google drops "Ada" and adds "Grace" in the same re-export: the list is
+    still one name long, the length guard sees no growth, and a real new face
+    tag goes uncredited. "People added" is the headline number for this
+    milestone's headline feature.
+
+    MUTATION (run, not assumed): restore the `if len(meta.people) > before:`
+    length guard in `apply_sidecar` and this fails with `people_added 0 != 1`.
+    """
+    root = tmp_path / "Takeout"
+    year = root / "Photos from 2019"
+    make_jpeg(year / "FACES.jpg")
+    sidecar = year / "FACES.jpg.supplemental-metadata.json"
+
+    def write(*names):
+        sidecar.write_text(
+            json.dumps({"title": "FACES.jpg", "people": [{"name": n} for n in names]}),
+            encoding="utf-8",
+        )
+
+    write("Ada")
+    photos, _ = FolderSource().scan(root)
+    store = PhotoStore(tmp_path / "data" / "rekindle.sqlite")
+    store.upsert_many(photos)
+    digest = photos[0].file_hash
+    assert TakeoutEnricher().enrich(root, store).people_added == 1
+
+    write("Grace")
+    second = TakeoutEnricher().enrich(root, store)
+    assert store.get(digest).meta.people == ["Grace"]
+    assert second.people_added == 1
+    store.close()

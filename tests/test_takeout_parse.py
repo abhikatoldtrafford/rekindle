@@ -179,3 +179,75 @@ def test_people_entries_without_a_usable_name_are_dropped(tmp_path):
     )
     _, payload = classify_json(p)
     assert parse_sidecar(p, payload).people == ("Ada",)
+
+
+def test_an_absent_altitude_is_none_not_sea_level(tmp_path):
+    """`float(block.get("altitude", 0.0))` FABRICATED sea level.
+
+    "Never invent a value to stand in for a broken one" is binding, and the
+    docstring already claimed "Altitude stays optional" while the code did
+    not treat it as optional. `meta.exif` gets the identical field right
+    (`alt = None` when absent or non-finite); this now follows it.
+
+    MUTATION (run, not assumed): change `alt: float | None = None` back to
+    `= 0.0` in `_geo` and this fails - `alt` comes back as 0.0.
+    """
+    p = _write(
+        tmp_path / "NOALT.jpg.supplemental-metadata.json",
+        {"title": "NOALT.jpg", "geoData": {"latitude": 22.5, "longitude": 88.3}},
+    )
+    sidecar = parse_sidecar(p, json.loads(p.read_text(encoding="utf-8")))
+    assert sidecar.gps is not None
+    assert sidecar.gps.lat == 22.5
+    # `is None`, not `== 0.0` - the whole point is telling the two apart.
+    assert sidecar.gps.alt is None
+
+
+def test_a_genuine_sea_level_altitude_round_trips_as_zero(tmp_path):
+    """The other side of the same coin: 472 real geoData coordinates on the
+    reference export carry a genuine altitude of 0.0, and those must survive
+    as 0.0 rather than becoming "not recorded"."""
+    p = _write(
+        tmp_path / "SEALEVEL.jpg.supplemental-metadata.json",
+        {
+            "title": "SEALEVEL.jpg",
+            "geoData": {"latitude": 22.5, "longitude": 88.3, "altitude": 0.0},
+        },
+    )
+    sidecar = parse_sidecar(p, json.loads(p.read_text(encoding="utf-8")))
+    assert sidecar.gps.alt == 0.0
+    assert sidecar.gps.alt is not None
+
+
+def test_a_malformed_altitude_does_not_reject_a_good_coordinate(tmp_path):
+    """The altitude parse used to sit inside the lat/lon `try`, so one broken
+    field nobody needs threw away a perfectly good location.
+
+    MUTATION (run, not assumed): change the altitude `except` back to
+    `return None` and this fails - `sidecar.gps` comes back None.
+    """
+    p = _write(
+        tmp_path / "BADALT.jpg.supplemental-metadata.json",
+        {
+            "title": "BADALT.jpg",
+            "geoData": {"latitude": 22.5, "longitude": 88.3, "altitude": "not a number"},
+        },
+    )
+    sidecar = parse_sidecar(p, json.loads(p.read_text(encoding="utf-8")))
+    assert sidecar.gps is not None
+    assert (sidecar.gps.lat, sidecar.gps.lon) == (22.5, 88.3)
+    assert sidecar.gps.alt is None
+
+
+def test_a_malformed_longitude_still_rejects_the_whole_coordinate(tmp_path):
+    """Widening the altitude handling must not widen lat/lon handling: half a
+    coordinate is not a location."""
+    p = _write(
+        tmp_path / "BADLON.jpg.supplemental-metadata.json",
+        {
+            "title": "BADLON.jpg",
+            "geoData": {"latitude": 22.5, "longitude": "east-ish", "altitude": 9.0},
+        },
+    )
+    sidecar = parse_sidecar(p, json.loads(p.read_text(encoding="utf-8")))
+    assert sidecar.gps is None

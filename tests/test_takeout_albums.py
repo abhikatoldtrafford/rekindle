@@ -1,14 +1,18 @@
+import json
 from datetime import UTC, datetime
 from pathlib import Path
 
+from rekindle.db import PhotoStore
 from rekindle.enrich.takeout import (
     EnrichReport,
     SidecarIndex,
+    TakeoutEnricher,
     album_renames,
     build_index,
     retitle_albums,
 )
 from rekindle.models import MediaType, Photo, PhotoMeta
+from rekindle.sources.folder import FolderSource
 from tests.fixtures.takeout import build_takeout
 
 NOW = datetime(2020, 1, 1, tzinfo=UTC)
@@ -112,3 +116,74 @@ def test_collision_resolution_does_not_depend_on_the_platform():
     renames = album_renames(index, report)
     assert renames == {"beta": "Shared"}
     assert report.album_title_collisions == [("Zulu", "Shared")]
+
+
+def _album_export(tmp_path):
+    """One album whose Google title differs from its sanitised folder name."""
+    from tests.fixtures.gen import make_jpeg
+
+    root = tmp_path / "Takeout"
+    album = root / "Trip 2019"
+    make_jpeg(album / "IMG_A.jpg")
+    (album / "metadata.json").write_text(json.dumps({"title": "Our Coast Trip"}), encoding="utf-8")
+    (album / "IMG_A.jpg.supplemental-metadata.json").write_text(
+        json.dumps({"title": "IMG_A.jpg", "photoTakenTime": {"timestamp": "1400000000"}}),
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_a_second_enrich_retitles_nothing_and_changes_no_album(tmp_path):
+    """The idempotency property `albums_retitled` is supposed to have."""
+    root = _album_export(tmp_path)
+    photos, _ = FolderSource().scan(root)
+    store = PhotoStore(tmp_path / "data" / "rekindle.sqlite")
+    store.upsert_many(photos)
+    digest = photos[0].file_hash
+
+    first = TakeoutEnricher().enrich(root, store)
+    assert first.albums_retitled == 1
+    assert store.get(digest).albums == ["Our Coast Trip"]
+
+    second = TakeoutEnricher().enrich(root, store)
+    assert second.albums_retitled == 0
+    assert store.get(digest).albums == ["Our Coast Trip"]
+    store.close()
+
+
+def test_a_re_index_then_re_enrich_does_not_duplicate_an_album_entry(tmp_path):
+    """`index -> enrich -> index -> enrich` must not double the album.
+
+    `PhotoStore._merge` unions the already-retitled title with the raw folder
+    name the fresh scan re-derives, so the photo comes back carrying BOTH.
+    `retitle_albums` then maps the folder name onto the title that is already
+    present, and a plain list comprehension stores `['Our Coast Trip', 'Our
+    Coast Trip']` - stable there forever. 0 such rows on the reference export
+    today because only one index+enrich has ever run against it; the defect is
+    latent until the first re-index, which doctor's own orphan warning tells
+    users to perform.
+
+    MUTATION (run, not assumed): change `photo.albums =
+    list(dict.fromkeys(updated))` back to `photo.albums = updated` in
+    `retitle_albums` and this fails with `['Our Coast Trip', 'Our Coast
+    Trip'] != ['Our Coast Trip']`.
+    """
+    root = _album_export(tmp_path)
+    photos, _ = FolderSource().scan(root)
+    store = PhotoStore(tmp_path / "data" / "rekindle.sqlite")
+    store.upsert_many(photos)
+    digest = photos[0].file_hash
+
+    TakeoutEnricher().enrich(root, store)
+    assert store.get(digest).albums == ["Our Coast Trip"]
+
+    for _cycle in range(2):
+        rescanned, _ = FolderSource().scan(root)
+        store.upsert_many(rescanned)
+        # The scan re-derives the folder name, so both spellings are stored
+        # between the two passes. That part is correct - the union is what
+        # keeps an album a photo left in place.
+        assert store.get(digest).albums == ["Our Coast Trip", "Trip 2019"]
+        TakeoutEnricher().enrich(root, store)
+        assert store.get(digest).albums == ["Our Coast Trip"]
+    store.close()
