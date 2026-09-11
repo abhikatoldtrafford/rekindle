@@ -247,11 +247,29 @@ These entries were carried into M2 as open questions. Each is now closed.
   engine reads that flag, so splitting it would be a schema change in service
   of no consumer - exactly the pattern the `photo_paths` entry warns against.
   Carried forward explicitly rather than silently.
-- **Sharpness is measured at 128x128**, which discards the fine detail where
-  mild blur lives. It is adequate for ranking frames of one burst from one
-  camera, which is all dedup asks of it, and it is documented as relative at
-  its definition. A full-resolution variance-of-Laplacian would be better and
-  far slower.
+- **A sharp subject smaller than one tile is still scored as blurred.**
+  Sharpness is now a reblur ratio over ~128px tiles of a 1024px copy, scored
+  on the *sharpest* tile, which is what keeps an ordinary shallow-depth-of-
+  field portrait: measured retention 0.800 against 0.006 for a percentile
+  form. But a face that occupies less than one tile — a group shot, a distant
+  subject — cannot drive the score. Only face boxes close this, and the
+  detector is M3's. The whole-image alternative is strictly worse, so this is
+  a residual rather than a regression.
+- **The measure reads texture, so a flat, hard-edged subject scores low
+  whether or not it is in focus.** The absolute gradient across a step edge
+  does not change when the edge is spread over three pixels, so a picture made
+  only of hard borders is nearly invisible to it — a 40px checkerboard scores
+  0.043 sharp and 0.009 grossly blurred. Photographs are texture nearly
+  everywhere and this is what makes the measure contrast-invariant, but a
+  photographed sign or document sits low in the distribution on merit it does
+  not lack. `is_screenshot` removes the common case and the gate sits at the
+  1st percentile; the rest is accepted.
+- **Sharpness still cannot be compared across libraries.** It is far more
+  stable than the measure it replaced — per-year 5th percentiles span 1.71x
+  where the old one spanned 4.70x, and 1.16x across resolution decades — but
+  `MIN_SHARPNESS = 0.24` was derived from *this* library. A library of
+  scanned film or of screenshots would need it re-derived, and nothing in the
+  code detects that.
 - **Album merging is manual.** `Leh Ladakh` / `ladakh` and the three Kashmir
   albums are each one trip, but no metadata says so, and `Diwali 25` /
   `Diwali Kali Puja 22` are different years under an equally similar pair of

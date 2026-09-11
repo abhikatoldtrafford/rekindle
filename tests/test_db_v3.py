@@ -74,7 +74,7 @@ def _photo(h="abc", **kw) -> Photo:
     )
 
 
-def test_v2_database_migrates_to_v4_keeping_every_prior_value(tmp_path):
+def test_v2_database_migrates_to_v5_keeping_every_prior_value(tmp_path):
     """The additive promise: a v2 row keeps everything it had and gains the
     new columns as NULLs. If ALTER TABLE were ever swapped for a table
     rebuild, this is the test that would notice the data loss."""
@@ -82,7 +82,7 @@ def test_v2_database_migrates_to_v4_keeping_every_prior_value(tmp_path):
     _write_v2_database(db)
 
     with PhotoStore(db) as store:
-        assert store.schema_version() == SCHEMA_VERSION == 4
+        assert store.schema_version() == SCHEMA_VERSION == 5
         photo = store.get("v2row")
 
     assert photo is not None
@@ -116,9 +116,99 @@ def test_a_v3_database_gains_the_colour_column(tmp_path):
     hashes; it must gain the histogram without a full re-index."""
     db = tmp_path / "db.sqlite"
     _write_v2_database(db)
-    with PhotoStore(db) as store:  # v2 -> v4
+    with PhotoStore(db) as store:  # v2 -> v5
         store.set_fingerprints([FingerprintRow("v2row", phash=7, colour="ab" * 64)])
         assert store.get("v2row").meta.colour == "ab" * 64
+
+
+# --------------------------------------------------------------------------
+# v5: the migration that deletes measurements on purpose
+
+
+def _fingerprinted_v4(db):
+    """A v4 database holding one measured row and one row that failed."""
+    _write_v2_database(db)
+    with PhotoStore(db) as store:
+        assert store.schema_version() == 5  # v2 -> v5 on open
+        store.set_fingerprints(
+            [
+                FingerprintRow(
+                    "v2row",
+                    phash=7,
+                    sharpness=9.5,
+                    brightness=110.0,
+                    colour="ab" * 64,
+                    width=4000,
+                    height=3000,
+                )
+            ]
+        )
+    # Wind it back to v4 with the v4-scale values in place, which is exactly
+    # what an index fingerprinted by M2 looks like on disk.
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
+    conn.commit()
+    conn.close()
+
+
+def test_v5_clears_every_measurement_taken_on_the_old_scale(tmp_path):
+    """The old sharpness was a mean gradient in [0, 25] and the new one is a
+    ratio in [0, 1]. Every use of the column compares one row against another,
+    so a database holding both scales does not fail - it silently ranks every
+    stale row above every fresh one. Leaving one of the four behind is enough
+    to corrupt a comparison, so all four are asserted."""
+    db = tmp_path / "db.sqlite"
+    _fingerprinted_v4(db)
+
+    with PhotoStore(db) as store:
+        assert store.schema_version() == 5
+        meta = store.get("v2row").meta
+
+    assert meta.sharpness is None
+    assert meta.phash is None
+    assert meta.brightness is None
+    assert meta.colour is None
+
+
+def test_v5_keeps_the_dimensions_it_did_not_invalidate(tmp_path):
+    """width/height do not depend on the measure, and the v3 pass repaired
+    ~2,475 of them. Clearing them would blind the resolution floor until the
+    re-run finished, so they must survive."""
+    db = tmp_path / "db.sqlite"
+    _fingerprinted_v4(db)
+    with PhotoStore(db) as store:
+        photo = store.get("v2row")
+    assert (photo.meta.width, photo.meta.height) == (4000, 3000)
+
+
+def test_v5_leaves_a_recorded_failure_alone(tmp_path):
+    """`phash_error` is finished work: why a file could not be decoded does
+    not change with the measure. Clearing it would put every undecodable file
+    back in the queue on every upgrade, which is the thing the resume
+    predicate exists to prevent."""
+    db = tmp_path / "db.sqlite"
+    _write_v2_database(db)
+    with PhotoStore(db) as store:
+        store.set_fingerprints([FingerprintRow("v2row", error="undecodable")])
+    conn = sqlite3.connect(db)
+    conn.execute("UPDATE meta SET value = '4' WHERE key = 'schema_version'")
+    conn.commit()
+    conn.close()
+
+    with PhotoStore(db) as store:
+        assert store.get("v2row").meta.phash_error == "undecodable"
+        # ...and it is still excluded from the re-run.
+        assert [p.file_hash for p in store.iter_unfingerprinted()] == []
+
+
+def test_v5_puts_the_cleared_rows_back_in_the_fingerprint_queue(tmp_path):
+    """Clearing the columns is only half the migration. If the resume
+    predicate did not pick the row up again the index would sit permanently
+    unfingerprinted, which reads as an empty library rather than an error."""
+    db = tmp_path / "db.sqlite"
+    _fingerprinted_v4(db)
+    with PhotoStore(db) as store:
+        assert [p.file_hash for p in store.iter_unfingerprinted()] == ["v2row"]
 
 
 def test_a_newer_schema_is_refused_rather_than_downgraded(tmp_path):

@@ -31,23 +31,47 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PIL import Image, ImageChops, ImageOps, ImageStat
+from PIL import Image, ImageChops, ImageFilter, ImageOps, ImageStat
 
 from rekindle.db import FingerprintRow, PhotoStore
 from rekindle.models import MediaType, Photo
 
 # The hash reads an 8x8 grid of horizontal gradients, so it needs 9 columns.
 _HASH_W, _HASH_H = 9, 8
-# Sharpness is measured at a FIXED size so that a 4000px and a 1200px photo
-# produce comparable numbers. Without this, resolution alone would decide
-# every burst.
-_SHARP = 128
-# Hint to libjpeg that we only need a small image. Measured on real files:
-# 18.6 ms/photo with draft() against 52.2 ms without - a 2.9x speedup, and the
-# difference between a 5.6-minute and a 16-minute pass over this library.
-# libjpeg only scales by 1/2, 1/4, 1/8, so the exact value here matters far
-# less than calling it at all.
-_DRAFT = (64, 64)
+# Brightness is measured at a FIXED small size: it is a mean, so detail adds
+# nothing and a 128px copy is far cheaper than the decoded image.
+_BRIGHT = 128
+
+# Sharpness works on an aspect-preserving copy whose LONG edge is this, cut
+# into tiles of roughly this many pixels. See `sharpness` for why 1024 rather
+# than the 128 this shipped with.
+_SHARP_LONG_EDGE = 1024
+_SHARP_TILE = 128
+# How hard the reference reblur is. 1.0px is deliberately close to the
+# sampling limit: the question the measure asks is whether the image still
+# HAS detail at the finest scale it can represent.
+_SHARP_REBLUR = 1.0
+# A tile below this is too small for its gradient statistics to mean
+# anything, so a small image is measured as a single tile instead.
+_SHARP_MIN_TILE = 16
+
+# Hint to libjpeg how much image we need. Measured on 123 real files:
+#
+#     draft           ms/photo   long edge (median)
+#     ("L", 64)          13.6            486        <- what M2 shipped
+#     ("RGB", 64)        14.5            486
+#     ("RGB", 1024)      24.6           1984        <- now
+#
+# Two changes, both deliberate. The SIZE, because `sharpness` cannot see mild
+# blur in a 486px copy of a 4000px photo (measured: AUC 0.52 - a coin flip).
+# The MODE, because "L" makes libjpeg decode only the luma plane, so
+# `colour_signature` was running on a grey image and every stored histogram
+# was a luminance histogram: measured over 2,000 real rows, a median of 42 of
+# the 64 bins were exactly zero and 55% of the mass sat on the four grey bins.
+#
+# libjpeg only scales by 1/2, 1/4, 1/8, so the result is the smallest of those
+# still at least 1024 on the long edge - never smaller than the request.
+_DRAFT = (1024, 1024)
 
 # Values for `phash_error`. A recorded reason is FINISHED work: the resume
 # predicate skips these rows, so a permanently undecodable file is not
@@ -84,27 +108,146 @@ def dhash(image: Image.Image) -> int:
 
 
 def sharpness(image: Image.Image) -> float:
-    """Mean absolute horizontal gradient of a fixed-size grayscale copy.
+    """How much of the finest detail survives a one-pixel reblur, 0.0 to 1.0.
 
-    A RELATIVE focus measure. It is meaningful for ranking frames of one burst
-    shot on one camera - which is the only thing dedup asks of it - and it is
-    NOT an absolute quality score: a busy scene out of focus can beat a plain
-    scene in focus, and two cameras are not comparable. Nothing in this
-    codebase may use it to claim a photo is good, only that it is the sharper
-    of two near-identical frames.
+    For each tile: reblur it by one pixel and report the FRACTION of the local
+    gradient energy that the reblur destroys. An image that still carries
+    detail at the pixel scale loses most of it; an image already blurred has
+    little left to lose, so it barely changes. The image's score is its
+    SHARPEST tile.
 
-    Note also that measuring at 128x128 discards the fine detail where mild
-    blur actually lives. Within a burst, where the alternative is ranking by
-    file size, it is still the better signal - but it will not detect blur the
-    way a full-resolution variance-of-Laplacian would.
+    Three properties, each measured rather than assumed:
 
-    Done with ImageChops/ImageStat rather than a Python loop over 16k pixels:
-    both run in C, and the loop version measurably dominated the JPEG decode.
+    **It sees mild blur, which the 128x128 measure this replaces could not.**
+    Over 123 real photos spread across every year, each also rendered with a
+    mild blur (radius = long edge / 1200) and a gross one (/250), the
+    probability that a sharp photo outscores a blurred one:
+
+        measure                          sharp/mild   sharp/gross
+        mean gradient at 128x128 (old)      0.519        0.704
+        max tile gradient at 1024           0.793        0.991
+        this one                            0.903        1.000
+
+    0.519 is a coin flip. Downscaling a 4000px photo to 128px low-pass filters
+    away exactly the detail that mild blur removes, so the old measure was
+    reading a signal that had already been destroyed.
+
+    On 44 photos hand-graded at 100% zoom - drawn deliberately from the low
+    tail of BOTH measures, so these are the hard cases - sharp against mildly
+    blurred was 0.682 for the old measure and 0.793 for this one, and sharp
+    against grossly blurred 0.600 against 0.800.
+
+    **It is a RATIO, so scene contrast cancels.** This is what makes a single
+    threshold safe across a library spanning 2000-2026. Measured per-year 5th
+    percentiles over 2,240 photos, 120 per year: they span 4.70x for the old
+    measure and 4.44x for an unnormalised gradient at 1024, but only 1.71x for
+    this one. A low-contrast 2011 photo is no longer indistinguishable from a
+    blurred one - which is exactly the failure that forced the old gate to sit
+    far out in the tail to be safe.
+
+    **The sharpest tile, not the mean, so shallow depth of field survives.** A
+    portrait with a sharp face and a deliberately blurred background is often
+    the best photo in the set and scores badly on any whole-image measure.
+    Measured on a synthetic shallow-DoF version of each of the 123 photos
+    (sharp centre, blurred surround), the median retention of the fully-sharp
+    score is 0.800 taking the max tile, 0.330 at the 90th percentile and 0.006
+    at the 75th - the choice of MAX is doing almost all of the work here, not
+    the tiling. A mitigation, not a fix: a subject smaller than one tile is
+    still missed, and only M3's face boxes can close that.
+
+    **What it is blind to, found by a test that failed.** The gradient sum
+    across an isolated step edge does not change when the edge is spread over
+    three pixels instead of one, so a picture made only of hard edges is very
+    nearly invisible to this: a 40px checkerboard measures 0.043 sharp and
+    0.009 after a radius-4 blur, both far below the gate. What the measure
+    reads is the loss of fine TEXTURE. That is the right thing for a
+    photograph, which is texture nearly everywhere, and it is why the measure
+    is contrast-invariant at all - but a subject that is genuinely all flat
+    regions and hard borders (a sign, a screenshot, a document) scores low
+    whether or not it is in focus. `is_screenshot` already removes the common
+    case; the rest are caught by the gate sitting at the 1st percentile.
+
+    Still a RELATIVE measure and still not a quality score. A grossly blurred
+    photo of a high-contrast scene can outscore a sharp photo of a soft one -
+    measured, it happens - which is why the gate in `memory.composition` sits
+    at the 1st percentile rather than anywhere near the middle.
+
+    ImageChops/ImageStat rather than a Python loop: both run in C, and the
+    loop version measurably dominated the JPEG decode.
     """
-    gray = image.convert("L").resize((_SHARP, _SHARP), Image.Resampling.BILINEAR)
-    left = gray.crop((0, 0, _SHARP - 1, _SHARP))
-    right = gray.crop((1, 0, _SHARP, _SHARP))
-    return float(ImageStat.Stat(ImageChops.difference(left, right)).mean[0])
+    gray = _downscale(image.convert("L"), _SHARP_LONG_EDGE)
+    soft = gray.filter(ImageFilter.GaussianBlur(_SHARP_REBLUR))
+    best = 0.0
+    for box in _tiles(gray.size):
+        crisp = _gradient_energy(gray.crop(box))
+        if crisp <= 0.0:
+            # A flat tile has no detail to lose. Skipping it is right: it
+            # carries no evidence either way, and because the score is a
+            # maximum, a flat region cannot drag a sharp one down.
+            continue
+        best = max(best, min(1.0, (crisp - _gradient_energy(soft.crop(box))) / crisp))
+    return best
+
+
+def _downscale(gray: Image.Image, longest: int) -> Image.Image:
+    """Aspect-preserving, and it NEVER upscales.
+
+    Aspect-preserving because the old square resize stretched a 16:9 photo,
+    which moves its horizontal and vertical detail into different bands.
+    Never upscaling because an enlarged copy is smooth at the pixel scale by
+    construction, so upscaling a small photo would score it as blurred.
+    """
+    width, height = gray.size
+    longest_edge = max(width, height)
+    if longest_edge <= longest:
+        return gray
+    scale = longest / longest_edge
+    return gray.resize(
+        (max(1, round(width * scale)), max(1, round(height * scale))),
+        Image.Resampling.BILINEAR,
+    )
+
+
+def _tiles(size: tuple[int, int]) -> Iterator[tuple[int, int, int, int]]:
+    """A grid of roughly `_SHARP_TILE`-pixel boxes covering the whole image.
+
+    The COUNT adapts rather than the tile size: a fixed 8x8 grid would cut a
+    320px image into 40px tiles whose gradient statistics are mostly noise,
+    and a maximum over 64 noisy tiles biases the score upward - the one
+    direction a blur gate must not be biased. Edges are computed from the
+    index so the tiles tile exactly, with no seam and no overlap.
+    """
+    width, height = size
+    count = max(1, min(8, max(width, height) // _SHARP_TILE))
+    if width // count < _SHARP_MIN_TILE or height // count < _SHARP_MIN_TILE:
+        count = 1
+    for ty in range(count):
+        for tx in range(count):
+            yield (
+                width * tx // count,
+                height * ty // count,
+                width * (tx + 1) // count,
+                height * (ty + 1) // count,
+            )
+
+
+def _gradient_energy(tile: Image.Image) -> float:
+    """Mean absolute gradient, both axes.
+
+    Both axes because a one-axis measure is blind to an edge parallel to it,
+    and motion blur - the most common mild blur in this library - is
+    directional by nature.
+    """
+    width, height = tile.size
+    if width < 2 or height < 2:
+        return 0.0
+    horizontal = ImageChops.difference(
+        tile.crop((0, 0, width - 1, height)), tile.crop((1, 0, width, height))
+    )
+    vertical = ImageChops.difference(
+        tile.crop((0, 0, width, height - 1)), tile.crop((0, 1, width, height))
+    )
+    return float(ImageStat.Stat(horizontal).mean[0] + ImageStat.Stat(vertical).mean[0])
 
 
 # A 4x4x4 RGB histogram: coarse enough that a slight exposure shift does not
@@ -200,7 +343,7 @@ def brightness(image: Image.Image) -> float:
     library: the 1st percentile is 33 and the median 113, so the gates sit far
     out in the tails deliberately.
     """
-    gray = image.convert("L").resize((_SHARP, _SHARP), Image.Resampling.BILINEAR)
+    gray = image.convert("L").resize((_BRIGHT, _BRIGHT), Image.Resampling.BILINEAR)
     return float(ImageStat.Stat(gray).mean[0])
 
 
@@ -232,7 +375,7 @@ def fingerprint_file(path: Path) -> Fingerprint:
         with Image.open(path) as im:
             # draft() is a no-op on formats that do not support it, so it is
             # safe to call unconditionally; on JPEG it is the whole speedup.
-            im.draft("L", _DRAFT)
+            im.draft("RGB", _DRAFT)
             im.load()
             # ORIENTATION FIRST. Everything below measures the image a viewer
             # sees, not the bytes on disk: a phone stores a portrait photo as

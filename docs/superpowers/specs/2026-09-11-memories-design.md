@@ -227,19 +227,91 @@ design mandatory.
 
 ### 4.2 Sharpness
 
-Computed from the same decode: mean absolute horizontal gradient of a 128x128
-grayscale, via `ImageChops.difference` against a one-pixel shift (C-level, not a
-Python loop). It is a **relative** measure — valid for ranking frames of one
-burst from one camera, meaningless as an absolute quality score across
-cameras — and is documented as such at its definition.
+> **Revised after M2 shipped.** The original design measured a mean absolute
+> horizontal gradient of a **128x128** grayscale copy. That measure was
+> adequate for its stated job — ranking frames of one burst from one camera —
+> and useless for the job the user actually wanted, which is keeping mildly
+> blurred photos out of memories. Measured: it scored a sharp photo above a
+> mildly blurred copy of itself **51.9%** of the time. A coin flip. The rest
+> of this section describes what replaced it.
+
+The image is reduced to an **aspect-preserving** copy 1024 pixels on its long
+edge (never enlarged), cut into tiles of roughly 128 pixels, and each tile is
+**reblurred by one pixel**. The tile's score is the *fraction* of its absolute
+gradient energy that the reblur destroys; the image's score is its **sharpest
+tile**. The result is in [0, 1].
+
+Three properties, each measured rather than argued:
+
+| | old (128x128 mean gradient) | new (tiled reblur ratio) |
+|---|---|---|
+| P(sharp > mildly blurred), 123 real photos | 0.519 | **0.903** |
+| P(sharp > grossly blurred) | 0.704 | **1.000** |
+| P(sharp > mild), 44 photos hand-graded at 100% | 0.682 | **0.793** |
+| P(sharp > gross), same 44 | 0.600 | **0.800** |
+| per-year p5 spread, 2,240 photos | 4.70x | **1.71x** |
+| shallow-DoF retention (synthetic) | — | **0.800** |
+
+**Resolution.** 128 was not a tuning choice that came out low; it was the
+wrong *kind* of choice. Downscaling a 4000px photo to 128px is itself a
+low-pass filter, and it removes precisely the fine detail that mild blur
+removes. There was no signal left to measure. 1024 is where the measured
+separation stops improving materially against what it costs.
+
+**A ratio, not a magnitude.** This is the load-bearing decision, and it is
+what makes a *single* threshold safe across a library spanning 2000-2026. A
+gradient magnitude cannot tell a low-contrast photo from a blurred one, so the
+old measure's per-year 5th percentile spanned 4.70x and the gate had to cower
+in the tail to avoid gutting the early years. Dividing by the tile's own
+gradient energy cancels scene contrast, and the spread falls to 1.71x. A plain
+gradient at the same 1024 resolution still spans 4.44x, so the resolution is
+not what fixed this — the normalisation is.
+
+**The sharpest tile, not the mean.** A portrait with a sharp face against a
+deliberately blurred background is often the best photo in the set and scores
+badly on any whole-image measure. Face boxes are M3's, so this cannot be
+solved here; taking the maximum over tiles is the available mitigation. On a
+synthetic shallow-DoF version of each of 123 real photos, the median retention
+of the fully-sharp score is **0.800** taking the max tile, 0.330 at the 90th
+percentile and 0.006 at the 75th. The max is doing nearly all the work; the
+tiling alone would not have helped.
+
+**What it is blind to, and why the checkerboard test failed.** The absolute
+gradient summed across an isolated step edge is unchanged when the edge is
+spread over three pixels instead of one. A picture made only of hard edges is
+therefore nearly invisible to this measure — a 40px checkerboard scores 0.043
+sharp and 0.009 after a radius-4 blur. What the measure reads is the loss of
+fine *texture*, which is the right thing for a photograph and is exactly why
+it is contrast-invariant, but a genuinely flat-and-hard-edged subject (a sign,
+a document) scores low whether or not it is in focus. `is_screenshot` removes
+the common case; the gate sitting at the 1st percentile absorbs the rest.
+
+It remains a **relative** measure. A grossly blurred photo of a high-contrast
+scene can still outscore a sharp photo of a soft one — measured, it happens —
+so it is not a quality score and nothing may use it as one.
 
 ### 4.3 Cost and storage
 
-One decode yields both, using `Image.draft("L", (64, 64))` to let libjpeg do
-DCT-scaled decoding. Measured on real files: **18.6 ms/photo with `draft()` vs
-52.2 ms without — a 2.9x speedup**, and about **5.6 minutes** for a full
-single-threaded pass over 18,201 live images. Without `draft()` it is 16
-minutes. The brief was right that it is mandatory.
+One decode yields all five measurements, using `Image.draft()` to let libjpeg
+do DCT-scaled decoding. Measured on 123 real files:
+
+| draft | ms/photo | median long edge |
+|---|---|---|
+| `("L", (64, 64))` — what M2 shipped | 13.6 | 486 |
+| `("RGB", (64, 64))` | 14.5 | 486 |
+| `("RGB", (1024, 1024))` — now | 24.6 | 1984 |
+
+Both arguments changed. The **size**, because the sharpness measure cannot see
+mild blur in a 486px copy of a 4000px photo. The **mode**, because `"L"` tells
+libjpeg to decode the luma plane only — which meant `colour_signature` was
+running on a grey image and every stored "colour histogram" was a luminance
+histogram. Measured over 2,000 real rows: a median of **42 of the 64 bins were
+exactly zero** and 55% of the mass sat on the four grey bins. Nothing failed;
+the diversity signal simply carried a fraction of what it claimed to.
+
+End to end the pass now measures **59 ms/photo** against 18.6 — about **18
+minutes** for the reference library against 5.6. It is a one-time cost and it
+stays resumable; without `draft()` at all it would be far worse.
 
 Schema v3 and v4 add nullable columns to `photos`, via the existing additive
 `ALTER TABLE ADD COLUMN` pattern:
@@ -453,19 +525,46 @@ something real about the photos of that period.
 | Extreme aspect | ratio <= **2.5:1** | 30 images (0.16%) | The widest image in the library is a 8874x943 VR panorama at 9.41:1, which would render as a 1280x136 band. A 1886x8485 crop is the same problem the other way. Essentially free. |
 | Near-black | mean luma >= **20** | ~0.26% | Mean-luma percentiles over 1,149 photos stratified across every year: p1=33, median=113. The gate sits far outside anything real. |
 | Blown out | mean luma <= **235** | ~0.09% | p99 is 186. |
-| Out of focus | sharpness >= **1.5** | ~1% | See below — the one that had to be tuned carefully. |
+| Out of focus | sharpness >= **0.24** | ~1.07% | See below — the one that had to be tuned carefully, and re-derived from scratch when the measure changed. |
 | Screenshots | see 5A.5 | 401 images (2.1%) | |
 | Videos | always | 1,117 (5.8%) | See 5A.6 |
 | Undecodable | always | counted | Never silently dropped. |
 
-**The sharpness threshold is the one the brief warned about, and the warning was
-right.** Per-year 5th-percentile sharpness ranges from **1.83 (2011)** and 2.28
-(2023) to **6.18 (2020)**. A threshold set at the whole-library p5 (3.23) would
-delete roughly a fifth of 2011, 2018 and 2023 while touching almost nothing in
-2020 — silently gutting the early years exactly as predicted. **1.5 sits below
-every single year's p5**, so no year is singled out, and it removes about 1%
-overall. Soft-but-acceptable photos are not dropped at all: sharpness is *also*
-the ranking signal, so they simply rank lower.
+**The sharpness threshold is the one the brief warned about, and the warning
+was right — twice.**
+
+Under the original 128x128 measure, per-year 5th-percentile sharpness ranged
+from **1.83 (2011)** and 2.28 (2023) to **6.18 (2020)**. A threshold at the
+whole-library p5 (3.23) would have deleted roughly a fifth of 2011, 2018 and
+2023 while touching almost nothing in 2020. 1.5 sat below every year's p5, so
+no year was singled out, and it removed about 1%.
+
+When §4.2's measure changed, that number became **meaningless, not merely
+mis-scaled**: the old gradient ran to about 25 and the new ratio to 1.0, and
+the distribution changed shape, not just units. Scaling 1.5 by a guess would
+have been the worst available option. It was re-derived by measuring the new
+measure over **2,240 photos, 120 per year, through the real decode path**:
+
+    p1 = 0.236   p2 = 0.267   p5 = 0.331   median = 0.554
+
+**0.24** keeps both of the original design rules exactly — it removes about 1%
+overall (measured: 1.07%) and it sits below *every* year's 5th percentile, the
+lowest of which is 0.252 in 2011.
+
+What changed is the tilt. Rejection by era, measured:
+
+| era | old measure @ 1.5 (as shipped) | new measure @ 0.24 |
+|---|---|---|
+| 2008–2013 | the years most at risk | **1.19%** |
+| 2020–2026 | the years least at risk | **1.19%** |
+| worst single year | 2011 | 2011, at 3.33% |
+
+The early years are no longer the ones a global threshold punishes, because a
+contrast-invariant measure does not mistake a soft 2011 CCD photo for a
+blurred one. That is the entire reason §4.2 chose a ratio.
+
+Soft-but-acceptable photos are still not dropped: sharpness is *also* the
+ranking signal, so they simply rank lower.
 
 A photo with no measured brightness or sharpness has simply never been
 fingerprinted, and is **kept**. The quality gates filter on measured evidence;

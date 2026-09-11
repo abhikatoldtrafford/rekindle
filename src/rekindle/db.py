@@ -24,7 +24,7 @@ from rekindle.models import (
     merge_meta,
 )
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -292,7 +292,7 @@ class PhotoStore:
         two-step migration resumes from the rung it reached rather than
         restarting or, worse, re-running an already-applied step.
         """
-        steps = {1: self._to_v2, 2: self._to_v3, 3: self._to_v4}
+        steps = {1: self._to_v2, 2: self._to_v3, 3: self._to_v4, 4: self._to_v5}
         while (version := self.schema_version()) != SCHEMA_VERSION:
             step = steps.get(version)
             if step is None:
@@ -348,6 +348,43 @@ class PhotoStore:
         minutes of decoding inside an `__init__`."""
         self._add_columns(_V4_COLUMNS)
         self._bump(4)
+
+    def _to_v5(self) -> None:
+        """No new column - the MEANING of two existing ones changed.
+
+        v5 is the one migration that DELETES measurements, deliberately.
+        `memory.fingerprint.sharpness` was a mean gradient roughly in [0, 25];
+        it is now a reblur ratio in [0, 1]. Every comparison the engine makes
+        on that column - the burst survivor, the quality percentile, the
+        `MIN_SHARPNESS` gate - is a comparison BETWEEN rows, so a database
+        holding both scales would not fail, it would silently rank every old
+        row above every new one. There is no conversion: the old number cannot
+        be recovered from the new one or the other way round.
+
+        `colour` and `phash` go with it. The pass now drafts in "RGB" rather
+        than "L" - the old grayscale draft made every stored colour histogram
+        a luminance histogram - and it drafts at 1024 rather than 64, which
+        moves the hash's input resolution. Mixing two scales of hash across
+        one dedup comparison has the same failure mode as mixing two scales of
+        sharpness.
+
+        So every SUCCESSFUL fingerprint is cleared and `rekindle fingerprint`
+        recomputes it. Rows that recorded an ERROR are left alone: the reason
+        a file could not be decoded does not change with the measure, and
+        re-attempting them on every upgrade is what `phash_error` exists to
+        prevent. `width` and `height` are kept for the same reason - the v3
+        pass already repaired them and the values do not depend on the
+        measure, so clearing them would blind the resolution floor until the
+        re-run finished.
+
+        Cost on the reference library: ~18,363 photos at ~59 ms, about 18
+        minutes, once. It is resumable exactly as a first run is.
+        """
+        self._conn.execute(
+            "UPDATE photos SET phash = NULL, sharpness = NULL, brightness = NULL,"
+            " colour = NULL WHERE phash IS NOT NULL"
+        )
+        self._bump(5)
 
     @staticmethod
     def _index_path(cur: sqlite3.Connection | sqlite3.Cursor, digest: str, path: Path) -> None:

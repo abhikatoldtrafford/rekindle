@@ -5,13 +5,15 @@ dimensions at all (all 1,117 video rows have width/height NULL), and files
 that cannot be decoded.
 """
 
+import random
 from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from PIL import Image, ImageFilter, JpegImagePlugin
+from PIL import Image, ImageDraw, ImageFilter, JpegImagePlugin
 
 from rekindle.db import PhotoStore
+from rekindle.memory import composition as comp
 from rekindle.memory import fingerprint as fp
 from rekindle.models import MediaType, Photo, PhotoMeta
 
@@ -97,22 +99,140 @@ def test_the_hash_is_scale_invariant():
 # sharpness
 
 
+def _texture(size, cell=2, seed=1, low=0, high=255) -> Image.Image:
+    """Fine random detail: `cell`-pixel blocks of random grey.
+
+    NOT a checkerboard, and the reason is worth recording because it took a
+    failing test to see it. `sharpness` sums absolute gradients, and spreading
+    a step edge over three pixels instead of one does not change that sum - so
+    blurring a checkerboard barely moves its score (measured: 0.043 sharp,
+    0.009 at radius 4, both far below the gate). The measure reads the loss of
+    fine TEXTURE, which is what blur actually destroys in a photograph, and a
+    fixture has to have some. Deterministic: seeded, so the numbers below are
+    stable across runs and platforms.
+    """
+    rng = random.Random(seed)
+    width, height = size
+    blocks = Image.new("L", ((width + cell - 1) // cell, (height + cell - 1) // cell))
+    blocks.putdata([rng.randrange(low, high + 1) for _ in range(blocks.size[0] * blocks.size[1])])
+    return blocks.resize(size, Image.Resampling.NEAREST)
+
+
 def test_a_blurred_copy_is_less_sharp_than_its_original():
-    sharp = _gradient((128, 128)).filter(ImageFilter.FIND_EDGES)
+    sharp = _texture((256, 256))
     blurred = sharp.filter(ImageFilter.GaussianBlur(radius=4))
     assert fp.sharpness(blurred) < fp.sharpness(sharp)
 
 
-def test_sharpness_is_measured_at_a_fixed_size():
-    """Otherwise resolution alone decides every burst: a 4000px photo would
-    beat a 1200px one regardless of focus."""
-    small = _gradient((128, 128)).filter(ImageFilter.FIND_EDGES)
-    large = small.resize((512, 512), Image.Resampling.BILINEAR)
-    assert fp.sharpness(large) == pytest.approx(fp.sharpness(small), rel=0.25)
+def test_a_small_sharp_photo_beats_a_large_blurred_one():
+    """What the old "measured at a fixed size" test was reaching for.
+
+    Resolution must not decide a burst on its own. That test pinned the
+    mechanism - a fixed 128x128 resize - which is exactly what destroyed the
+    detail mild blur lives in, so the mechanism had to go. The PROPERTY it was
+    defending has not, and this states it directly.
+
+    Measured on 2,240 real photos, the median score by native resolution is
+    0.589 (<1MP), 0.604 (1-3MP), 0.532 (3-8MP), 0.570 (8-14MP), 0.519 (>14MP)
+    - a 1.16x spread, against 1.29x for the measure this replaced and 1.58x
+    for an unnormalised gradient at the same working size.
+    """
+    small = _texture((320, 240))
+    large = _texture((2560, 1920)).filter(ImageFilter.GaussianBlur(radius=6))
+    assert fp.sharpness(small) > fp.sharpness(large)
+
+
+def test_the_measure_never_upscales_a_small_photo():
+    """An enlarged copy is smooth at the pixel scale by construction, so
+    upscaling to reach the working size would score every small photo as
+    blurred - and small, in this library, means old."""
+    tiny = _texture((200, 150))
+    assert fp._downscale(tiny, 1024).size == (200, 150)
+    assert fp.sharpness(tiny) > comp.MIN_SHARPNESS
+
+
+def test_the_sharpest_region_decides_not_the_average():
+    """Shallow depth of field: a sharp subject against a blurred background is
+    often the best photo in the set. Measured on 123 real photos given a
+    synthetic sharp-centre/blurred-surround treatment, the median retention of
+    the fully-sharp score is 0.800 taking the max tile and 0.006 taking the
+    75th percentile - so this is the single choice that keeps those photos."""
+    crisp = _texture((1200, 900))
+    blurred = crisp.filter(ImageFilter.GaussianBlur(radius=8))
+    mask = Image.new("L", crisp.size, 0)
+    ImageDraw.Draw(mask).rectangle((450, 330, 750, 570), fill=255)
+    shallow = Image.composite(crisp, blurred, mask)
+
+    assert fp.sharpness(shallow) > comp.MIN_SHARPNESS
+    # ...and a whole-image average over the same picture would not survive it.
+    assert fp.sharpness(shallow) > fp.sharpness(blurred) * 3
+
+
+def test_mild_blur_is_visible_at_the_working_resolution():
+    """The defect this measure exists to fix. At 128x128 a blur of a few
+    pixels in a 4000px photo is below the resampling floor and simply is not
+    there to measure; over 123 real photos the old measure scored a sharp
+    photo above a mildly blurred one 51.9% of the time, against 90.3% for
+    this one. A radius of 2 in a 2400px image is well inside "mild"."""
+    crisp = _texture((2400, 1800))
+    mild = crisp.filter(ImageFilter.GaussianBlur(radius=2))
+    assert fp.sharpness(mild) < fp.sharpness(crisp) * 0.75
+
+
+def test_sharpness_is_a_ratio_so_scene_contrast_cancels():
+    """Why a single threshold is safe across 2000-2026. The old measure's
+    per-year 5th percentile spanned 4.70x because a low-contrast photo and a
+    blurred one were indistinguishable to it; this one spans 1.71x. Halving
+    the contrast of an image must barely move its score."""
+    crisp = _texture((1200, 900))
+    faint = Image.eval(crisp, lambda v: 100 + v // 8)  # same detail, 1/8 the contrast
+    assert fp.sharpness(faint) == pytest.approx(fp.sharpness(crisp), rel=0.15)
 
 
 def test_a_flat_image_has_zero_sharpness():
     assert fp.sharpness(Image.new("L", (128, 128), 200)) == pytest.approx(0.0)
+
+
+def test_blur_along_one_axis_only_is_still_seen():
+    """A one-axis gradient is blind to detail that varies only along that
+    axis, and the commonest mild blur in this library is camera shake, which
+    is directional by nature. Horizontal stripes have no horizontal gradient
+    at all, so a measure reading only dx scores this picture - and its blurred
+    copy - identically at zero."""
+    rng = random.Random(3)
+    rows = Image.new("L", (1, 450))
+    rows.putdata([rng.randrange(256) for _ in range(450)])
+    striped = rows.resize((1200, 900), Image.Resampling.NEAREST)
+
+    crisp = fp.sharpness(striped)
+    blurred = fp.sharpness(striped.filter(ImageFilter.GaussianBlur(radius=3)))
+    assert crisp > comp.MIN_SHARPNESS
+    assert blurred < crisp * 0.5
+
+
+def test_sharpness_stays_inside_its_declared_range():
+    """It is documented as 0.0-1.0 and `MIN_SHARPNESS` is calibrated against
+    that. A negative value - a tile whose reblur RAISES the gradient, which
+    ringing can do - would sort below every real photo."""
+    for image in (
+        _texture((1200, 900)),
+        _texture((1200, 900)).filter(ImageFilter.GaussianBlur(radius=12)),
+        Image.new("L", (300, 300), 0),
+        _gradient((400, 300)),
+    ):
+        assert 0.0 <= fp.sharpness(image) <= 1.0
+
+
+def test_a_small_image_is_measured_as_one_tile_not_sixty_four():
+    """A fixed 8x8 grid over a 320px image gives 40px tiles whose gradient
+    statistics are mostly noise, and a MAXIMUM over 64 noisy tiles biases the
+    score upward - the one direction a blur gate must not be biased."""
+    assert len(list(fp._tiles((240, 180)))) == 1
+    assert len(list(fp._tiles((1024, 768)))) == 64
+    # The tiles must cover the image exactly: a gap would hide detail and an
+    # overlap would double-count it.
+    boxes = list(fp._tiles((1024, 768)))
+    assert sum((right - left) * (bottom - top) for left, top, right, bottom in boxes) == 1024 * 768
 
 
 # --------------------------------------------------------------------------
@@ -143,6 +263,24 @@ def test_draft_is_used_on_jpeg_input(tmp_path, monkeypatch):
     monkeypatch.setattr(JpegImagePlugin.JpegImageFile, "draft", spy)
     fp.fingerprint_file(path)
     assert calls, "draft() was never called - the pass is now ~3x slower"
+
+
+def test_the_colour_histogram_actually_contains_colour(tmp_path):
+    """M2 shipped `im.draft("L", ...)`, which tells libjpeg to decode the luma
+    plane only. `colour_signature` then ran on a grey image and converted it
+    back to RGB, so every stored "colour histogram" was a luminance histogram:
+    measured over 2,000 real rows, a median of 42 of the 64 bins were exactly
+    zero and 55% of the mass sat on the four grey bins. Nothing failed - the
+    diversity signal simply carried less than it claimed.
+
+    These two colours have the same JPEG luminance (0.299*255 = 76.2 and
+    0.587*130 = 76.3), so a grayscale decode maps BOTH to a flat 76 and yields
+    the identical signature. Only a real colour decode can tell them apart.
+    """
+    red = _jpeg(tmp_path / "red.jpg", Image.new("RGB", (200, 150), (255, 0, 0)))
+    green = _jpeg(tmp_path / "green.jpg", Image.new("RGB", (200, 150), (0, 130, 0)))
+
+    assert fp.fingerprint_file(red).colour != fp.fingerprint_file(green).colour
 
 
 def test_a_missing_file_is_recorded_not_raised(tmp_path):

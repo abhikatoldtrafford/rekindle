@@ -65,13 +65,29 @@ MAX_ASPECT = 2.5
 MIN_BRIGHTNESS = 20.0
 MAX_BRIGHTNESS = 235.0
 
-# Sharpness percentiles over the same sample: p1=1.37, p2=1.96, p5=3.23,
-# median=9.62. Per-year p5 ranges from 1.83 (2011) to 6.18 (2020), which is
-# exactly the trap: a threshold at the overall p5 would remove a fifth of 2011
-# and nothing from 2020. 1.5 removes ~1% overall and stays below every year's
-# p5, so no year is singled out. Soft-but-acceptable photos are not dropped -
-# they simply rank lower, because sharpness is also the ranking signal.
-MIN_SHARPNESS = 1.5
+# Sharpness gate, RE-DERIVED from measurement when the measure changed.
+#
+# `memory.fingerprint.sharpness` is now a reblur ratio in [0, 1], not a mean
+# gradient in [0, 255]. The old 1.5 is meaningless on that scale and scaling
+# it by a guess would have been the worst of both: the distribution changed
+# shape, not just units.
+#
+# Measured over 2,240 photos, 120 per year, through the real decode path:
+# p1=0.236, p2=0.267, p5=0.331, median=0.554. Per-year p5 now spans only
+# 0.252 (2011) to 0.432 (2025) - 1.71x, against 4.70x for the old measure,
+# because the ratio cancels scene contrast.
+#
+# 0.24 keeps the old gate's two design rules exactly. It removes ~1% overall
+# (measured 1.07%) and it sits below EVERY year's 5th percentile, so no year
+# is singled out. The per-year rejection rate is now flat where the old gate
+# was tilted: 1.19% across 2008-2013 against 1.19% across 2020-2026, and the
+# worst year is 2011 at 3.33%. Under the old measure the early years were the
+# ones at risk; under this one they are not, which is the whole point of
+# choosing a contrast-invariant measure.
+#
+# Soft-but-acceptable photos are still not dropped - they simply rank lower,
+# because sharpness is also the ranking signal.
+MIN_SHARPNESS = 0.24
 
 # Common phone and desktop screen sizes, either orientation. Used ONLY in
 # conjunction with a total absence of camera metadata - see `is_screenshot`.

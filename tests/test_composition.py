@@ -40,7 +40,7 @@ def _p(h="a", *, size=(4000, 3000), name=None, make="Google", model="Pixel", **k
             camera_make=make,
             camera_model=model,
             brightness=kw.pop("brightness", 110.0),
-            sharpness=kw.pop("sharpness", 9.0),
+            sharpness=kw.pop("sharpness", 0.55),
             phash=kw.pop("phash", 1),
             phash_error=kw.pop("phash_error", None),
         ),
@@ -235,16 +235,38 @@ def test_a_blown_out_frame_is_dropped():
 
 
 def test_a_badly_out_of_focus_frame_is_dropped():
-    _, report = compose([_p("blur", sharpness=0.4)])
+    _, report = compose([_p("blur", sharpness=0.10)])
     assert report.dropped[comp.DROP_OUT_OF_FOCUS] == 1
 
 
 def test_the_quality_gates_do_not_touch_an_ordinarily_soft_old_photo():
-    """2011's 5th-percentile sharpness is 1.83 and 2008's is 2.61. A threshold
-    set at the whole-library p5 (3.23) would delete a fifth of those years;
-    1.5 sits below every year's p5 so no year is singled out."""
-    kept, _ = compose([_p("soft2011", sharpness=1.9), _p("soft2008", sharpness=2.7)])
+    """Measured on the current reblur measure, the 5th percentile is 0.252 in
+    2011 and 0.418 in 2008 - both above the 0.24 gate. Under the measure this
+    replaced the early years were the ones at risk; a contrast-invariant
+    measure is what removed that tilt, and this test is where it is pinned."""
+    kept, _ = compose([_p("soft2011", sharpness=0.26), _p("soft2008", sharpness=0.42)])
     assert len(kept) == 2
+
+
+def test_the_gate_is_on_the_scale_the_measure_actually_produces():
+    """The whole trap of this change: `sharpness` used to return a mean
+    gradient around 9 and now returns a ratio around 0.55. A threshold left on
+    the old scale would reject the ENTIRE library rather than 1% of it, and
+    every test above would still pass because they all set the value by hand.
+    Only a real measurement can catch that, so this one takes one."""
+    import random
+
+    from PIL import Image
+
+    from rekindle.memory.fingerprint import sharpness
+
+    # Fine random texture, seeded: an image carrying detail at the pixel
+    # scale, which is what an in-focus photograph carries.
+    rng = random.Random(1)
+    blocks = Image.new("L", (600, 450))
+    blocks.putdata([rng.randrange(256) for _ in range(600 * 450)])
+    crisp = blocks.resize((1200, 900), Image.Resampling.NEAREST)
+    assert sharpness(crisp) > comp.MIN_SHARPNESS
 
 
 def test_a_dim_indoor_photo_is_not_mistaken_for_a_pocket_shot():
