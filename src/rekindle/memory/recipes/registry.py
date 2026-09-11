@@ -3,7 +3,7 @@
 Deliberately a plain dict with a decorator, not an entry-point scan. Entry
 points are the right mechanism for third-party recipes and the contributor
 guide describes how to add one, but resolving them costs an
-`importlib.metadata` walk on every CLI invocation and the eight built-ins
+`importlib.metadata` walk on every CLI invocation and the nine built-ins
 neither need nor benefit from it.
 
 Order is insertion order and it is load-bearing: `rekindle memories` lists

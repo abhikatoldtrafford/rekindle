@@ -40,7 +40,7 @@ Point it at a folder. That's the whole setup.
 
 ---
 
-## 🧠 The eight kinds of memory
+## 🧠 The nine kinds of memory
 
 Each one is a **recipe** — a small, self-contained rule for which photos belong
 together and in what order. Writing a new one is the best first contribution:
@@ -56,6 +56,7 @@ one file, one protocol, one registry entry.
 | ⏳ **then_and_now** | Earliest and latest, side by side | `"Maa: then and now"` |
 | 🎞️ **year_in_review** | One year, spread across its months | `"2016"` |
 | 📍 **place_cluster** | Trips, from GPS | `"A place you kept coming back to"` |
+| 🎊 **recurring_event** | A burst of photos that comes back every year, even when the date moves — found from timestamps alone, so a lunar festival is caught where `on_this_day` structurally cannot | `"Mid October, most years"` — 12 years |
 
 ---
 

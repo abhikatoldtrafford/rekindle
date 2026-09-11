@@ -1,7 +1,7 @@
-"""The eight built-in recipes.
+"""The nine built-in recipes.
 
-All eight in one module on purpose: they are 30-60 lines each, they share the
-same four helpers, and eight files that each import the same three things make
+All nine in one module on purpose: they are 30-60 lines each, they share the
+same four helpers, and nine files that each import the same three things make
 the set harder to compare, not easier. A third-party recipe is one file and one
 `@register` - see docs/writing-recipes.md.
 

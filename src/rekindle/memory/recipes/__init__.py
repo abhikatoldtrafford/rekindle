@@ -1,4 +1,4 @@
-"""The eight recipes, and the registry that holds them.
+"""The nine recipes, and the registry that holds them.
 
 A recipe decides WHICH photos belong in a memory and IN WHAT ORDER. It decides
 nothing else: not timing, not transitions, not the cap, not dedup, not
@@ -35,7 +35,7 @@ from __future__ import annotations
 
 # `builtin` is imported for its SIDE EFFECT: every @register in it populates
 # REGISTRY, so `from rekindle.memory import recipes` is enough to have all
-# eight available. It imports base and registry directly rather than through
+# nine available. It imports base and registry directly rather than through
 # this module, so there is no import cycle despite appearances.
 from rekindle.memory.recipes import builtin as _builtin  # noqa: F401
 from rekindle.memory.recipes.base import MIN_SHOTS, Offer, Recipe, Selection
