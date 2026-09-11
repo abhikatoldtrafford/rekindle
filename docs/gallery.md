@@ -13,17 +13,26 @@ uv run rekindle memories              # see what your library could produce
 uv run rekindle memory --recipe album_story --key "Kashmir"
 ```
 
-Every memory lands in `memories/<id>/` as three files:
+Every memory lands in `memories/<date>-<recipe>-<key>/` — dated, so building
+the same memory next month does not overwrite this month's — as four files:
 
 | File | What it is |
 |---|---|
-| `memory.gif` | Silent preview, sized to embed in a README or a chat |
+| `memory.webp` | The preview worth looking at: full colour, small |
+| `memory.gif` | Silent preview that embeds anywhere, at 256 colours |
 | `memory.mp4` | The real thing — higher resolution, with music if you have any |
-| `memory.json` | The `MemorySpec`: every photo chosen, and why |
+| `memory.json` | The `MemorySpec`: every photo chosen, and the facts behind it |
 
-That third file is the point. If a memory surprises you, open it — it records
-which recipe ran, which photos were selected, which were rejected and by which
-guardrail. A memory you cannot audit is indistinguishable from a bug.
+That last file is the point. If a memory surprises you, open it: it records
+which recipe ran, which key it was built for, every photo by file hash, each
+caption, and the fact sheet the title and subtitle came from — the date span,
+the people, the per-year distribution.
+
+**What it does not record is what was *rejected*.** The guardrail tally —
+`303 too small`, `30 out of focus`, and an example filename for each — is
+printed by `rekindle memory` as it runs, and is not written to the file. If a
+photo you expected is missing, that console output is where to look. Putting
+it in the spec would be better and is not done yet.
 
 ## Publishing one
 
@@ -33,7 +42,7 @@ a public repository by accident, so nothing in it is ever staged.
 To put one in a README, copy the GIF into `docs/assets/` deliberately:
 
 ```bash
-cp memories/album_story-kashmir/memory.gif docs/assets/kashmir.gif
+cp memories/2026-09-11-album_story-kashmir/memory.gif docs/assets/kashmir.gif
 ```
 
 Then reference it:
