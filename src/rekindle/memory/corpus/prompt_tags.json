@@ -1,0 +1,153 @@
+{
+  "_readme": [
+    "The starter tag cache. Committed on purpose, and it contains no personal",
+    "data: every key is a generic English phrase and every value describes what",
+    "a kind of photograph looks like. Nothing here came from anyone's library.",
+    "",
+    "Keys are NORMALISED prompts - NFKC, casefolded, internal whitespace",
+    "collapsed, punctuation preserved. `rekindle.memory.prompt.normalise` is the",
+    "definition; a key that is not in that form will simply never be hit.",
+    "",
+    "Why it is committed: the same prompt must yield the same tags forever, so",
+    "that a memory built today rebuilds identically next year and a dismissal",
+    "keyed on the prompt keeps working. It also means a contributor with no API",
+    "key, and CI with no network, still get a working feature.",
+    "",
+    "These entries were written by hand rather than generated, following the",
+    "same rules the model is given: a distinctive visual description, no event",
+    "name, no year, no person, no place. Add your own the same way, or let the",
+    "model write one and copy it out of your data directory."
+  ],
+  "version": 1,
+  "entries": {
+    "a beach": {
+      "source": "authored",
+      "tags": [
+        "waves breaking on wet sand under an open sky",
+        "footprints and shells on a broad empty shoreline",
+        "people standing ankle deep in shallow sea water"
+      ]
+    },
+    "a birthday": {
+      "source": "authored",
+      "tags": [
+        "a frosted cake with lit candles on it",
+        "a child leaning over a cake to blow out candles",
+        "coloured paper streamers and balloons taped to a wall"
+      ]
+    },
+    "a boat on the water": {
+      "source": "authored",
+      "tags": [
+        "a small wooden boat with a long oar on open water",
+        "a view over the bow of a boat towards the far bank",
+        "moored fishing boats with coloured hulls at a jetty"
+      ]
+    },
+    "a dog": {
+      "source": "authored",
+      "tags": [
+        "a dog lying on the floor with its head on its paws",
+        "a dog with its tongue out looking up at the camera",
+        "a puppy being held in someone's arms"
+      ]
+    },
+    "a garden": {
+      "source": "authored",
+      "tags": [
+        "close up of an open flower with visible stamens",
+        "a bed of flowering plants in pots on a terrace",
+        "green leaves filling the frame in bright daylight"
+      ]
+    },
+    "a rainy day": {
+      "source": "authored",
+      "tags": [
+        "raindrops beaded on a window pane",
+        "wet tarmac reflecting light after rain",
+        "people under umbrellas on a wet street"
+      ]
+    },
+    "a swimming pool": {
+      "source": "authored",
+      "tags": [
+        "turquoise pool water with tiled edges",
+        "someone swimming with their arms above the water",
+        "sun loungers along the side of a pool"
+      ]
+    },
+    "a temple": {
+      "source": "authored",
+      "tags": [
+        "a carved stone temple tower against the sky",
+        "an ornate temple doorway with a stepped threshold",
+        "marigold garlands and offerings on a shrine"
+      ]
+    },
+    "a train journey": {
+      "source": "authored",
+      "tags": [
+        "a view out of a train window of passing countryside",
+        "a railway platform with tracks running into the distance",
+        "the interior of a train carriage with luggage racks"
+      ]
+    },
+    "a wedding": {
+      "source": "authored",
+      "tags": [
+        "a bride in heavy red and gold clothing with ornate jewellery",
+        "a couple seated together under a decorated canopy",
+        "a garlanded stage with rows of guests in front of it",
+        "a large banquet of dishes being served on long tables"
+      ]
+    },
+    "city lights at night": {
+      "source": "authored",
+      "tags": [
+        "a street of lit shopfronts and signs after dark",
+        "headlight and taillight trails along a road at night",
+        "a skyline of lit windows against a dark sky"
+      ]
+    },
+    "food on a plate": {
+      "source": "authored",
+      "tags": [
+        "a plate of cooked food photographed from above",
+        "a steel thali of curries and rice with small bowls",
+        "a bowl of noodles or curry with a spoon beside it"
+      ]
+    },
+    "mountains and snow": {
+      "source": "authored",
+      "tags": [
+        "snow covered peaks under a blue sky",
+        "a winding mountain road cut into a bare hillside",
+        "a valley of bare rock and patchy snow"
+      ]
+    },
+    "picnic outdoors": {
+      "source": "authored",
+      "tags": [
+        "food spread on a mat on the grass",
+        "people sitting on the ground eating outdoors",
+        "a basket and plastic boxes of food on a lawn"
+      ]
+    },
+    "sunset": {
+      "source": "authored",
+      "tags": [
+        "an orange and pink sky just above the horizon",
+        "a low sun silhouetting trees or buildings",
+        "the sun reflected in a long streak on water"
+      ]
+    },
+    "the first day of school": {
+      "source": "authored",
+      "tags": [
+        "a child in a school uniform with a backpack",
+        "rows of desks and benches in a classroom",
+        "children lined up in a school courtyard"
+      ]
+    }
+  }
+}

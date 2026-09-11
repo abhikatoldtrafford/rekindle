@@ -1,0 +1,113 @@
+{
+  "_readme": [
+    "The adversarial evaluation set for the tag-disagreement refusal gate.",
+    "",
+    "Sixteen concepts the reference library genuinely contains and sixteen it",
+    "genuinely does not, each with hand-written visual tags produced by the",
+    "same rules the model is given - and deliberately written WITHOUT looking",
+    "at what the search returns, so the absent half is not straw-manned.",
+    "",
+    "`present` is drawn from what four independent investigations of this",
+    "library established it holds: a decade of festivals, Kashmir and Ladakh,",
+    "Puri and Gopalpur, weddings, food, a child growing up, dogs, gardens.",
+    "`absent` is things a family library in West Bengal does not hold, taken",
+    "mostly from the list an earlier probe used when it failed to find a",
+    "refusal signal.",
+    "",
+    "Two entries are marked `risky`: they are the ones a reader might argue",
+    "with. They are kept and counted, because dropping the hard cases is how a",
+    "gate comes to look better than it is."
+  ],
+  "present": {
+    "a beach": null,
+    "a birthday": null,
+    "a boat on the water": null,
+    "a dog": null,
+    "a garden": null,
+    "a rainy day": null,
+    "a swimming pool": null,
+    "a temple": null,
+    "a train journey": null,
+    "a wedding": null,
+    "city lights at night": null,
+    "food on a plate": null,
+    "mountains and snow": null,
+    "picnic outdoors": null,
+    "sunset": null,
+    "the first day of school": null
+  },
+  "absent": {
+    "an astronaut on the moon": [
+      "a figure in a white spacesuit and gold visor on grey dust",
+      "a bootprint in fine grey powder",
+      "a lunar module standing on a cratered grey plain"
+    ],
+    "the northern lights": [
+      "green curtains of light rippling across a night sky",
+      "a sky glowing green and violet above a dark horizon"
+    ],
+    "a penguin on ice": [
+      "a black and white penguin standing upright on ice",
+      "a colony of penguins crowded on a snowfield"
+    ],
+    "scuba diving underwater": [
+      "a diver in a wetsuit and mask with an air tank underwater",
+      "a stream of silver bubbles rising through blue water",
+      "brightly coloured coral and fish below the surface"
+    ],
+    "a hot air balloon festival": [
+      "striped hot air balloons inflated in a field",
+      "a wicker basket slung beneath a balloon burner",
+      "dozens of coloured balloons rising against the sky"
+    ],
+    "skiing on a glacier": [
+      "a skier in goggles carving a turn in deep powder snow",
+      "a chairlift strung above a white piste",
+      "ski poles and skis planted upright in snow"
+    ],
+    "a person riding a camel in the desert": [
+      "a camel with a saddle walking across sand dunes",
+      "long shadows over rippled sand under a bare sky"
+    ],
+    "a formula one race car": [
+      "a low open-wheel race car with wide slick tyres",
+      "a pit lane crew changing wheels on a race car",
+      "a race car cornering against a painted kerb"
+    ],
+    "a giraffe on safari": [
+      "a giraffe with a long patterned neck among flat-topped trees",
+      "an open-topped vehicle beside grazing wild animals"
+    ],
+    "a lighthouse in a storm": [
+      "a tall striped lighthouse on rocks with waves breaking over it",
+      "a beam of light sweeping from a tower in heavy rain"
+    ],
+    "an ice hockey match": [
+      "players in helmets and pads skating on white ice",
+      "a goal net and blue lines painted under ice",
+      "a puck and curved sticks on a rink"
+    ],
+    "a vineyard with grapevines": [
+      "rows of trained grapevines on wires across a slope",
+      "bunches of dark grapes hanging under green leaves"
+    ],
+    "a volcano erupting": [
+      "orange molten lava running down a black slope",
+      "a plume of ash rising from a mountain crater"
+    ],
+    "a medieval castle with a moat": [
+      "a grey stone keep with crenellated battlements",
+      "a drawbridge over water at a fortified gatehouse",
+      "arrow slits in a round stone tower"
+    ],
+    "a rodeo with a bucking bronco": [
+      "a rider in a wide-brimmed hat on a bucking horse",
+      "a fenced dirt arena with wooden chutes"
+    ],
+    "a windmill in a tulip field": [
+      "a wooden windmill with four lattice sails",
+      "long straight beds of red and yellow tulips"
+    ]
+  },
+  "risky": ["a medieval castle with a moat", "skiing on a glacier"]
+}

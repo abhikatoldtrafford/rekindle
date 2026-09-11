@@ -1,0 +1,116 @@
+# The festival corpus. DATA, not code - edit it.
+#
+# Two things a festival needs before rekindle will name it or search for it,
+# and neither of them is a date:
+#
+#   months  the approximate window it falls in. Lunisolar festivals move by
+#           weeks between years, so this is a MONTH RANGE and never a date.
+#           rekindle will not assert that a photograph was taken on a
+#           festival; it will only decline to look for Kali Puja in June.
+#
+#   tags    what a photograph of it LOOKS like. These go to CLIP; the
+#           festival's name never does. "Durga Puja" and "Kali Puja" are
+#           nearly the same string to an image-text model, and searching the
+#           names put nine of twenty-four shots of a Kali Puja memory on a
+#           Durga Puja day. A ten-armed goddess with a lion and a black
+#           goddess with a red tongue are not close at all.
+#
+# A tag should be a DISTINCTIVE visual description: something you would only
+# photograph at this festival. Measured on the reference library, generic tags
+# are actively harmful - "a crowd walking under an illuminated arch of lights"
+# and "women in white saris with red borders" pulled a 271-photo wedding into
+# a Durga Puja memory and took it from 23 of 24 correct shots down to 12.
+# Four sharp tags beat six blunt ones.
+#
+# `names` are matched against the prompt's subject after normalisation
+# (NFKC, casefold, whitespace collapsed), longest name first. A prompt that
+# matches nothing here is not refused: it goes to the tag cache and then, if
+# a key is configured, to the language model.
+#
+# THIS FILE IS DELIBERATELY INCOMPLETE. It covers what the author could write
+# an honest visual description of. It is not a world calendar and does not
+# pretend to be one. Add your own - a festival here is named from evidence
+# you can read, which is the whole reason the file exists rather than the
+# dates being guessed from a timestamp.
+
+version = 1
+
+[[festival]]
+key = "durga_puja"
+names = ["durga puja", "durgapuja", "durga pujo", "durgapujo", "pujo", "sharodiya"]
+months = [9, 10]
+tags = [
+    "a ten-armed goddess idol with a lion",
+    "an idol of a goddess spearing a green demon with a spear",
+    "a clay idol of a goddess flanked by four smaller idols under an arch",
+    "a large decorated pandal marquee lit up at night",
+]
+note = "Autumn, Bengal. Moves by up to three weeks between years."
+
+[[festival]]
+key = "kali_puja"
+names = [
+    "kali puja",
+    "kalipuja",
+    "kali pujo",
+    "kalipujo",
+    "diwali",
+    "deepavali",
+    "dipavali",
+    "kalipuja diwali",
+]
+months = [10, 11]
+tags = [
+    "a black-skinned goddess idol with a long red tongue",
+    "an idol wearing a garland of red hibiscus flowers",
+    "rows of small clay oil lamps burning on a ledge",
+    "a house decorated with strings of fairy lights at night",
+    "people lighting sparklers and fireworks at night",
+    "a rangoli pattern of coloured powder on the floor",
+]
+note = """Kali Puja and Diwali fall on the same new moon, roughly twenty days
+after Vijaya Dashami, so the window overlaps Durga Puja's through late
+October. The visual tags, not the window, are what separate them."""
+
+[[festival]]
+key = "saraswati_puja"
+names = ["saraswati puja", "saraswati pujo", "basant panchami", "vasant panchami"]
+months = [1, 2]
+tags = [
+    "an idol of a goddess in a yellow sari holding a stringed veena",
+    "an idol of a white goddess seated on a white swan",
+    "schoolchildren in yellow clothes in front of a goddess idol",
+]
+
+[[festival]]
+key = "christmas"
+names = ["christmas", "xmas", "bara din"]
+months = [12]
+tags = [
+    "a decorated christmas tree with lights indoors",
+    "a nativity scene with a star and a manger",
+    "a santa claus figure in a red suit and white beard",
+    "a house outlined in christmas lights at night",
+]
+note = "Fixed date, so the window is one month and it is exact."
+
+[[festival]]
+key = "holi"
+names = ["holi", "dol", "dol jatra", "dol purnima", "basanta utsav"]
+months = [3]
+tags = [
+    "people covered in bright coloured powder on their faces and clothes",
+    "a cloud of pink and yellow powder thrown in the air",
+]
+
+[[festival]]
+key = "jagaddhatri_puja"
+names = ["jagaddhatri puja", "jagadhatri puja", "jagaddhatri", "jagadhatri"]
+months = [10, 11]
+tags = [
+    "an idol of a four-armed goddess seated on a lion trampling an elephant",
+    "an idol of a goddess in a red sari with a bow and arrow",
+]
+note = """In this reference library Jagaddhatri Puja shares its window with
+Kali Puja and its visual vocabulary with Durga Puja. Expect it to be the
+hardest of the four to separate."""
