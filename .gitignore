@@ -20,7 +20,56 @@ token*.json
 [Tt]humbnails/
 index/
 memories/
-*.mp4
+
+# Media extensions, at any depth, on any filesystem. The directory rules above
+# only protect an export that sits in a directory NAMED Takeout/Data/Photos -
+# extract one anywhere else (or into a subfolder of a working directory) and a
+# contributor's `git add .` publishes it. This repo is PUBLIC and there is no
+# undo for that, so this is defence in depth on the one irreversible mistake.
+#
+# Spelled out with the same [Jj][Pp][Gg] bracket style as the directories
+# above, for the same reason: git matches patterns case-SENSITIVELY unless
+# core.ignorecase is set (it is on Windows and default macOS - and NOT on
+# Linux or a case-sensitive macOS volume, where a `.JPG` from a camera is the
+# common case, not the exotic one).
+#
+# Verified with `git ls-files` before and after: the repo tracks no file with
+# any of these extensions, so nothing already tracked becomes ignored. If you
+# ever need to commit a real media test asset, force it with `git add -f` and
+# add an explicit `!` negation here next to it.
+*.[Jj][Pp][Gg]
+*.[Jj][Pp][Ee][Gg]
+*.[Pp][Nn][Gg]
+*.[Gg][Ii][Ff]
+*.[Bb][Mm][Pp]
+*.[Ww][Ee][Bb][Pp]
+*.[Tt][Ii][Ff]
+*.[Tt][Ii][Ff][Ff]
+*.[Hh][Ee][Ii][Cc]
+*.[Hh][Ee][Ii][Ff]
+*.[Dd][Nn][Gg]
+*.[Cc][Rr]2
+*.[Cc][Rr]3
+*.[Nn][Ee][Ff]
+*.[Aa][Rr][Ww]
+*.[Oo][Rr][Ff]
+*.[Rr][Ww]2
+*.[Rr][Aa][Ff]
+*.[Rr][Aa][Ww]
+*.[Mm][Pp]4
+*.[Mm][Oo][Vv]
+*.[Mm]4[Vv]
+*.[Aa][Vv][Ii]
+*.[Mm][Kk][Vv]
+*.[Ww][Mm][Vv]
+*.[Ww][Ee][Bb][Mm]
+*.3[Gg][Pp]
+*.[Mm][Tt][Ss]
+*.[Mm]2[Tt][Ss]
+*.[Mm][Pp][Gg]
+*.[Mm][Pp][Ee][Gg]
+# Google's motion-photo video half, exported beside the still as `<name>.MP`.
+*.[Mm][Pp]
 
 # Python
 __pycache__/

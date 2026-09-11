@@ -50,7 +50,15 @@ Gemini and local VLMs all fit.
 ## Ground rules
 
 **Never commit personal data.** No photos, no Takeout exports, no `.env`. The
-`.gitignore` is deliberately aggressive — please keep it that way.
+`.gitignore` is deliberately aggressive — please keep it that way. It ignores
+the usual export folders (`Takeout/`, `Data/`, `Photos/`, `Thumbnails/`) **and**
+every common photo and video extension at any depth — `.jpg`, `.JPG`, `.heic`,
+`.dng`, `.CR2`, `.mp4`, `.MOV`, `.MP` and friends — each spelled with
+`[Jj][Pp][Gg]`-style brackets so it still holds on a case-sensitive filesystem,
+where an export extracted outside those folders would otherwise have no
+protection at all. This repo is public and that mistake cannot be undone. If you
+genuinely need to commit a media test asset, `git add -f` it and add an explicit
+`!` negation beside the rule.
 
 **Tests must run without photos, without a GPU, and without API keys.** CI has
 none of those. Use the synthetic fixture generator in `tests/fixtures/` and the
