@@ -1,0 +1,113 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>rekindle</title>
+<link rel="stylesheet" href="/assets/app.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='13' font-size='13'%3E%F0%9F%95%AF%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<header>
+  <h1>rekindle</h1>
+  <div id="library" class="muted">reading your library&hellip;</div>
+</header>
+
+<section id="ask">
+  <form id="prompt-form" autocomplete="off">
+    <input id="prompt" type="text" placeholder="durga puja over the years" aria-label="Describe a memory">
+    <button type="submit" id="prompt-go">Build</button>
+  </form>
+  <div id="prompt-note" class="muted"></div>
+  <details id="offers-box">
+    <summary>&hellip;or pick one of the memories this library already offers</summary>
+    <div id="offers-filter">
+      <input id="offers-search" type="text" placeholder="filter by title or key" aria-label="Filter offers">
+    </div>
+    <div id="offers" class="offers"></div>
+  </details>
+</section>
+
+<section id="progress" hidden>
+  <div id="stage" class="stage"></div>
+  <ul id="log" class="log"></ul>
+</section>
+
+<main id="workshop" hidden>
+  <div id="banner" class="banner" hidden></div>
+
+  <section class="panel">
+    <h2>In the memory <span id="chosen-count" class="pill"></span></h2>
+    <p class="muted" id="memory-sub"></p>
+    <div id="chosen" class="grid chosen"></div>
+    <p class="muted hint">Drag a photo to reorder it. Click <b>Remove</b> to drop it &mdash; it moves
+      to the pile below and stays there until you put it back.</p>
+  </section>
+
+  <section class="panel">
+    <h2>Not in the memory <span id="cut-count" class="pill"></span></h2>
+    <p class="muted">Every photo the recipe considered and something rejected, with the reason.
+      You can overrule any of them.</p>
+    <div id="cut-filter" class="chips"></div>
+    <div id="cut" class="grid"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Find more</h2>
+    <form id="search-form" autocomplete="off">
+      <input id="search" type="text" placeholder="a name, an album, a date&hellip;" aria-label="Search the library">
+      <label class="inline"><input type="radio" name="mode" value="metadata" checked> names &amp; dates</label>
+      <label class="inline"><input type="radio" name="mode" value="semantic" id="mode-semantic"> describe it</label>
+      <button type="submit">Search</button>
+    </form>
+    <div id="search-note" class="muted"></div>
+    <div id="results" class="grid"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Pace, music and output</h2>
+    <div class="controls">
+      <label>Each photo holds
+        <input id="frame-ms" type="number" min="100" max="20000" step="100"> ms</label>
+      <label>Title card holds
+        <input id="title-ms" type="number" min="100" max="20000" step="100"> ms</label>
+      <label>Music
+        <select id="music"></select></label>
+      <label class="inline"><input type="checkbox" id="no-mp4"> skip the MP4</label>
+      <button id="render" type="button" class="primary">Render</button>
+      <button id="dismiss" type="button" class="danger">Never offer this again</button>
+    </div>
+    <div id="render-note" class="muted"></div>
+    <div id="preview"></div>
+    <div id="reproduce" hidden>
+      <h3>Reproduce this from a shell</h3>
+      <pre id="reproduce-cmd"></pre>
+      <p class="muted">This renders the spec you just edited, not the search that started it &mdash;
+        so it rebuilds exactly what you made, on any machine with this library.</p>
+      <h3>Where it came from</h3>
+      <pre id="origin-cmd"></pre>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>What the guardrails did</h2>
+    <div id="guardrails" class="report"></div>
+  </section>
+</main>
+
+<div id="sheet" class="sheet" hidden>
+  <div class="sheet-inner">
+    <button id="sheet-close" class="close" type="button" aria-label="Close">&times;</button>
+    <img id="sheet-img" alt="">
+    <div id="sheet-body"></div>
+  </div>
+</div>
+
+<footer class="muted">
+  Served from 127.0.0.1 only. Nothing on this page is fetched from the network.
+</footer>
+
+<script src="/assets/app.js"></script>
+</body>
+</html>

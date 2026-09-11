@@ -15,6 +15,15 @@ from rekindle.enrich.takeout import EmptyIndexError, TakeoutEnricher
 from rekindle.semantic.cli import register as register_semantic
 from rekindle.sources.folder import FolderSource
 
+# The default port only. `rekindle.web` imports nothing heavier than the
+# standard library at module level, and `--help` has to print the number.
+#
+# NOTE: `render` is already bound in this module, to `doctor.render`. The
+# memory renderer is therefore registered under an explicit command name and
+# its function is called something else - a bare `def render` here would
+# shadow the import and break `rekindle doctor` and `rekindle index`.
+from rekindle.web import DEFAULT_PORT as WEB_PORT
+
 app = typer.Typer(help="Turn your photo library into memories.", no_args_is_help=True)
 console = Console()
 
@@ -478,3 +487,112 @@ def watch(
     root = _resolved(root)
     _check_root(root)
     watch_cmd(root, _resolved(data_dir), interval, once)
+
+
+# --------------------------------------------------------------------------
+# M4: the interactive memory builder
+#
+# Two verbs, both additive. `ui` is a lens onto everything above; `render`
+# turns a hand-edited MemorySpec back into files, which is what makes an
+# afternoon in the browser reproducible from a shell.
+#
+# Imported lazily for the same reason every other command here is: `rekindle
+# --version` must not pay for Pillow, the memory engine or an HTTP server.
+
+
+@app.command()
+def ui(
+    port: Annotated[
+        int,
+        typer.Option("--port", help="Port on 127.0.0.1. 0 asks the OS for a free one."),
+    ] = WEB_PORT,
+    out: Annotated[Path, typer.Option("--out", help="Where to write memories.")] = Path("memories"),
+    music_dir: Annotated[
+        Path, typer.Option("--music-dir", help="Folder of audio beds to choose from.")
+    ] = Path("music"),
+    public_safe: Annotated[
+        bool,
+        typer.Option(
+            "--public-safe",
+            help="Only offer photos whose face tags are a subset of the allow-list.",
+        ),
+    ] = False,
+    max_shots: Annotated[int, typer.Option("--max-shots")] = 24,
+    open_browser: Annotated[
+        bool, typer.Option("--open/--no-open", help="Open the page in your browser.")
+    ] = True,
+    verbose: Annotated[
+        bool,
+        typer.Option(
+            "--verbose",
+            help="Log every request. Off by default: a request log is a record of "
+            "which of your photographs you looked at.",
+        ),
+    ] = False,
+    data_dir: DataDir = Path("./data"),
+) -> None:
+    """Edit memories in a local browser page. Binds 127.0.0.1 and nothing else.
+
+    The page is a LENS onto the same engine these other commands use: it
+    selects nothing of its own, it cannot show a photo the guardrails refuse,
+    and every edit ends as a `rekindle render` command you can re-run.
+    """
+    from rekindle.web.cli import ui_cmd
+
+    ui_cmd(
+        _resolved(data_dir),
+        out_dir=out,
+        music_dir=music_dir,
+        port=port,
+        public_safe=public_safe,
+        max_shots=max_shots,
+        open_browser=open_browser,
+        verbose=verbose,
+    )
+
+
+@app.command("render")
+def render_memory(
+    spec: Annotated[Path, typer.Argument(help="A memory.json, or the folder holding one.")],
+    out: Annotated[
+        Path | None,
+        typer.Option("--out", help="Where to write. Defaults to the spec's own folder."),
+    ] = None,
+    frame_ms: Annotated[
+        int, typer.Option("--frame-ms", help="How long each photo holds, in milliseconds.")
+    ] = 1400,
+    title_ms: Annotated[
+        int, typer.Option("--title-ms", help="How long the title card holds.")
+    ] = 2200,
+    preview_frames: Annotated[
+        int, typer.Option("--preview-frames", help="Frames in the GIF/WebP preview.")
+    ] = 16,
+    preview_width: Annotated[
+        int, typer.Option("--preview-width", help="0 uses the default (1280).")
+    ] = 0,
+    mp4_width: Annotated[int, typer.Option("--mp4-width", help="0 uses the default (2560).")] = 0,
+    music: Annotated[Path | None, typer.Option("--music", help="Audio bed for the MP4.")] = None,
+    no_mp4: Annotated[bool, typer.Option("--no-mp4", help="Skip the MP4.")] = False,
+    data_dir: DataDir = Path("./data"),
+) -> None:
+    """Render a MemorySpec that already exists. No selection is re-run.
+
+    This is how an edited memory becomes repeatable: `rekindle ui` writes the
+    spec, prints this command, and running it rebuilds the same files. Shots
+    are resolved through the same guardrailed index as everything else, so a
+    photo excluded since the spec was written is left out and counted.
+    """
+    from rekindle.web.cli import default_spec, render_cmd
+
+    render_cmd(
+        default_spec(spec),
+        data_dir=_resolved(data_dir),
+        out_dir=out,
+        frame_ms=frame_ms,
+        title_ms=title_ms,
+        preview_frames=preview_frames,
+        preview_width=preview_width,
+        mp4_width=mp4_width,
+        music=music,
+        no_mp4=no_mp4,
+    )
