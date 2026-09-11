@@ -392,6 +392,157 @@ this project has shipped that bug once already.
 
 ---
 
+## M2-finish: what the numbers said when they were re-measured
+
+Five tasks were picked up after M2 stopped mid-flight, plus a sixth the user
+raised while they were in progress. The theme of all six is the same one this
+document keeps recording, and it caught me twice.
+
+### The sharpness measure was a coin flip on the thing it was for
+
+`docs/known-limitations.md` recorded it mildly: "sharpness is measured at
+128x128, which discards the fine detail where mild blur lives." Measured, it
+is worse than that. Over 123 real photos spread across every year, each also
+rendered with a mild blur (radius = long edge / 1200), the probability that
+the sharp version outscored the blurred one was **0.519**. A coin flip. The
+measure could not see the defect it existed to detect, because downscaling a
+4000px photo to 128px is *itself* a low-pass filter that removes exactly the
+detail mild blur removes.
+
+The replacement is the fraction of local gradient energy destroyed by a
+one-pixel reblur, over ~128px tiles of a 1024px copy, scored on the sharpest
+tile: 0.903 on the same test, and 1.000 against gross blur.
+
+Three separate decisions, and only one of them is the resolution:
+
+- **1024 rather than 128** — the signal has to exist before it can be
+  measured.
+- **A ratio rather than a magnitude.** This is the load-bearing one. A
+  gradient magnitude cannot tell a low-contrast photo from a blurred one,
+  which is why the old per-year 5th percentile spanned **3.84x** and the gate
+  had to cower in the tail. Dividing by the tile's own energy cancels scene
+  contrast: **1.75x**. An unnormalised gradient at the same 1024 resolution
+  still spans 4.44x — the resolution is not what fixed it.
+- **The sharpest tile rather than the mean**, which is the only available
+  mitigation for shallow depth of field before M3's face boxes. On a synthetic
+  sharp-centre/blurred-surround version of each of the 123 photos, median
+  retention of the fully-sharp score is 0.800 taking the max tile, 0.330 at
+  the 90th percentile, 0.006 at the 75th. The max is doing nearly all the
+  work; tiling alone would not have helped.
+
+### I calibrated the new threshold on a sample and the sample was wrong
+
+`MIN_SHARPNESS` was re-derived — correctly, from measurement rather than by
+scaling the old number — over 2,240 photos, 120 per year. It produced 0.24,
+which reproduced both of the original design rules exactly: about 1% removed,
+below every year's 5th percentile.
+
+Run over all 18,363 fingerprinted photos it rejects **1.50%**, and takes
+**2.25% of 2008-2013 against 0.83% of 2020-2026**. A uniform per-year sample
+over-weights the sparse early years, so it was wrong in precisely the
+direction the brief warned about — one commit after I wrote "measure every
+number you write down" into the design doc.
+
+The second derivation was done by **looking at the photographs**. In the band
+0.12-0.22, about a quarter of a hand-graded sample of sixteen were pictures
+worth keeping — an 800x600 portrait, a 2012 face at 240x320 — because the
+measure is unreliable on heavily compressed sub-megapixel files, which are 53%
+of 2011 against 7.5% of the library. Below 0.12, fifteen of sixteen were
+indefensible. **0.12**: 0.19% of the library, 0.15% of 2008-2013 against 0.16%
+of 2020-2026, worst year 0.70%, and gentler than the old gate in every early
+year (2011: 0.44% against 3.83%).
+
+That gate is deliberately **weaker** than the one it replaces, and the
+reasoning is worth keeping: a gate that removes 1% of a library was never what
+keeps mild blur out of a 24-shot memory drawn from a pool of hundreds. The
+*ranking* is, and sharpness is the ranking signal. 0.519 to 0.903 is where the
+blur removal happens; the gate's only job is to stop the indefensible from
+being ranked at all, and a false positive there deletes an irreplaceable
+photograph outright.
+
+### The colour histogram had no colour in it
+
+`im.draft("L", ...)` tells libjpeg to decode the luma plane only. Every stored
+"colour histogram" was therefore a **luminance** histogram: measured over
+2,000 real rows, a median of **42 of the 64 bins were exactly zero** and 55%
+of the mass sat on the four grey bins. The diversity signal that shipped in
+this milestone — the one whose decision log entry above explains how it
+separates a red shirt from a blue one — could not see colour at all.
+
+Nothing failed. No test could have failed: every test set the value by hand.
+It was found by asking what `draft()` actually does, while changing it for an
+unrelated reason.
+
+### A mutation harness edits the tree you commit from
+
+`-shortest` was committed away. The harness had removed it, its restore did
+not run because the process was killed mid-mutation, and `git add` took the
+mutated line. With `-stream_loop -1` and no `-shortest` the audio input is
+infinite: a four-frame test ran for ten minutes and a real memory reached a
+556 MB MP4 before it was killed.
+
+It was caught by the test written in the same commit — one that reads the
+ffmpeg command line and fails in a millisecond — and by nothing else. The
+argument for writing it was that *a test whose failure mode is ten minutes is
+a test nobody runs*; within the hour it caught a defect that the ten-minute
+ones hid inside a hung suite.
+
+### A recipe that finds a festival without knowing what a festival is
+
+The user asked why October and November produce no memories when they are full
+of Durga Puja and Kali Puja. The answer is structural: Christmas works
+*because* it is fixed, and the Bengali festival calendar is lunar, so Durga
+Puja lands on a different date every year and no date ever accumulates. The
+most any single Puja date musters is two years; `on_this_day` needs three.
+
+`recurring_event` asks instead for a multi-day burst of unusually dense
+photography that recurs at about the same time of year even as the dates
+drift. It finds Durga Puja (12 years, 2,297 photos) and Kali Puja (11 years,
+1,134) with no festival calendar anywhere in it.
+
+Two things worth recording.
+
+**The obvious algorithm fails for a specific, memorable reason.** Grouping
+dense bursts wherever there is a gap between them was built first. In a
+Bengali autumn *there is no gap*: Durga Puja, Kali Puja and the weeks between
+form one unbroken run from late September to late November. At an 8-day split
+it found two events on this library and neither was a festival. The peak
+search that replaced it separates them because each has its own peak.
+
+**It must not name what it finds.** Inferring "Diwali" from a date in late
+October is exactly the confident wrongness this project exists not to commit.
+A title comes from an album name that recurs across years, or it describes
+when the thing happens. The first version without an album-presentability
+filter was about to title every festival **"Photos from"**, because Google's
+per-year folders are on every photo — which is also why that rule moved out of
+`recipes.builtin` and into `memory.albums`.
+
+### Mutation tally
+
+58 mutations across the six tasks, each seen failing and restored.
+**Thirteen survived the first pass and all thirteen were real gaps**, not
+redundancies: two in the sharpness work (a horizontal-only gradient, and the
+grayscale draft), one in the music work (the CLI never passing the memory its
+id, so the whole feature was correct in its module and dead in the product),
+two in `music fetch`, and eight in `recurring_event`. Every one is now
+covered.
+
+Two of the thirteen are worth naming because the tests that missed them looked
+right. `test_only_checksummed_mp3s_are_offered` proved the format filter with
+a fixture whose non-MP3 entries all *also* lacked checksums, so deleting the
+filter changed nothing — and the real item derives a fully checksummed Ogg
+Vorbis copy of every track, which would have put three copies of each piece in
+`music/`. And "an interrupted download leaves nothing behind" passes with the
+`.part` file deleted, because the error path cleans up either way; the
+property that matters is that the final name does not exist *while the bytes
+are arriving*, which needs a test that looks during rather than after.
+
+The count of tests that could not fail is unchanged at ten for M2 proper; the
+gaps above were missing tests rather than vacuous ones, which is a different
+and slightly better failure.
+
+---
+
 ## What contributors should take from this
 
 - **Point new code at a real library before trusting it.** Two of this
@@ -404,3 +555,13 @@ this project has shipped that bug once already.
   floor that looks fine on the whole library deletes a fifth of 2011.
 - **A fixture must reproduce a shape you have observed.** Inventing one and
   pinning it with a test remains the most expensive mistake available here.
+- **A threshold measured on a sample is not measured.** A 120-per-year sample
+  put `MIN_SHARPNESS` at twice its correct value and tilted it 2.7:1 against
+  the years holding the least replaceable photographs. Run it over everything,
+  then look at what it rejects.
+- **Never commit while a mutation harness is running.** It edits the tree you
+  are staging from. One deliberate defect reached `main` that way.
+- **Write the fast version of a slow test.** The end-to-end proof of
+  `-shortest` can only fail by exhausting a 600-second timeout; the one that
+  reads the command line fails instantly, and it is the one that caught the
+  real defect.

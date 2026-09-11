@@ -188,17 +188,46 @@ def test_the_cli_default_item_matches_the_module():
     assert cli_module._MUSIC_ITEM == DEFAULT_ITEM
 
 
-def test_only_checksummed_mp3s_are_offered():
-    """744 files in the real item, 104 of them MP3. The .m4a originals, the
-    spectrograms and the scans are not music beds, and a file with no sha1 has
-    nothing to verify against so it is not offered at all."""
+def test_a_file_with_no_checksum_is_not_offered():
+    """Nothing to verify against, so it is not offered at all rather than
+    downloaded unverified."""
     files = _metadata()["files"] + [
         {"name": "Unchecksummed.mp3", "format": "VBR MP3", "size": "9"},
     ]
     _, tracks = list_tracks(opener=_opener(_routes(_metadata(files))))
-    assert all(t.name.endswith(".mp3") for t in tracks)
     assert "Unchecksummed.mp3" not in {t.name for t in tracks}
     assert len(tracks) == 2
+
+
+def test_only_the_mp3s_are_offered_even_when_the_others_are_checksummed():
+    """744 files in the real item and 104 are MP3. The rest are not all
+    checksum-less clutter: archive.org derives an **Ogg Vorbis** copy of every
+    track, fully checksummed, and the item also holds the .m4a originals. A
+    filter on "has a sha1" lets all of those through, and `music/` fills with
+    three copies of every piece.
+
+    So the filter is on FORMAT, and this is the fixture that says so - an
+    earlier version used only checksum-less extras and passed with the format
+    filter deleted."""
+    files = _metadata()["files"] + [
+        {
+            "name": "Nocturne Op. 9, No. 2 in E Flat Major.ogg",
+            "format": "Ogg Vorbis",
+            "sha1": AUDIO_SHA1,
+            "size": "99",
+        },
+        {
+            "name": "Allegro de Concert Op. 46 in A Major.m4a",
+            "format": "Apple Lossless Audio",
+            "sha1": AUDIO_SHA1,
+            "size": "99",
+        },
+    ]
+    _, tracks = list_tracks(opener=_opener(_routes(_metadata(files))))
+    assert [t.name for t in tracks] == [
+        "Allegro de Concert Op. 46 in A Major.mp3",
+        "Nocturne Op. 9, No. 2 in E Flat Major.mp3",
+    ]
 
 
 def test_the_track_order_is_stable_whatever_the_api_returns():
@@ -294,6 +323,42 @@ def test_an_interrupted_download_leaves_no_partial_mp3(tmp_path):
 
     assert report.failed == 2
     assert list(tmp_path.iterdir()) == []
+
+
+def test_the_bytes_are_in_flight_under_a_part_name(tmp_path):
+    """Atomicity, stated as the property rather than the cleanup.
+
+    The failure `.part` exists for is the process being KILLED mid-download -
+    no exception, no `finally`, just a half-written file left where
+    `resolve_music` would hand it to ffmpeg as a memory's soundtrack. Nothing
+    in-process can be killed to prove that, so this looks at the folder WHILE
+    the download is running: the final name must not exist yet.
+
+    Written because the obvious test - "an interrupted download leaves nothing
+    behind" - passes with `.part` deleted, since the error path cleans up
+    either way.
+    """
+    seen: list[list[str]] = []
+
+    class _Watching(_Response):
+        def read(self, *args):
+            seen.append(sorted(p.name for p in tmp_path.iterdir()))
+            return super().read(*args)
+
+    routes = _routes()
+
+    def opener(url):
+        return (_Response if url == META_URL else _Watching)(routes[url])
+
+    _, tracks = list_tracks(opener=_opener(_routes()))
+    fetch_tracks(tracks[:1], tmp_path, opener=opener)
+
+    during = seen[0]
+    assert during, "nothing was on disk while the download ran"
+    assert any(name.endswith(".part") for name in during), during
+    assert not any(name.endswith(".mp3") for name in during), during
+    # ...and it is renamed once it verifies.
+    assert [p.name for p in tmp_path.iterdir()] == [tracks[0].filename]
 
 
 def test_a_track_already_present_and_correct_is_not_downloaded_again(tmp_path):
