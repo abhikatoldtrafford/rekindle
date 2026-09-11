@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
-from rekindle.semantic.availability import SemanticUnavailable
+from rekindle.semantic.availability import SemanticUnavailable, require
 from rekindle.semantic.registry import EmbedModel, embed_model
 from rekindle.semantic.runtime import Device, DeviceReport, resolve_device
 
@@ -47,6 +47,22 @@ class ImageTextEncoder(Protocol):
     def encode_texts(self, texts: Sequence[str]) -> list[Vector]:
         """One unit vector per string, in order, comparable with images."""
         ...
+
+
+def features_of(output):
+    """The embedding tensor, whichever transformers major version produced it.
+
+    transformers 4.x returned a bare tensor from `get_image_features` /
+    `get_text_features`. transformers 5.x returns a
+    `BaseModelOutputWithPooling` whose `pooler_output` holds the PROJECTED
+    embedding. Found by running the real model: on 5.17 the 4.x code path
+    fails with `'BaseModelOutputWithPooling' object has no attribute 'float'`.
+
+    Duck-typed on `.float` rather than branched on `transformers.__version__`,
+    because the version string is not what changed - the return type is, and a
+    backport or a fork could move it without moving the version.
+    """
+    return output if hasattr(output, "float") else output.pooler_output
 
 
 def _normalise(rows: list[list[float]]) -> list[Vector]:
@@ -117,7 +133,7 @@ class TorchEncoder:
         inputs = self._proc(images=list(images), return_tensors="pt")
         px = inputs["pixel_values"].to(self.report.device, dtype=self._dtype)
         with torch.inference_mode():
-            feats = self._model.get_image_features(pixel_values=px)
+            feats = features_of(self._model.get_image_features(pixel_values=px))
         return _normalise(feats.float().cpu().tolist())
 
     def encode_texts(self, texts: Sequence[str]) -> list[Vector]:
@@ -132,7 +148,7 @@ class TorchEncoder:
         )
         moved = {k: v.to(self.report.device) for k, v in inputs.items()}
         with torch.inference_mode():
-            feats = self._model.get_text_features(**moved)
+            feats = features_of(self._model.get_text_features(**moved))
         return _normalise(feats.float().cpu().tolist())
 
 
@@ -295,6 +311,13 @@ def load_encoder(
     if chosen == "torch":
         enc = TorchEncoder(spec, device=device, cache_dir=cache_dir)
         return LoadedEncoder(enc, spec, "torch", enc.report)
+
+    # Ask availability BEFORE anything else on this branch. Without it, a
+    # machine with neither extra installed reaches `OnnxEncoder`, fails on
+    # whichever incidental thing it notices first - a missing directory, say -
+    # and tells the user about that instead of about the extra they need.
+    # Caught by tests/test_semantic_cli.py, on the real no-extras path.
+    require(feature="Embedding")
     if spec.onnx is None:
         raise SemanticUnavailable(
             f"model '{spec.key}' has no ONNX build, and torch is not available. "
@@ -303,7 +326,16 @@ def load_encoder(
             f"{', '.join(k for k, m in _onnx_capable().items() if m)}"
         )
     if onnx_dir is None:
-        raise SemanticUnavailable("the ONNX runtime needs a model directory")
+        if cache_dir is None:
+            raise SemanticUnavailable(
+                "the ONNX runtime needs either a model directory or a cache "
+                "directory to find one in"
+            )
+        # Resolve the pinned snapshot from the cache. Offline: only
+        # `rekindle semantic setup` may reach the network.
+        from rekindle.semantic.setup import snapshot_dir
+
+        onnx_dir = snapshot_dir(spec.pin("onnx"), cache_dir, offline=True)
     enc = OnnxEncoder(spec, model_dir=onnx_dir)
     return LoadedEncoder(enc, spec, "onnx", resolve_device("cpu"))
 

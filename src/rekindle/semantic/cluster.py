@@ -66,8 +66,10 @@ def _numpy():
 
 
 def suggest_k(n: int) -> int:
+    # n itself below K_MIN: asking for two clusters from one photo is not a
+    # clamp, it is a wrong answer. Zero photos suggest zero clusters.
     if n <= K_MIN:
-        return max(1, n)
+        return max(0, n)
     return max(K_MIN, min(K_MAX, int(round((n / 2) ** 0.5))))
 
 

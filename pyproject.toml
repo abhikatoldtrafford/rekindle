@@ -43,7 +43,13 @@ semantic-gpu = [
 rekindle = "rekindle.cli:app"
 
 [dependency-groups]
-dev = ["pytest>=8.3.0", "pytest-cov>=6.0.0", "ruff>=0.8.0"]
+# numpy is here, in the DEV group, not in `dependencies`. It is never shipped
+# to a user who only wants `rekindle index`, but it IS installed by a plain
+# `uv sync`, so CI actually RUNS the search, clustering and aesthetic tests
+# instead of skipping them. A skipped test is not a passing test, and those
+# three modules are where the arithmetic that can be silently wrong lives.
+# onnxruntime, torch and transformers stay out: CI must never need them.
+dev = ["pytest>=8.3.0", "pytest-cov>=6.0.0", "ruff>=0.8.0", "numpy>=2.1"]
 
 # PyPI's Windows torch wheel is CPU-ONLY: `pip install torch` on Windows gives
 # you a build whose torch.version.cuda is None, and the only symptom is that
