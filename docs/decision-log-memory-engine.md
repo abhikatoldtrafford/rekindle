@@ -543,6 +543,144 @@ and slightly better failure.
 
 ---
 
+## M3-diversity: the embedding, and the threshold that must not be a number
+
+The complaint was that memories still held near-identical photographs. It was
+right, and the seam to fix it had been designed in advance (§6.2b, "The seam
+for semantic similarity"). What follows is what the seam could *not* have
+anticipated.
+
+### The five-second pair the hash called unrelated
+
+```
+PXL_20251226_091254817 / PXL_20251226_091259823
+    5 seconds apart. One mother, one child, one school gate, one Christmas.
+    dHash distance 32 — the score of two UNRELATED photographs.
+    CLIP cosine 0.927.
+```
+
+Burst dedup has a 30-second window and let this through, because a dHash is
+pixel-structural and the camera moved a little. That is not a tuning failure;
+it is the signal being asked a question it cannot answer. So the burst rule now
+reads *time gates, and inside the gate the pixels **or** the embedding decide*.
+
+### An absolute threshold would have gutted the best memories
+
+The obvious fix — "reject any pair above 0.90" — is wrong, and wrong in a way
+that hides. **A "durga puja over the years" memory is every-photo-an-idol by
+construction.** So is `person_years` (one face), `then_and_now` (one subject
+twice), any album story of one event. An absolute cutoff rejects the *subject*,
+and the more faithfully a recipe found what was asked for, the more of the
+memory it throws away. The result looks like a thin library, not a broken rule.
+
+Measured over the **399 candidate pools** this library produces, the per-pool
+**median** pairwise cosine runs **0.460 to 0.930** and the 95th percentile
+0.682 to 0.986. A pair at 0.90 is the ninetieth percentile of
+`on_this_day-11-27` and above the *ninety-ninth* of `on_this_day-11-21`.
+
+So the threshold is not a number, it is a position in the memory's own
+distribution, and `low` is the **median** — which makes "the typical pair of
+any memory costs nothing" an arithmetic identity rather than a hope.
+
+### The first calibration had the trap in it
+
+The first version anchored the scale at `low = min(median, 0.80)`, the cap
+existing to stop a duplicate-saturated pool calling duplicates typical. Working
+through a uniform pool — every pair at 0.95, which is precisely the durga-puja
+shape — showed it mapped **every pair to the maximum penalty**. The guard
+against one failure had reintroduced the other, in the exact case the design
+existed to protect. Moving both floors onto `high`, where they cannot reach the
+median, fixed it and made the invariant provable. `MIN_SPREAD` then falls out
+as a consequence rather than a patch.
+
+The cost is accepted and stated: this under-reacts to a pool that really is
+mostly duplicates. Regime A — absolute, inside 30 seconds, where the question
+is factual — is what covers that case.
+
+### Numbers are checked by eye before they are believed
+
+0.92 is not a round number and not a percentile. Six within-30-second pairs
+were opened:
+
+| cosine | what it is | verdict |
+|---|---|---|
+| 0.900 | two different groups of people at one wedding | keep both |
+| 0.912 | one flower shop, two shelves, different aspect | keep both |
+| 0.921 | four women at a gate: candid, then posed | collapse |
+| 0.925 | one cake being lit, wide then tight | collapse |
+| 0.927 | the mother and child above | collapse |
+| 0.931 | one lily pond, wide then tight | collapse |
+
+0.92 is where the eye changes its answer. The library agrees the number is
+meaningful — 0.04% of *random* pairs reach 0.90 — but the library could not
+have chosen it, because within 30 seconds the median pair is already 0.917 and
+a percentile-derived threshold would have sat far too low.
+
+Afterwards, four of the fifteen shots dropped from the worst-shrinking memory
+(`on_this_day-07-17`, 24 → 9) were opened too. Every one was the same moment as
+a shot that stayed.
+
+### Ten tests that could not fail
+
+The mutation sweep ran **35 mutants**. The first pass caught 25 and **ten
+survived** — and every survivor was in the *plumbing*: engine, `strata`, CLI.
+The unit layers were well covered and the layer that connects them had no test
+that could fail at all. Two survivors are worth naming:
+
+- **`binding=None` in the engine survived a test asserting the memory did not
+  get shorter.** It cannot fail that way: `pick` *restores* refused shots when
+  a memory would come up short, so an embedding wrongly given the power to
+  refuse produces a memory of exactly the right length whose contents were
+  chosen by the restore path. The assertion had to move to the rejection
+  counts, and then to a fixture in the narrow band where the guarantee bites —
+  two photos four dHash bits apart, which sit at 0.167 on the binding signals
+  and 0.063 once an identical-verdict embedding is blended in.
+- **"the engine never builds the semantic signal" survived a test using a
+  signal that called every pair identical.** It could not fail: a uniform
+  penalty is no penalty, because every candidate takes it and quality decides
+  as before. That is the correct behaviour — it is the trap test — but it
+  proves nothing about delivery. A signal has to *discriminate* to show it
+  arrived.
+
+Final tally: **35 mutants, 35 caught, 0 survived.**
+
+### The fixture caught itself
+
+`tests/test_semantic_diversity.py` builds pools by stating the similarity
+matrix it wants and recovering vectors from it. The first `_graded` helper put
+its highest value on the **diagonal**, so no pair ever reached the `hi` it
+claimed and three tests were quietly measuring a pool 0.11 less alike than they
+said. The fixture-trust test caught it on its first run. The rewritten helper
+also needs a PSD projection, which perturbs the result by up to 0.009 — so that
+tolerance is a named constant and asserted, rather than assumed to be zero.
+
+### What it did
+
+Every one of the 470 buildable memories, built twice:
+
+| | before | after |
+|---|---|---|
+| pairs ≥ 0.90 | 5,435 | **2,242** (59% fewer) |
+| pairs ≥ 0.95 | 1,806 | **438** (76% fewer) |
+| memories lost entirely | — | **0** |
+
+`prompt: durga puja over the years` **24 → 24 shots**, 3 → 0 pairs ≥ 0.90,
+nothing refused. `person_years-Avyan` **24 → 24**, 3 → 0, worst pair 0.962 →
+0.810. `on_this_day-11-27` 24 → 19, **75 → 32**. The homogeneous memories keep
+every shot; the duplicate-saturated one is the one that shrinks. That asymmetry
+is the design working.
+
+### One honest cost
+
+Collapsing more bursts means the *survivor rule* runs more often, and it picks
+the sharpest frame, which is not always the best-looking one. In
+`on_this_day-07-17` the frame kept from one pair has a subject mid-blink while
+the dropped frame does not. That rule predates this work and was not changed
+here, but it is now load-bearing in more places, and it is the obvious next
+thing to look at.
+
+---
+
 ## What contributors should take from this
 
 - **Point new code at a real library before trusting it.** Two of this
@@ -565,3 +703,13 @@ and slightly better failure.
   `-shortest` can only fail by exhausting a 600-second timeout; the one that
   reads the command line fails instantly, and it is the one that caught the
   real defect.
+- **A threshold that must adapt is not a threshold.** Where the right answer
+  differs per memory — as a semantic-similarity cutoff does, by a factor of two
+  across this library's own candidate pools — anchor the scale on a statistic
+  of the set itself and put the safety rails somewhere they cannot reach it.
+- **A uniform penalty is no penalty.** A test using a signal that calls
+  everything identical cannot show that the signal was delivered: every
+  candidate takes the same hit and quality decides exactly as before. Make the
+  fake discriminate, or the test proves only that nothing crashed.
+- **Mutation-test the plumbing, not just the logic.** Ten survivors here were
+  all in the layer that passes arguments between well-tested modules.

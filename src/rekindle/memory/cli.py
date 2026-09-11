@@ -190,6 +190,51 @@ def _render_album_merges(index: MemoryIndex) -> None:
         )
 
 
+def _semantic_support(data_dir: Path, *, announce: bool = True):
+    """The embedding store as a diversity signal, or None with a sentence.
+
+    The ONE other place `rekindle.semantic` is reached from this module, and
+    like `_retriever_for` the import is inside the body: `rekindle --help`
+    must never load torch, and a machine without the extra must get a message
+    rather than an ImportError.
+
+    Absence is a supported configuration, not a failure, so this never raises
+    and never exits - it says what is missing, names the command that would
+    fix it, and lets the build run on the two pixel signals exactly as it did
+    before embeddings existed.
+    """
+    from rekindle.semantic.availability import probe
+
+    found = probe()
+    if not found.any:
+        if announce:
+            console.print(
+                "[dim]No embeddings available (the 'semantic' extra is not "
+                "installed), so near-duplicates are judged on the perceptual "
+                "hash and colour alone. `uv sync --extra semantic` to add "
+                "them.[/dim]"
+            )
+        return None
+    try:
+        from rekindle.semantic.diversity import open_support
+
+        support = open_support(data_dir)
+    except Exception as exc:  # pragma: no cover - a corrupt store, reported
+        console.print(f"[yellow]Embedding store unusable ({exc}); continuing without it.[/yellow]")
+        return None
+    if support is None:
+        if announce:
+            console.print(
+                "[dim]This library has no embeddings yet, so near-duplicates "
+                "are judged on the perceptual hash and colour alone. Run "
+                "`rekindle semantic embed` to add them.[/dim]"
+            )
+        return None
+    if announce:
+        console.print(f"[dim]Semantic near-duplicate detection on: {len(support)} vectors.[/dim]")
+    return support
+
+
 def memory_cmd(
     data_dir: Path,
     recipe: str | None,
@@ -271,6 +316,7 @@ def memory_cmd(
             dismissed=state.dismissed_memory_ids(),
             cooling=frozenset() if named else state.cooling(),
             limit=limit,
+            semantic=_semantic_support(data_dir),
         )
         if not specs:
             console.print("[yellow]Nothing to build.[/yellow]")
@@ -334,7 +380,21 @@ def _render_build_report(report: engine.BuildReport) -> None:
         parts = ", ".join(f"{n} {r.replace('_', ' ')}" for r, n in sorted(report.skipped.items()))
         console.print(f"[dim]{report.total_skipped} candidate memories skipped: {parts}[/dim]")
     if report.deduped:
-        console.print(f"[dim]{report.deduped} near-duplicate frames collapsed.[/dim]")
+        # The semantic count is broken out rather than folded in: these are
+        # the frames the perceptual hash called UNRELATED, so a user who wants
+        # to check the guardrail needs to know which pile to look in.
+        extra = (
+            f" {report.deduped_semantically} of them on visual similarity the "
+            f"perceptual hash missed."
+            if report.deduped_semantically
+            else ""
+        )
+        console.print(f"[dim]{report.deduped} near-duplicate frames collapsed.{extra}[/dim]")
+    if report.diversity.displaced:
+        console.print(
+            f"[dim]{report.diversity.displaced} shots chosen differently because a "
+            f"semantically near-identical shot was already in the memory.[/dim]"
+        )
     drops = describe_drops(report.composition)
     if drops:
         console.print(f"[dim]Composition guardrails dropped: {'; '.join(drops)}[/dim]")
@@ -777,6 +837,12 @@ def prompt_cmd(
                 selection=build.selection,
                 max_shots=max_shots,
                 report=report,
+                # A prompt memory is the homogeneous case by construction -
+                # every shot is the thing that was asked for - so it is where
+                # the relative calibration matters most and an absolute
+                # threshold would have done the most damage. See
+                # `rekindle.semantic.diversity`.
+                semantic=_semantic_support(data_dir, announce=False),
             )
         _render_prompt_report(build, spec, index)
         if spec is None:

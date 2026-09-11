@@ -21,7 +21,8 @@ from datetime import date, datetime
 from rekindle.memory import captions
 from rekindle.memory.composition import CompositionReport, compose
 from rekindle.memory.dedup import collapse
-from rekindle.memory.diversity import DiversityReport
+from rekindle.memory.diversity import DEFAULT_SIGNAL, CompositeSignal, DiversityReport
+from rekindle.memory.diversity import SemanticSupport as SemanticSupport
 from rekindle.memory.history import DEFAULT_MAX_OVERLAP, overlap
 from rekindle.memory.index import MemoryIndex
 from rekindle.memory.recipes import MIN_SHOTS, Offer, Selection, registered
@@ -66,6 +67,8 @@ class BuildReport:
     # this reporting was added alongside.
     strata: list[StratumReport] = field(default_factory=list)
     diversity: DiversityReport = field(default_factory=DiversityReport)
+    # Of `deduped`, the frames only the embedding could see were duplicates.
+    deduped_semantically: int = 0
 
     def skip(self, reason: str) -> None:
         self.skipped[reason] = self.skipped.get(reason, 0) + 1
@@ -143,8 +146,14 @@ def build(
     max_shots: int = DEFAULT_MAX_SHOTS,
     min_shots: int = MIN_SHOTS,
     report: BuildReport | None = None,
+    semantic: SemanticSupport | None = None,
 ) -> MemorySpec | None:
     """One offer to one spec, or None with a counted reason.
+
+    `semantic` is the optional embedding store, handed in rather than imported
+    - see `memory.diversity.SemanticSupport`. None is a supported and fully
+    tested configuration, not a degraded one: it is what CI runs and what any
+    install without the extra runs.
 
     `selection` lets a caller that is not a registered recipe - the prompt
     path - hand the engine its own photos. It is safe because the pipeline's
@@ -179,11 +188,23 @@ def build(
 
     # 2. Dedup, before the cap, so the cap is filled with 24 DISTINCT photos
     #    rather than 24 slots of which six are near-duplicates.
-    kept, dedup_report = collapse(usable)
+    kept, dedup_report = collapse(usable, cosine=semantic.cosine if semantic else None)
     report.deduped += dedup_report.collapsed
+    report.deduped_semantically += dedup_report.semantic
     if len(kept) < floor:
         report.skip(SKIP_TOO_FEW)
         return None
+
+    #    The diversity signal is calibrated against THIS memory's surviving
+    #    candidates - after the gates, so the spread it measures is the spread
+    #    the viewer could actually have been shown. `binding` stays the two
+    #    pixel signals: an embedding may reorder a memory, never shorten one.
+    #    See `memory.diversity.pick` and `semantic.diversity` for why.
+    signal = DEFAULT_SIGNAL
+    if semantic is not None:
+        extra = semantic.signal_for(kept)
+        if extra is not None:
+            signal = CompositeSignal(signals=(*DEFAULT_SIGNAL.signals, extra))
 
     # 3. Spread, rank, cap, then restore the recipe's ordering.
     #
@@ -199,6 +220,8 @@ def build(
         slots=max_shots,
         rank=_ranked,
         offered=selection.photos,
+        signal=signal,
+        binding=DEFAULT_SIGNAL if signal is not DEFAULT_SIGNAL else None,
     )
     stratum.memory_id = offer.memory_id
     report.strata.append(stratum)
@@ -275,6 +298,7 @@ def build_all(
     dismissed: frozenset[str] = frozenset(),
     cooling: frozenset[str] = frozenset(),
     limit: int | None = None,
+    semantic: SemanticSupport | None = None,
 ) -> tuple[list[MemorySpec], BuildReport]:
     """Build a batch, refusing dismissed, cooling and redundant memories.
 
@@ -294,7 +318,14 @@ def build_all(
         if offer.memory_id in cooling:
             report.skip(SKIP_COOLDOWN)
             continue
-        spec = build(index, offer, max_shots=max_shots, min_shots=min_shots, report=report)
+        spec = build(
+            index,
+            offer,
+            max_shots=max_shots,
+            min_shots=min_shots,
+            report=report,
+            semantic=semantic,
+        )
         if spec is None:
             continue
         hashes = [s.file_hash for s in spec.shots]

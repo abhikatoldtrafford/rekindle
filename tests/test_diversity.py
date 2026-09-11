@@ -387,3 +387,99 @@ def test_the_COLOUR_signal_contributes_to_the_decision():
 
     assert phash_only == pytest.approx(0.0)
     assert combined > 0.3, "the colour signal is not reaching the composite"
+
+
+# --------------------------------------------------------------------------
+# advisory vs binding
+#
+# An embedding may reorder a memory and may never shorten one. The reason is
+# the trap in `rekindle.semantic.diversity`: "durga puja over the years" is
+# every-photo-an-idol by design, `person_years` is one face by design, and a
+# signal allowed to refuse on subject alone would gut precisely the memories a
+# recipe got most right.
+
+
+class _Fixed:
+    """A signal that answers `value` for every pair it is asked about."""
+
+    def __init__(self, value, name="fixed"):
+        self.value = value
+        self.name = name
+        self.weight = 1.0
+
+    def between(self, a, b):
+        return self.value
+
+
+def test_an_advisory_signal_can_never_refuse_a_photo():
+    photos = [_p(f"p{i}", phash=1 << i, at=i * 3600) for i in range(6)]
+    picked, report = pick(
+        photos,
+        4,
+        rank=_rank,
+        signal=_Fixed(0.0),  # "these are all the same picture"
+        binding=_Fixed(1.0),  # "these are all completely different"
+    )
+    assert len(picked) == 4
+    assert report.rejected == {}, "an advisory signal refused a photo"
+    assert report.restored == 0
+
+
+def test_the_binding_signal_still_refuses_even_when_the_advisory_one_is_content():
+    photos = [_p(f"p{i}", phash=1 << i, at=i * 3600) for i in range(6)]
+    picked, report = pick(photos, 4, rank=_rank, signal=_Fixed(1.0), binding=_Fixed(0.0))
+    assert report.rejected[dv.REJECT_TOO_SIMILAR] == 5
+    assert report.restored == 3
+    assert len(picked) == 4
+
+
+def test_without_a_binding_signal_the_signal_itself_binds():
+    """The default must be the behaviour that existed before this parameter,
+    or every caller that passes one signal silently loses the hard floor."""
+    photos = [_p(f"p{i}", phash=1 << i, at=i * 3600) for i in range(6)]
+    _, with_default = pick(photos, 4, rank=_rank, signal=_Fixed(0.0))
+    _, explicit = pick(photos, 4, rank=_rank, signal=_Fixed(0.0), binding=_Fixed(0.0))
+    assert with_default.rejected == explicit.rejected == {dv.REJECT_TOO_SIMILAR: 5}
+
+
+def test_an_advisory_signal_still_changes_which_photo_is_chosen():
+    """Advisory is not inert. It has the full range of the MMR penalty; what
+    it lacks is the power to take a photo off the list."""
+
+    class _Twins:
+        """p0 and p1 are the same picture; nothing else resembles anything."""
+
+        name = "twins"
+        weight = 1.0
+
+        def between(self, a, b):
+            pair = {a.file_hash, b.file_hash}
+            return 0.0 if pair == {"p0", "p1"} else 1.0
+
+    photos = [_p(f"p{i}", phash=1 << i, at=i * 3600, sharp=10.0 - i) for i in range(4)]
+    blind, _ = pick(photos, 2, rank=_rank, signal=_Fixed(1.0), binding=_Fixed(1.0))
+    seeing, report = pick(photos, 2, rank=_rank, signal=_Twins(), binding=_Fixed(1.0))
+    assert [p.file_hash for p in blind] == ["p0", "p1"]
+    assert [p.file_hash for p in seeing] == ["p0", "p2"], "the advisory signal did nothing"
+    assert report.displaced == 1
+
+
+def test_displaced_counts_nothing_when_the_advisory_signal_agrees():
+    """ "The embedding was consulted" is not a claim worth printing. "The
+    embedding changed N answers" is, so it must not count agreement."""
+    photos = [_p(f"p{i}", phash=1 << i, at=i * 3600, sharp=10.0 - i) for i in range(4)]
+    _, report = pick(photos, 3, rank=_rank, signal=_Fixed(1.0), binding=_Fixed(1.0))
+    assert report.displaced == 0
+
+
+def test_displaced_is_never_counted_when_there_is_no_advisory_signal():
+    photos = [_p(f"p{i}", phash=1 << i, at=i * 3600) for i in range(4)]
+    _, report = pick(photos, 3, rank=_rank)
+    assert report.displaced == 0
+
+
+def test_displaced_merges_across_buckets():
+    left = dv.DiversityReport(displaced=2)
+    right = dv.DiversityReport(displaced=3)
+    left.merge(right)
+    assert left.displaced == 5

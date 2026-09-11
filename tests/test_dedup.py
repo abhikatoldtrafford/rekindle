@@ -295,3 +295,118 @@ def test_the_gap_is_configurable():
     photos = [_p("a", at=0), _p("b", at=60)]
     assert len(collapse(photos)[0]) == 2
     assert len(collapse(photos, gap_seconds=120)[0]) == 1
+
+
+# --------------------------------------------------------------------------
+# the embedding rule
+#
+# Measured on the real library, and the reason this rule exists:
+# PXL_20251226_091254817 and PXL_20251226_091259823 are five seconds and one
+# small camera move apart - the same mother holding the same child outside the
+# same school - and their dHash distance is 32, which is what two UNRELATED
+# photographs score. Only the embedding could see it (cosine 0.927).
+
+
+def _cosines(table):
+    """A cosine function over a {(a, b): value} table, symmetric, else None."""
+
+    def cosine(a, b):
+        key = (a.file_hash, b.file_hash)
+        if key in table:
+            return table[key]
+        return table.get((b.file_hash, a.file_hash))
+
+    return cosine
+
+
+def test_a_high_cosine_pair_inside_the_window_collapses_though_the_hash_says_unrelated():
+    # The real pair, in miniature: seconds apart, hashes 32 bits apart.
+    a = _p("a", at=0, phash=H_A)
+    b = _p("b", at=5, phash=H_FAR)
+    assert len(bursts([a, b])) == 2, "without the embedding these are two photos"
+    groups = bursts([a, b], cosine=_cosines({("a", "b"): 0.927}))
+    assert [len(g) for g in groups] == [2]
+
+
+def test_a_high_cosine_pair_OUTSIDE_the_window_is_left_alone():
+    """Time still gates. An embedding is not a licence to collapse a year."""
+    a = _p("a", at=0, phash=H_A)
+    b = _p("b", at=60, phash=H_FAR)
+    groups = bursts([a, b], cosine=_cosines({("a", "b"): 0.999}))
+    assert [len(g) for g in groups] == [1, 1]
+
+
+def test_a_cosine_below_the_threshold_does_not_collapse():
+    """0.91 was measured to be two different photographs. See the docstring."""
+    a = _p("a", at=0, phash=H_A)
+    b = _p("b", at=5, phash=H_FAR)
+    groups = bursts([a, b], cosine=_cosines({("a", "b"): 0.912}))
+    assert [len(g) for g in groups] == [1, 1]
+
+
+def test_the_embedding_test_anchors_rather_than_chains():
+    """A ~ B and B ~ C must not make A ~ C.
+
+    A slow pan across a room is the failure this prevents: every frame
+    resembles the last and the whole pan would collapse to one photo.
+    """
+    a = _p("a", at=0, phash=H_A)
+    b = _p("b", at=5, phash=H_FAR)
+    c = _p("c", at=10, phash=H_FAR ^ 0xFF)
+    groups = bursts(
+        [a, b, c],
+        cosine=_cosines({("a", "b"): 0.95, ("b", "c"): 0.95, ("a", "c"): 0.40}),
+    )
+    assert [len(g) for g in groups] == [2, 1]
+
+
+def test_an_abstaining_embedding_is_not_a_yes():
+    """None means "I cannot judge this pair" - a video, an un-embedded file.
+
+    Unknown is not similar, the same rule the hash follows, for the same
+    reason: guessing is how one unjudgeable file swallows its neighbours.
+    """
+    a = _p("a", at=0, phash=H_A)
+    b = _p("b", at=5, phash=H_FAR)
+    groups = bursts([a, b], cosine=lambda x, y: None)
+    assert [len(g) for g in groups] == [1, 1]
+
+
+def test_the_hash_still_collapses_a_pair_the_embedding_calls_different():
+    """Either test may say yes. The embedding does not get a veto."""
+    a = _p("a", at=0, phash=H_A)
+    b = _p("b", at=5, phash=H_A2)  # 2 bits apart, well under the threshold
+    groups = bursts([a, b], cosine=_cosines({("a", "b"): 0.10}))
+    assert [len(g) for g in groups] == [2]
+
+
+def test_with_no_cosine_function_the_grouping_is_exactly_what_it_always_was():
+    photos = [_p("a", at=0, phash=H_A), _p("b", at=5, phash=H_FAR), _p("c", at=9, phash=H_A2)]
+    assert bursts(photos) == bursts(photos, cosine=None)
+
+
+def test_the_report_counts_the_collapses_only_the_embedding_could_see():
+    a = _p("a", at=0, phash=H_A, sharpness=9.0)
+    b = _p("b", at=5, phash=H_FAR, sharpness=1.0)
+    kept, report = collapse([a, b], cosine=_cosines({("a", "b"): 0.95}))
+    assert [p.file_hash for p in kept] == ["a"]
+    assert report.collapsed == 1
+    assert report.semantic == 1
+
+
+def test_a_collapse_the_hash_could_already_see_is_not_counted_as_semantic():
+    """Otherwise the number says the embedding is earning its place when it
+    is only agreeing with the hash about a pair the hash had already caught."""
+    a = _p("a", at=0, phash=H_A, sharpness=9.0)
+    b = _p("b", at=5, phash=H_A2, sharpness=1.0)
+    _, report = collapse([a, b], cosine=_cosines({("a", "b"): 0.99}))
+    assert report.collapsed == 1
+    assert report.semantic == 0
+
+
+def test_nothing_is_counted_as_semantic_when_there_is_no_embedding_store():
+    a = _p("a", at=0, phash=H_A, sharpness=9.0)
+    b = _p("b", at=5, phash=H_A2, sharpness=1.0)
+    _, report = collapse([a, b])
+    assert report.collapsed == 1
+    assert report.semantic == 0

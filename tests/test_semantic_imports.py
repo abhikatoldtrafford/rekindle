@@ -56,6 +56,10 @@ def _import_check(module: str) -> list[str]:
         "rekindle.semantic.photos",
         "rekindle.semantic.availability",
         "rekindle.semantic.runtime",
+        # Reached from `rekindle memory` on EVERY build, not just a semantic
+        # subcommand, so a module-level numpy here would make the heaviest
+        # import in the project unconditional.
+        "rekindle.semantic.diversity",
     ],
 )
 def test_module_imports_nothing_heavy(module):

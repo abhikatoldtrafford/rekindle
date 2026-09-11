@@ -39,15 +39,33 @@ when it cannot judge** - a missing fingerprint, a missing embedding. None is
 not 0 and not 1: it means this signal abstains and the others decide, which is
 what stops one un-fingerprinted photo suppressing its neighbours.
 
-## What this cannot do
+## What pixels cannot do, and what was done about it
 
 "Different dress or location" is only partly resolvable from pixel statistics.
 The same outfit in two rooms with similar lighting will fool a colour
 histogram, and a perceptual hash will call two framings of one scene different
-when a viewer would call them the same photo. Semantic redundancy - six
-restaurant tables on six different days in six different places - is invisible
-to all of this: different pixels, same idea. That is embedding territory and
-it is deliberately left to the milestone building them.
+when a viewer would call them the same photo. Measured, on this library:
+
+    PXL_20251226_091254817 / PXL_20251226_091259823
+        5 seconds apart, one mother holding one child outside one school.
+        dHash distance 32 - as far apart as two unrelated photographs.
+        CLIP cosine 0.927.
+
+Burst dedup let that pair through despite its 30-second window, because the
+camera moved slightly and the hash is pixel-structural. So an embedding signal
+is now accepted here, through `SemanticSupport`, in two regimes with two
+different powers:
+
+  * **Inside the burst window** the raw cosine is allowed to collapse a pair
+    outright. See `memory.dedup`: at 30 seconds a high cosine really is one
+    moment, and that was checked by eye before it was believed.
+  * **Across the memory** it is an ADVISORY signal only, calibrated against
+    the candidate set's own spread and barred from the hard floor. See `pick`
+    for why an absolute cutoff would be wrong, and
+    `rekindle.semantic.diversity` for the calibration.
+
+Both are optional. With no store the two pixel signals decide exactly as
+before, and nothing in this module imports numpy, torch, or `rekindle.semantic`.
 """
 
 from __future__ import annotations
@@ -105,6 +123,26 @@ class DissimilaritySignal(Protocol):
     weight: float
 
     def between(self, a: Photo, b: Photo) -> float | None: ...
+
+
+@runtime_checkable
+class SemanticSupport(Protocol):
+    """What an embedding store lends the pipeline, if there is one.
+
+    The memory package never imports `rekindle.semantic`: CI has no models, no
+    GPU and no network, and `rekindle --help` must not load torch. So the
+    optional half is handed IN, as one object answering two questions, and
+    everything below this line works identically when it is None.
+
+    `cosine` is for burst dedup, which is asking a factual question inside a
+    30-second window and wants the raw number. `signal_for` is for selection,
+    which is asking a relative one and wants a signal already calibrated
+    against that memory's own spread - see `rekindle.semantic.diversity`.
+    """
+
+    def cosine(self, a: Photo, b: Photo) -> float | None: ...
+
+    def signal_for(self, photos: list[Photo]) -> DissimilaritySignal | None: ...
 
 
 @dataclass(frozen=True)
@@ -232,6 +270,12 @@ class DiversityReport:
     penalised: int = 0
     # Refused shots that came back because the memory would otherwise be short.
     restored: int = 0
+    # Picks where the ADVISORY signal changed the answer: the photo that won
+    # is not the photo the binding signals alone would have chosen. This is
+    # the only visible trace a purely advisory signal leaves, so it is counted
+    # - "the embedding reordered N slots" is a claim a user can check, while
+    # "the embedding was consulted" is not.
+    displaced: int = 0
 
     def reject(self, reason: str) -> None:
         self.rejected[reason] = self.rejected.get(reason, 0) + 1
@@ -245,6 +289,7 @@ class DiversityReport:
         self.picked += other.picked
         self.penalised += other.penalised
         self.restored += other.restored
+        self.displaced += other.displaced
         for reason, count in other.rejected.items():
             self.rejected[reason] = self.rejected.get(reason, 0) + count
 
@@ -265,6 +310,7 @@ def pick(
     rank: Callable[[list[Photo]], list[Photo]],
     already: list[Photo] | None = None,
     signal: DissimilaritySignal = DEFAULT_SIGNAL,
+    binding: DissimilaritySignal | None = None,
     lam: float = LAMBDA,
 ) -> tuple[list[Photo], DiversityReport]:
     """Greedy maximal-marginal-relevance pick.
@@ -281,10 +327,30 @@ def pick(
     applies ACROSS a memory and not merely within one temporal bucket -
     otherwise filling a year's slot could still return three near-identical
     shots from one day of that year.
+
+    ## Two signals, two powers
+
+    `signal` orders the candidates. `binding` - which defaults to `signal`,
+    so a caller that passes one signal gets exactly the old behaviour - is the
+    only thing allowed to REFUSE one outright at `HARD_FLOOR`.
+
+    They separate because the question each can answer is different. The pixel
+    signals answer *"is this the same frame?"*, and a yes there is a fact: two
+    renderings of one photograph must not both appear. A semantic embedding
+    answers *"is this the same kind of picture?"*, and a yes there is not a
+    fact but a judgement - **a memory about one subject is allowed to be about
+    one subject.** "Durga puja over the years" is every-photo-an-idol by
+    construction, `person_years` is one face by construction, and a signal
+    that could refuse on subject alone would gut precisely the memories it
+    understands best, the better the memory the more of it. So an embedding is
+    handed in as `signal` only: it may push a candidate down the order as far
+    as the order goes, and it may never take it off the list.
     """
     report = DiversityReport(considered=len(candidates))
     if slots <= 0 or not candidates:
         return [], report
+    if binding is None:
+        binding = signal
 
     ordered = rank(candidates)
     # Quality by RANK POSITION, not the raw score: the raw score ranges over
@@ -299,10 +365,16 @@ def pick(
     refused: list[Photo] = []
     remaining = list(ordered)
 
+    advisory = binding is not signal
+
     while remaining and len(picked) < slots:
         best: Photo | None = None
         best_value = -math.inf
         best_dissimilarity = 1.0
+        # What the BINDING signals alone would have chosen. Tracked only to
+        # report how often the advisory signal changed the answer.
+        plain: Photo | None = None
+        plain_value = -math.inf
         for photo in remaining:
             dissimilarity, spacing = _closest(photo, chosen, signal)
             value = quality[photo.file_hash] - lam * (1.0 - dissimilarity) + TIME_TIEBREAK * spacing
@@ -310,11 +382,19 @@ def pick(
             # `remaining` is in ranked order.
             if value > best_value:
                 best, best_value, best_dissimilarity = photo, value, dissimilarity
+            if advisory:
+                other, spacing2 = _closest(photo, chosen, binding)
+                bare = quality[photo.file_hash] - lam * (1.0 - other) + TIME_TIEBREAK * spacing2
+                if bare > plain_value:
+                    plain, plain_value = photo, bare
 
         assert best is not None
         remaining.remove(best)
 
-        if chosen and best_dissimilarity < HARD_FLOOR:
+        # The floor is the BINDING signals' call, always - never the advisory
+        # one's. See the docstring: an embedding may reorder, never refuse.
+        floor_dissimilarity = _closest(best, chosen, binding)[0] if advisory else best_dissimilarity
+        if chosen and floor_dissimilarity < HARD_FLOOR:
             # Near-identical to something already chosen. Showing both is not
             # a judgement call.
             report.reject(REJECT_TOO_SIMILAR)
@@ -323,6 +403,8 @@ def pick(
 
         if chosen and best_dissimilarity < 1.0:
             report.penalised += 1
+        if advisory and plain is not None and plain.file_hash != best.file_hash:
+            report.displaced += 1
         picked.append(best)
         chosen.append(best)
 

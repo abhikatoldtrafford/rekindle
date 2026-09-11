@@ -1112,3 +1112,273 @@ def test_no_registered_recipe_is_named_prompt():
     the prompt path calls `build(selection=...)` directly.
     """
     assert "prompt" not in {r.name for r in registered()}
+
+
+# --------------------------------------------------------------------------
+# the optional embedding store
+#
+# `SemanticSupport` is handed in rather than imported, so these use a fake -
+# which is the point: CI has no models, no GPU and no network, and the
+# pipeline's behaviour with and without a store must both be tested there.
+
+
+class _FakeSupport:
+    """A `memory.diversity.SemanticSupport` with hand-written answers.
+
+    `cosines` maps a frozenset of two hashes to a number; anything absent is
+    `default`. `signal` is returned as-is from `signal_for`.
+    """
+
+    def __init__(self, cosines=None, default=0.0, signal=None):
+        self.cosines = cosines or {}
+        self.default = default
+        self.signal = signal
+        self.asked_for_a_signal = 0
+
+    def cosine(self, a, b):
+        return self.cosines.get(frozenset((a.file_hash, b.file_hash)), self.default)
+
+    def signal_for(self, photos):
+        self.asked_for_a_signal += 1
+        return self.signal
+
+
+class _Identical:
+    """ "Every pair of photographs in this memory is the same picture."""
+
+    name = "identical"
+    weight = 1.0
+
+    def between(self, a, b):
+        return 0.0
+
+
+def _two_frames_the_hash_cannot_tell_apart(tmp_path):
+    """The real failure, in miniature: five seconds apart, hashes 32 bits
+    apart, and a viewer would call them the same photograph."""
+    photos = _rich_library()
+    # 09:40, where `_rich_library` has nothing. At 09:00 there is already a
+    # photo on the same second, and since the burst test anchors on the
+    # group's FIRST member, that photo becomes the anchor and the second twin
+    # is compared against the wrong picture. That is the anchoring rule
+    # working, not a bug - but it makes for a fixture that proves nothing.
+    base = datetime(2020, 10, 20, 9, 40)
+    twin_a = _p(
+        "TWIN_A", local=base, people=["Abhik Maiti"], albums=["Kashmir"], phash=0, sharp=9.0
+    )
+    twin_b = _p(
+        "TWIN_B",
+        local=base + timedelta(seconds=5),
+        people=["Abhik Maiti"],
+        albums=["Kashmir"],
+        phash=0xFFFFFFFF,
+        sharp=1.0,
+    )
+    return _index(tmp_path, [*photos, twin_a, twin_b])
+
+
+def _album_offer(index):
+    return next(o for o in engine.all_offers(index) if o.recipe == "album_story")
+
+
+def test_the_embedding_collapses_a_pair_burst_dedup_alone_would_keep(tmp_path):
+    store, index = _two_frames_the_hash_cannot_tell_apart(tmp_path)
+    try:
+        offer = _album_offer(index)
+        without = engine.BuildReport(offered=1)
+        engine.build(index, offer, report=without)
+        with_store = engine.BuildReport(offered=1)
+        engine.build(
+            index,
+            offer,
+            report=with_store,
+            semantic=_FakeSupport({frozenset(("TWIN_A", "TWIN_B")): 0.95}, default=0.0),
+        )
+        assert with_store.deduped == without.deduped + 1
+    finally:
+        store.close()
+
+
+def test_the_engine_reports_which_collapses_only_the_embedding_could_see(tmp_path):
+    store, index = _two_frames_the_hash_cannot_tell_apart(tmp_path)
+    try:
+        report = engine.BuildReport(offered=1)
+        engine.build(
+            index,
+            _album_offer(index),
+            report=report,
+            semantic=_FakeSupport({frozenset(("TWIN_A", "TWIN_B")): 0.95}, default=0.0),
+        )
+        assert report.deduped_semantically == 1
+    finally:
+        store.close()
+
+
+def test_no_store_means_no_semantic_collapses_and_no_count(tmp_path):
+    store, index = _two_frames_the_hash_cannot_tell_apart(tmp_path)
+    try:
+        report = engine.BuildReport(offered=1)
+        spec = engine.build(index, _album_offer(index), report=report)
+        assert report.deduped_semantically == 0
+        assert spec is not None, "the pipeline must work with no embeddings at all"
+    finally:
+        store.close()
+
+
+class _Shuns:
+    """Calls anything in `hashes` a duplicate of whatever is already chosen.
+
+    A signal that says EVERYTHING is identical changes nothing, because every
+    candidate then takes the same penalty and quality decides as before -
+    which is the trap test below, and the reason this one has to discriminate
+    to prove anything at all.
+    """
+
+    name = "shuns"
+    weight = 1.0
+
+    def __init__(self, hashes):
+        self.hashes = set(hashes)
+
+    def between(self, a, b):
+        return 0.0 if self.hashes & {a.file_hash, b.file_hash} else 1.0
+
+
+def test_the_engine_calibrates_a_signal_against_each_memory_and_uses_it(tmp_path):
+    """Not "the store was consulted" - that proves nothing about the result.
+    The signal has to reach SELECTION, which is only visible when a signal
+    that discriminates changes which shots come back."""
+    store, index = _index(tmp_path, _rich_library())
+    try:
+        offer = _album_offer(index)
+        plain = engine.build(index, offer, max_shots=6)
+        assert plain is not None
+        shunned = [s.file_hash for s in plain.shots[1:]]
+        support = _FakeSupport(default=0.0, signal=_Shuns(shunned))
+        seeing = engine.build(index, offer, max_shots=6, semantic=support)
+        assert support.asked_for_a_signal == 1
+        assert seeing is not None
+        assert [s.file_hash for s in seeing.shots] != [s.file_hash for s in plain.shots]
+    finally:
+        store.close()
+
+
+def test_a_semantic_signal_can_never_refuse_a_shot(tmp_path):
+    """THE TRAP. A signal that calls every pair identical is exactly what a
+    "durga puja over the years" memory looks like to an embedding - every
+    photo is a Durga idol, so every pair scores high. It must be able to
+    reorder that memory and never to gut it.
+
+    The assertion is on the REJECTIONS, not on the length. Length alone
+    cannot see this: `pick` restores refused shots when a memory would
+    otherwise come up short, so a semantic signal wrongly given the power to
+    refuse produces a memory of exactly the right length whose contents were
+    chosen by the restore path instead of by quality. That is the bug this
+    guards, and counting shots is blind to it.
+    """
+    store, index = _index(tmp_path, _rich_library())
+    try:
+        offer = _album_offer(index)
+        without = engine.BuildReport(offered=1)
+        plain = engine.build(index, offer, max_shots=12, report=without)
+        with_signal = engine.BuildReport(offered=1)
+        seeing = engine.build(
+            index,
+            offer,
+            max_shots=12,
+            report=with_signal,
+            semantic=_FakeSupport(default=0.0, signal=_Identical()),
+        )
+        assert plain is not None and seeing is not None
+        assert len(seeing.shots) == len(plain.shots)
+        assert with_signal.diversity.rejected == without.diversity.rejected
+        assert with_signal.diversity.restored == without.diversity.restored
+    finally:
+        store.close()
+
+
+def test_a_memory_whose_candidates_cannot_calibrate_falls_back_to_the_pixels(tmp_path):
+    """`signal_for` returning None is a pool too small to describe a
+    distribution. The build must carry on, not crash and not go empty."""
+    store, index = _index(tmp_path, _rich_library())
+    try:
+        offer = _album_offer(index)
+        plain = engine.build(index, offer, max_shots=6)
+        none_back = engine.build(
+            index, offer, max_shots=6, semantic=_FakeSupport(default=0.0, signal=None)
+        )
+        assert none_back is not None
+        assert [s.file_hash for s in none_back.shots] == [s.file_hash for s in plain.shots]
+    finally:
+        store.close()
+
+
+def test_a_build_with_an_embedding_store_is_still_deterministic(tmp_path):
+    store, index = _index(tmp_path, _rich_library())
+    try:
+        offer = _album_offer(index)
+        runs = {
+            tuple(
+                s.file_hash
+                for s in engine.build(
+                    index,
+                    offer,
+                    max_shots=8,
+                    semantic=_FakeSupport(default=0.93, signal=_Identical()),
+                ).shots
+            )
+            for _ in range(3)
+        }
+        assert len(runs) == 1
+    finally:
+        store.close()
+
+
+def test_the_embedding_is_never_the_reason_a_shot_is_refused(tmp_path):
+    """The narrow band where the guarantee actually bites, and the only place
+    it can be observed end to end.
+
+    A semantic signal that calls everything identical cannot on its own drag
+    an arbitrary pair under the hard floor - the pixel signals hold the blend
+    up. It CAN when the pixels have already brought the pair close, and that
+    is exactly the case the split exists for: two photos four dHash bits
+    apart (on different days, so burst dedup never sees them) sit at 0.167 on
+    the binding signals, comfortably above the 0.08 floor, and at 0.063 once
+    an identical-verdict embedding is blended in. Without the split the
+    second one is REFUSED - by the embedding, alone.
+    """
+    near_a = _p(
+        "NEAR_A",
+        local=datetime(2020, 10, 21, 9, 0),
+        people=["Abhik Maiti"],
+        albums=["Kashmir"],
+        phash=0,
+        sharp=9.9,
+    )
+    near_b = _p(
+        "NEAR_B",
+        local=datetime(2020, 10, 22, 9, 0),
+        people=["Abhik Maiti"],
+        albums=["Kashmir"],
+        phash=0b1111,
+        sharp=9.8,
+    )
+    store, index = _index(tmp_path, [*_rich_library(), near_a, near_b])
+    try:
+        offer = _album_offer(index)
+        without = engine.BuildReport(offered=1)
+        engine.build(index, offer, max_shots=24, report=without)
+        with_signal = engine.BuildReport(offered=1)
+        engine.build(
+            index,
+            offer,
+            max_shots=24,
+            report=with_signal,
+            semantic=_FakeSupport(default=0.0, signal=_Identical()),
+        )
+        assert without.diversity.rejected == {}
+        assert with_signal.diversity.rejected == {}, (
+            "the embedding refused a shot; it is only allowed to reorder"
+        )
+    finally:
+        store.close()

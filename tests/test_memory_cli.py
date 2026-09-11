@@ -1104,3 +1104,142 @@ def test_no_judge_builds_the_memory_the_judge_refused(tmp_path, monkeypatch):
     seeds = [f"f{y}{i}" for y in (2019, 2020, 2021, 2022) for i in range(2)]
     _run_prompt(data, "a beach", tmp_path, seeds, judge=False)
     assert list((tmp_path / "out").glob("*prompt*"))
+
+
+# --------------------------------------------------------------------------
+# what the build says about the optional embedding store
+#
+# Absence is a supported configuration, not a failure - it is what CI runs and
+# what every install without the extra runs - so the message has to name the
+# command that would change it rather than say nothing at all.
+
+
+def _flat(output: str) -> str:
+    """Console output with its wrapping removed.
+
+    `rich` hard-wraps to the terminal width, so "uv sync --extra semantic" can
+    arrive with a newline inside it. Asserting on the raw string makes a test
+    that passes or fails on the width of the machine running it.
+    """
+    return " ".join(output.split())
+
+
+def _fake_store(monkeypatch, support):
+    """Make the REAL `_semantic_support` find `support` (or nothing).
+
+    Patching `_semantic_support` itself would skip the messages that are the
+    whole point of these tests.
+    """
+    monkeypatch.setattr("rekindle.semantic.diversity.open_support", lambda *a, **k: support)
+
+
+def _build(tmp_path, data, *extra):
+    return runner.invoke(
+        app,
+        ["memory", "--data-dir", str(data), "--out", str(tmp_path / "out"), "--no-mp4", *extra],
+    )
+
+
+class _FakeSupport:
+    """Stands in for a real store so the reporting can be tested with no
+    models, no GPU and no network - which is what CI has."""
+
+    def __init__(self, cosine_value=0.0, signal=None):
+        self.cosine_value = cosine_value
+        self.signal = signal
+
+    def __len__(self):
+        return 1234
+
+    def cosine(self, a, b):
+        return self.cosine_value
+
+    def signal_for(self, photos):
+        return self.signal
+
+
+def test_a_library_with_no_embeddings_says_so_and_still_builds(tmp_path, monkeypatch):
+    # The extra IS installed in this environment, so the "never embedded"
+    # branch has to be reached deliberately rather than by luck.
+    _fake_store(monkeypatch, None)
+    result = _build(tmp_path, _library(tmp_path))
+    assert result.exit_code == 0, result.output
+    assert "no embeddings yet" in _flat(result.output)
+    assert "rekindle semantic embed" in _flat(result.output)
+
+
+def test_a_machine_without_the_extra_is_told_which_command_installs_it(tmp_path, monkeypatch):
+    from rekindle.semantic.availability import Availability
+
+    monkeypatch.setattr(
+        "rekindle.semantic.availability.probe",
+        lambda: Availability(cpu=False, gpu=False, missing_cpu=("numpy",), missing_gpu=("torch",)),
+    )
+    result = _build(tmp_path, _library(tmp_path))
+    assert result.exit_code == 0, result.output
+    assert "uv sync --extra semantic" in _flat(result.output)
+
+
+def test_a_corrupt_store_is_reported_and_the_build_carries_on(tmp_path, monkeypatch):
+    """A broken optional feature must not take down a command that works
+    perfectly well without it."""
+
+    def explode(*a, **k):
+        raise RuntimeError("vectors.f32 is truncated")
+
+    monkeypatch.setattr("rekindle.semantic.diversity.open_support", explode)
+    result = _build(tmp_path, _library(tmp_path))
+    assert result.exit_code == 0, result.output
+    assert "truncated" in _flat(result.output)
+    assert "continuing without it" in _flat(result.output)
+
+
+def test_a_working_store_is_announced_with_how_many_vectors(tmp_path, monkeypatch):
+    _fake_store(monkeypatch, _FakeSupport())
+    result = _build(tmp_path, _library(tmp_path))
+    assert result.exit_code == 0, result.output
+    assert "1234 vectors" in _flat(result.output)
+
+
+def test_the_semantic_collapses_are_reported_apart_from_the_others(tmp_path, monkeypatch):
+    """ "N near-duplicate frames collapsed" does not tell a user which pile to
+    look in. These are the frames the perceptual hash called UNRELATED, and a
+    user checking the guardrail by eye needs to know which they were."""
+    _fake_store(monkeypatch, _FakeSupport(cosine_value=0.99))
+    # Every photo on the same second, so the 30-second gate is wide open and
+    # the cosine is the only thing deciding.
+    data = tmp_path / "data"
+    photos = []
+    for i in range(8):
+        path = _jpeg(tmp_path / "lib" / f"p{i}.jpg", colour=(40 + i * 20, 90, 60))
+        photos.append(_photo(f"h{i}", path, local=datetime(2020, 5, 1, 9, 0), albums=["Kashmir"]))
+    with PhotoStore(data / "rekindle.sqlite") as store:
+        store.upsert_many(photos)
+    result = _build(tmp_path, data)
+    assert "near-duplicate frames collapsed" in _flat(result.output)
+    assert "perceptual hash missed" in _flat(result.output)
+
+
+def test_nothing_is_claimed_about_the_embedding_when_it_collapsed_nothing(tmp_path, monkeypatch):
+    _fake_store(monkeypatch, _FakeSupport(cosine_value=0.0))
+    result = _build(tmp_path, _library(tmp_path))
+    assert result.exit_code == 0, result.output
+    assert "perceptual hash missed" not in _flat(result.output)
+    assert "chosen differently" not in _flat(result.output)
+
+
+def test_shots_the_embedding_reordered_are_reported(tmp_path, monkeypatch):
+    class _Shuns:
+        """h1 looks like a duplicate of whatever is already chosen; nothing
+        else resembles anything. So h1 loses its slot to a worse photo."""
+
+        name = "shuns"
+        weight = 1.0
+
+        def between(self, a, b):
+            return 0.0 if "h1" in {a.file_hash, b.file_hash} else 1.0
+
+    _fake_store(monkeypatch, _FakeSupport(signal=_Shuns()))
+    result = _build(tmp_path, _library(tmp_path), "--max-shots", "3")
+    assert result.exit_code == 0, result.output
+    assert "chosen differently" in _flat(result.output)

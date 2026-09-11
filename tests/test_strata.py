@@ -284,3 +284,92 @@ def test_the_allocation_is_BINDING_diversity_never_reallocates(tmp_path):
     assert 2022 in years, "the thin bucket lost its slot to the rich one"
     assert len(chosen) == 4, "diversity left the memory short"
     assert report.diversity.restored >= 1
+
+
+# --------------------------------------------------------------------------
+# the signals are the caller's business, and must reach `pick` unchanged
+#
+# `stratify` calibrates nothing itself - the engine does it once per memory -
+# so all this layer owes is faithful delivery. Two call sites (bucketed and
+# unstratified) each forward two arguments, and dropping any of them silently
+# reverts the memory to the pixel signals with nothing to show for it.
+
+
+class _Recording:
+    """A signal that answers `value` and remembers it was asked."""
+
+    def __init__(self, value):
+        self.value = value
+        self.name = "recording"
+        self.weight = 1.0
+        self.pairs = 0
+
+    def between(self, a, b):
+        self.pairs += 1
+        return self.value
+
+
+def _spread(n=6):
+    return [_p(f"p{i}", datetime(2020, 1, 1 + i, 12, 0)) for i in range(n)]
+
+
+@pytest.mark.parametrize("level", [strata.BY_DAY, None])
+def test_both_paths_hand_the_ordering_signal_to_pick(level):
+    """None is the unstratified path (`then_and_now`), which is the one most
+    easily forgotten because only one recipe uses it."""
+    signal = _Recording(1.0)
+    stratify(_spread(), level=level, slots=3, rank=_rank, signal=signal)
+    assert signal.pairs > 0, "the signal never reached pick"
+
+
+@pytest.mark.parametrize("level", [strata.BY_DAY, None])
+def test_both_paths_hand_the_binding_signal_to_pick(level):
+    """A binding signal that refuses everything must refuse here too. If
+    `binding` is dropped, `pick` falls back to `signal` - which says
+    everything is different - and nothing is ever refused."""
+    chosen, report = stratify(
+        _spread(),
+        level=level,
+        slots=3,
+        rank=_rank,
+        signal=_Recording(1.0),
+        binding=_Recording(0.0),
+    )
+    assert report.diversity.total_rejected > 0, "the binding signal was not forwarded"
+    assert report.diversity.restored > 0
+    assert len(chosen) == 3, "a memory must not be left short"
+
+
+@pytest.mark.parametrize("level", [strata.BY_DAY, None])
+def test_both_paths_let_the_advisory_signal_change_the_answer(level):
+    """Two days, two slots, and the best shot of day two is a near-duplicate
+    of the one day one already spent its slot on. The second-best shot of day
+    two should win instead - and the count of that has to survive the merge
+    out of every bucket, or the CLI prints zero on a run where the embedding
+    did all the work.
+    """
+
+    class _Twins:
+        name = "twins"
+        weight = 1.0
+
+        def between(self, a, b):
+            return 0.0 if {a.file_hash, b.file_hash} == {"p0", "p1"} else 1.0
+
+    # Day two needs THREE candidates, not two: with two, the quality gap
+    # between them is exactly one half - which is exactly lambda - and the
+    # penalty cancels the gap instead of overcoming it.
+    photos = [
+        _p("p0", datetime(2020, 1, 1, 12, 0), sharp=10.0),
+        _p("z1", datetime(2020, 1, 1, 13, 0), sharp=1.0),
+        _p("p1", datetime(2020, 1, 2, 12, 0), sharp=9.0),
+        _p("z2", datetime(2020, 1, 2, 13, 0), sharp=8.0),
+        _p("z3", datetime(2020, 1, 2, 14, 0), sharp=7.0),
+    ]
+    blind, _ = stratify(photos, level=level, slots=2, rank=_rank)
+    seeing, report = stratify(
+        photos, level=level, slots=2, rank=_rank, signal=_Twins(), binding=_Recording(1.0)
+    )
+    assert sorted(p.file_hash for p in blind) == ["p0", "p1"]
+    assert sorted(p.file_hash for p in seeing) == ["p0", "z2"], "the signal changed nothing"
+    assert report.diversity.displaced == 1

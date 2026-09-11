@@ -27,7 +27,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from rekindle.memory.diversity import DiversityReport, pick
+from rekindle.memory.diversity import DEFAULT_SIGNAL, DissimilaritySignal, DiversityReport, pick
 from rekindle.models import Photo
 
 # The dimension a recipe stratifies over.
@@ -182,6 +182,8 @@ def stratify(
     slots: int,
     rank: Callable[[list[Photo]], list[Photo]],
     offered: list[Photo] | None = None,
+    signal: DissimilaritySignal = DEFAULT_SIGNAL,
+    binding: DissimilaritySignal | None = None,
 ) -> tuple[list[Photo], StratumReport]:
     """Choose `slots` photos spread across `level`, best-first within each.
 
@@ -191,6 +193,13 @@ def stratify(
 
     `offered` is the pre-gate candidate pool, used only to report which
     buckets the guardrails removed entirely.
+
+    `signal` and `binding` are forwarded verbatim to `pick` and are the
+    caller's business, not this module's - the engine calibrates them once for
+    the whole memory, which is the level at which "unusually alike for this
+    set" means anything. Calibrating per bucket would ask a single year of an
+    `on_this_day` what its own spread was, which is a smaller and noisier
+    question than the one being answered.
     """
     report = StratumReport(dimension=level)
     if not photos:
@@ -204,7 +213,7 @@ def stratify(
         # only such recipe and asks for exactly two shots, so diversity is a
         # no-op there - but it is applied rather than skipped, so a future
         # unstratified recipe does not silently opt out of it.
-        chosen, div = pick(photos, slots, rank=rank)
+        chosen, div = pick(photos, slots, rank=rank, signal=signal, binding=binding)
         report.diversity.merge(div)
         report.offered = report.surviving = report.used = 1
         return chosen, report
@@ -232,7 +241,14 @@ def stratify(
         # though: diversity chooses which photo fills a bucket's slot, never
         # whether that bucket gets one. Stratification decides the shape of
         # the memory; diversity decides what goes in each slot.
-        taken, div = pick(buckets[key], allocation[key], rank=rank, already=chosen)
+        taken, div = pick(
+            buckets[key],
+            allocation[key],
+            rank=rank,
+            already=chosen,
+            signal=signal,
+            binding=binding,
+        )
         report.diversity.merge(div)
         chosen.extend(taken)
     return chosen, report

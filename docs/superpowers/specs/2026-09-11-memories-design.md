@@ -11,7 +11,9 @@ the wrong ones, and how it turns a choice into a GIF or an MP4.
 Everything here is **deterministic**: no model, no network, no randomness, no
 wall-clock dependence except where the user asks for "today". The same index in
 produces the same bytes out. The GPT caption layer (§12) is strictly additive —
-delete it and v1 is still complete.
+delete it and v1 is still complete, and so is the optional embedding signal of
+§5C: it reads vectors already on disk, adds no randomness, and its absence
+changes the result but never breaks it.
 
 ---
 
@@ -369,6 +371,10 @@ for each photo:
   photos still splits, because the pixel test splits it.
 - A photo with no `phash` (video, undecodable, or not yet fingerprinted)
   **never joins a burst and never absorbs one**. Unknown is not similar.
+- **When an embedding store exists**, the pixel test is *or*-ed with a cosine
+  test against the same anchor — a dHash calls two framings of one moment
+  unrelated, and it did, five seconds apart. See §5C for the threshold and the
+  six pairs it was read off.
 
 **Winner:** highest `sharpness`, then largest `width*height` (NULL sorts last),
 then **lexicographically smallest `file_hash`**. The final tiebreak is the file
@@ -707,6 +713,159 @@ EXISTS` in `_SCHEMA`; new *tables*, unlike new columns, need no migration rung.
 
 ---
 
+## 5C. Semantic near-duplicates: two regimes, two powers
+
+**The complaint.** Memories still contained near-identical photographs. Two
+pairs, measured on the corrected CLIP store:
+
+```
+20131225_213150 / 20131225_213334          104 seconds apart, cosine 0.946
+PXL_20251226_091254817 / …_091259823         5 SECONDS apart, cosine 0.927
+```
+
+Both were opened. The second is one mother holding one child outside one
+school on Christmas Day, the pose shifted slightly and the frame pulled back —
+the same photograph by any human account. **Burst dedup did not collapse it**,
+despite a 30-second window, because its dHash distance is **32**, which is what
+two *unrelated* photographs score. A dHash is pixel-structural; a small camera
+move reads as a different picture. CLIP sees the moment.
+
+Across 24-shot memories, pairs at cosine ≥ 0.90 ran 3–11 per memory, and up to
+**75** in `on_this_day-11-27`.
+
+### The trap, which decides the whole design
+
+**A "durga puja over the years" memory is semantically homogeneous by design.**
+Every photo is a Durga idol, so every pair scores high. `person_years` is one
+face repeatedly, `then_and_now` is one subject twice, an album story is one
+event. An absolute threshold would reject the *subject of the memory itself*,
+and would do it **worse the better the memory is** — the more faithfully a
+recipe found what was asked for, the more an absolute rule would throw away.
+The failure is silent and looks like a thin library.
+
+Measured over the **399 candidate pools** this library actually produces:
+
+| | min | median | max |
+|---|---|---|---|
+| pool median pairwise cosine | 0.460 | 0.683 | **0.930** |
+| pool 95th percentile | 0.682 | 0.899 | 0.986 |
+
+A pair at 0.90 is the ninetieth percentile of `on_this_day-11-27` and sits
+**above the 99th** of `on_this_day-11-21`. One number cannot mean the same
+thing in both, so there is no number.
+
+### Regime A — inside the burst window, the cosine may collapse
+
+Five seconds apart, a high cosine is not a judgement, it is a fact. So `bursts`
+gains one clause: a photo joins the current burst when it is within
+`gap_seconds` of the previous photo **and** (dHash within 6 of the anchor **or**
+cosine to the anchor ≥ **0.92**). Time still gates; the embedding *anchors*,
+exactly as the hash does, so a slow pan cannot chain into one group.
+
+**0.92 was read off six pairs, each opened and looked at:**
+
+| cosine | gap | what it actually is | collapse? |
+|---|---|---|---|
+| 0.900 | 17s | two different groups of people at one wedding | no |
+| 0.912 | 30s | one flower shop, two shelves, different aspect | no |
+| 0.921 | 8s | four women at a gate: candid, then the posed version | yes |
+| 0.925 | 19s | one cake being lit, wide then tight | yes |
+| 0.927 | 5s | the mother and child above | yes |
+| 0.931 | 16s | one lily pond, wide then tight | yes |
+
+0.92 is where the eye changes its answer. The library agrees the number means
+something: only **0.04%** of random pairs reach 0.90 at all, while within 30
+seconds the median pair is already **0.917**. The threshold sits deliberately
+above the naive reading of that evidence because this rule *deletes a photo*,
+and dedup's doctrine is precision-first.
+
+### Regime B — across the memory, an advisory penalty only
+
+The signal is calibrated against **the memory's own candidate pool**, after the
+gates:
+
+```
+low   = median of this pool's pairwise cosines
+high  = max(95th percentile, 0.90, low + 0.10)
+dissimilarity = clamp01((high - cosine) / (high - low))
+```
+
+`low` is the median, so **the typical pair of any memory maps to exactly 1.0
+and costs nothing** — arithmetic, not tuning, and it holds whatever the
+absolute cosines are. A pool of nothing but idols has a typical idol pair.
+
+The two floors sit on `high`, where they cannot touch that invariant. `0.90`
+stops a genuinely varied pool declaring a near-random 0.68 pair maximally
+redundant. `low + 0.10` stops a uniform pool collapsing the divisor: where
+nothing stands out, nothing is penalised, which is the honest answer.
+
+**It may not refuse.** `pick` now takes `binding` alongside `signal`; only the
+binding signals — dHash and colour — may trip `HARD_FLOOR`. The pixel signals
+answer *"is this the same frame?"*, where yes is a fact. An embedding answers
+*"is this the same kind of picture?"*, where yes is a judgement, and **a memory
+about one subject is allowed to be about one subject.** The relative mapping
+alone is not a strong enough guarantee to be the only one.
+
+This under-reacts to a pool that is mostly duplicates, since there the median
+pair *is* a duplicate. That cost is accepted: the alternative miscalibrates
+every homogeneous memory to catch a few saturated ones, and the saturated case
+already has Regime A, which is allowed to be absolute because its question is
+factual.
+
+### Optional, always
+
+`SemanticSupport` is **handed in**, never imported: nothing under `memory/`
+references `rekindle.semantic`, and `rekindle.semantic.diversity` imports numpy
+lazily (pinned by `test_semantic_imports.py`). With no extra, no store, an
+empty store, a pool too small to calibrate, or a corrupt store, the build falls
+back to the two pixel signals and says which of those it was, naming the
+command that would change it. None is what CI runs.
+
+### Reported, like every other guardrail
+
+```
+87 near-duplicate frames collapsed. 70 of them on visual similarity the
+perceptual hash missed.
+3 shots chosen differently because a semantically near-identical shot was
+already in the memory.
+```
+
+`DedupReport.semantic` counts frames that joined their burst on the embedding
+*alone*. `DiversityReport.displaced` counts picks where the advisory signal
+changed the answer — the only visible trace a purely advisory signal leaves.
+"The embedding was consulted" is not a claim worth printing.
+
+### Measured result, whole library
+
+Every one of the 470 buildable memories, built twice:
+
+| | before | after |
+|---|---|---|
+| pairs ≥ 0.90 | 5,435 | **2,242** (59% fewer) |
+| pairs ≥ 0.95 | 1,806 | **438** (76% fewer) |
+| memories lost entirely | — | **0** |
+| shots total | 8,511 | 7,817 |
+
+Both regimes and the trap, on named memories:
+
+| memory | shots | pairs ≥ 0.90 | max cosine | refused by the embedding |
+|---|---|---|---|---|
+| `prompt: durga puja over the years` | 24 → **24** | 3 → **0** | 0.968 → 0.886 | none |
+| `person_years-Avyan` | 24 → **24** | 3 → **0** | 0.962 → 0.810 | none |
+| `year_in_review-2017` | 24 → **24** | 1 → **0** | 0.936 → 0.855 | none |
+| `on_this_day-11-27` | 24 → 19 | 75 → **32** | 0.981 → 0.972 | none |
+
+The asymmetry is the point: the homogeneous-by-subject memories keep every
+shot, and the duplicate-saturated one is the one that shrinks. Memories do get
+shorter when their pool really was duplicates — `on_this_day-07-17` goes 24 → 9
+— and all fifteen dropped shots there sit at cosine 0.921–0.986 to a shot that
+stayed; four pairs were opened and every one was the same moment.
+
+Determinism is unaffected: the same library gives the same memories, verified
+across three independent processes on the real 19,480-photo index.
+
+---
+
 ## 6. The recipe protocol
 
 The sketch in `writing-recipes.md` described `candidates()/order()/fact_sheet()`
@@ -974,6 +1133,10 @@ and is being built in another milestone. Adding it should be an *addition* to
 `CompositeSignal`, not a rewrite of selection, and a test substitutes a custom
 signal to prove the seam holds.
 
+> **The seam was used, not rewritten.** §5C below adds a CLIP implementation
+> behind this protocol. `pick` gained one optional argument and `CompositeSignal`
+> gained a member; nothing else in selection changed.
+
 #### What this cannot do
 
 Stated plainly rather than implied. "Different dress or location" is only
@@ -983,8 +1146,7 @@ framings of one scene different when a viewer would call them the same photo.
 
 **Semantic redundancy is entirely invisible to it:** six restaurant-table
 photos from six different days in six different places are different pixels and
-the same idea. That needs embeddings and is deliberately left to the milestone
-building them.
+the same idea. That needs embeddings — see §5C, which added them.
 
 #### Stratification stays binding
 
