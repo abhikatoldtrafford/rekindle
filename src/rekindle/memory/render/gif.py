@@ -1,9 +1,15 @@
-"""GIF output. Pillow only, always available, deliberately a teaser.
+"""Animated preview output: GIF and WebP.
 
-No new dependency, works in CI with no ffmpeg, and embeds in a GitHub README -
-which is what the user will actually publish. It is NOT the full memory: the
-frame count and the width are both capped well below the MP4's, so the file
-stays small enough to sit in a README without anyone having to think about it.
+**GIF is no longer the preview of record.** Its ceiling is structural, not a
+matter of resolution: the format allows 256 colours PER FRAME, so photographic
+content bands visibly however large the image is, and a photo animation at
+1080p runs to tens of megabytes. Raising the resolution alone does not fix how
+a GIF looks.
+
+So `write_webp` is the default preview - true colour, dramatically smaller for
+the same content, and rendered inline by GitHub markdown. GIF stays available
+because it is the most universally embeddable animation there is, and is
+written alongside.
 """
 
 from __future__ import annotations
@@ -12,19 +18,23 @@ from pathlib import Path
 
 from PIL import Image
 
-# A README-embeddable teaser. 480px wide and 12 frames keeps a typical memory
-# comfortably inside a couple of megabytes; the render reports the size it
-# actually produced rather than promising one, because GIF size depends
-# entirely on how much the frames differ.
-DEFAULT_WIDTH = 480
-DEFAULT_MAX_FRAMES = 12
+# The preview width. This was 480 to keep a GIF small enough to drop into a
+# README without thinking; that constraint has been lifted, and 480 was far
+# too low for anyone actually looking at their photos. 1280 is a real preview
+# of a 4000px photo rather than a thumbnail of one.
+#
+# Exposed as `--preview-width` because the right answer genuinely differs: a
+# README still wants something small, and someone reviewing their own memories
+# wants it large.
+DEFAULT_WIDTH = 1280
+DEFAULT_MAX_FRAMES = 16
 DEFAULT_FRAME_MS = 1400
 # The title card earns a longer beat - it is text, and 1.4s is not enough to
 # read a title and a subtitle.
 TITLE_MS = 2200
 
 
-def gif_canvas(canvas: tuple[int, int], width: int = DEFAULT_WIDTH) -> tuple[int, int]:
+def preview_canvas(canvas: tuple[int, int], width: int = DEFAULT_WIDTH) -> tuple[int, int]:
     """Scale a canvas down to the GIF width, never up.
 
     Preserves the aspect ratio of the canvas the composition stage chose, so a
@@ -72,5 +82,45 @@ def write_gif(
         # once", which is not what a teaser wants.
         loop=0,
         optimize=True,
+    )
+    return path.stat().st_size
+
+
+def write_webp(
+    frames: list[Image.Image],
+    path: Path,
+    *,
+    frame_ms: int = DEFAULT_FRAME_MS,
+    title_ms: int = TITLE_MS,
+    has_title: bool = True,
+    quality: int = 82,
+) -> int:
+    """Animated WebP: true colour, and the preview that should be looked at.
+
+    GIF quantises every frame to 256 colours, which bands a photograph no
+    matter how many pixels it has. WebP carries full colour and compresses
+    photographic content properly, so the same memory is both better looking
+    and several times smaller. GitHub renders it inline in markdown.
+
+    `method=4` is Pillow's middle encoding effort - noticeably smaller output
+    than the default without the very slow settings above it.
+    """
+    if not frames:
+        raise ValueError("cannot write a WebP with no frames")
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    durations = [frame_ms] * len(frames)
+    if has_title and durations:
+        durations[0] = title_ms
+
+    first, *rest = [f.convert("RGB") for f in frames]
+    first.save(
+        path,
+        save_all=True,
+        append_images=rest,
+        duration=durations,
+        loop=0,
+        quality=quality,
+        method=4,
     )
     return path.stat().st_size

@@ -15,9 +15,9 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
 
-from rekindle.memory.composition import fit_within
+from rekindle.memory.composition import FIT_PAD, plan_placement
 from rekindle.memory.spec import MemorySpec
 from rekindle.models import Photo
 
@@ -36,6 +36,10 @@ class FrameReport:
     rendered: int = 0
     dropped: dict[str, int] = field(default_factory=dict)
     names: dict[str, str] = field(default_factory=dict)
+    # How each rendered shot met the canvas: downscale, upscale or pad. A high
+    # pad count is not a fault - it says the photos of that period are
+    # genuinely smaller than the rest of the memory.
+    placement: dict[str, int] = field(default_factory=dict)
 
     def drop(self, reason: str, label: str = "") -> None:
         self.dropped[reason] = self.dropped.get(reason, 0) + 1
@@ -65,21 +69,64 @@ def _font(size: int) -> ImageFont.FreeTypeFont:
         return ImageFont.load_default()
 
 
-def fit_photo(path: Path, canvas: tuple[int, int]) -> Image.Image:
-    """One photo, letterboxed onto the canvas. Raises OSError on a bad file."""
+# How much of the canvas a blurred backdrop is enlarged by before blurring,
+# and how hard. Enlarging past the canvas first means the blur never reveals
+# an edge, and a radius proportional to the canvas keeps the effect identical
+# at every output size.
+_BACKDROP_ZOOM = 1.08
+_BLUR_DIVISOR = 22
+
+
+def _backdrop(photo: Image.Image, canvas: tuple[int, int]) -> Image.Image:
+    """A blurred, cover-cropped enlargement of the photo, filling the canvas.
+
+    Chosen over a flat matte deliberately. A 640x480 photo centred in a
+    3984x2988 canvas occupies 2.5% of the area; on black it reads as broken,
+    while on a blurred enlargement of itself it reads as a small old photo -
+    which is exactly what it is. It is also what every slideshow tool does
+    with a mixed-era library, so it is the familiar signal rather than a novel
+    one.
+
+    The backdrop IS an upscale of the photo, but a deliberately blurred one,
+    so the "never upscale into mush" rule is not violated - nothing is
+    presented as detail that the photo does not have.
+    """
+    target_w = int(canvas[0] * _BACKDROP_ZOOM)
+    target_h = int(canvas[1] * _BACKDROP_ZOOM)
+    scale = max(target_w / photo.width, target_h / photo.height)
+    enlarged = photo.resize(
+        (max(1, round(photo.width * scale)), max(1, round(photo.height * scale))),
+        Image.Resampling.BILINEAR,
+    )
+    blurred = enlarged.filter(ImageFilter.GaussianBlur(radius=max(2, canvas[0] // _BLUR_DIVISOR)))
+    left = (blurred.width - canvas[0]) // 2
+    top = (blurred.height - canvas[1]) // 2
+    return blurred.crop((left, top, left + canvas[0], top + canvas[1]))
+
+
+def fit_photo(path: Path, canvas: tuple[int, int]) -> tuple[Image.Image, str]:
+    """One photo placed on the canvas. Returns (frame, placement mode).
+
+    Raises OSError on a bad file. The mode is reported so the CLI can tell a
+    user how many shots were padded - a memory where most shots are padded is
+    telling them something real about that period of their library.
+    """
     with Image.open(path) as im:
-        # Hint the JPEG decoder before loading: the canvas is far smaller than
-        # a 4000px original, and this is the same 3x saving the fingerprint
-        # pass measured.
+        # Hint the JPEG decoder, but never below the canvas: draft() scales in
+        # powers of two and asking for a small size on a large canvas would
+        # throw away the resolution this whole change exists to keep.
         im.draft("RGB", canvas)
         # ORIENTATION FIRST, always. A phone stores a portrait photo as
         # landscape pixels plus a tag; skipping this renders it on its side.
         upright = ImageOps.exif_transpose(im) or im
-        target = fit_within(upright.size, canvas)
-        resized = upright.convert("RGB").resize(target, Image.Resampling.LANCZOS)
-    frame = Image.new("RGB", canvas, BACKGROUND)
+        rgb = upright.convert("RGB")
+        target, mode = plan_placement(rgb.size, canvas)
+        resized = rgb.resize(target, Image.Resampling.LANCZOS)
+        backdrop = _backdrop(rgb, canvas) if mode == FIT_PAD else None
+
+    frame = backdrop if backdrop is not None else Image.new("RGB", canvas, BACKGROUND)
     frame.paste(resized, ((canvas[0] - target[0]) // 2, (canvas[1] - target[1]) // 2))
-    return frame
+    return frame, mode
 
 
 def caption_frame(frame: Image.Image, text: str) -> Image.Image:
@@ -176,7 +223,7 @@ def build_frames(
             report.drop(DROP_MISSING, photo.paths[0].name if photo.paths else "")
             continue
         try:
-            frame = fit_photo(path, canvas)
+            frame, mode = fit_photo(path, canvas)
         except (OSError, ValueError, Image.DecompressionBombError):
             report.drop(DROP_UNDECODABLE, path.name)
             continue
@@ -184,4 +231,5 @@ def build_frames(
             frame = caption_frame(frame, shot.caption)
         frames.append(frame)
         report.rendered += 1
+        report.placement[mode] = report.placement.get(mode, 0) + 1
     return frames, report

@@ -314,11 +314,34 @@ def test_the_report_shows_filenames_only_never_full_paths():
     assert "/lib/" not in report.examples[comp.DROP_EXTREME_ASPECT]
 
 
-def test_the_canvas_is_the_smallest_width_and_the_smallest_height():
-    """Minimised independently: one unusually narrow photo must not be allowed
-    to dictate a canvas that is also too tall."""
+def test_the_canvas_is_the_MEDIAN_not_the_minimum():
+    """The rule that replaced the minimum, and why.
+
+    Under the minimum, ONE 640x480 photo from 2014 pinned an entire
+    "Paramita over the years" memory to 640x480 - rendering two 7008x4672
+    photos at a 120th of their pixel count. Measured across 45 memories, 11 of
+    them landed on 640x480 for exactly that reason.
+
+    Width and height are still taken independently, so a set mixing 4:3 and
+    16:9 gets a canvas both can sit in.
+    """
     photos = [_p("a", size=(4000, 3000)), _p("b", size=(1600, 2000)), _p("c", size=(2000, 1200))]
-    assert canvas_for(photos) == (1600, 1200)
+    assert canvas_for(photos) == (2000, 2000)
+
+
+def test_one_tiny_photo_no_longer_drags_the_whole_canvas_down():
+    """The regression this replaced, stated as a test."""
+    photos = [_p(f"big{i}", size=(4000, 3000)) for i in range(9)]
+    photos.append(_p("tiny2014", size=(640, 480)))
+    width, height = canvas_for(photos)
+    assert width == 4000 and height == 3000
+
+
+def test_the_median_is_the_LOWER_of_two_middles():
+    """An even-length set takes the smaller middle rather than averaging, so
+    the canvas is always a real size at least half the set can meet."""
+    photos = [_p("a", size=(1000, 1000)), _p("b", size=(3000, 3000))]
+    assert canvas_for(photos) == (1000, 1000)
 
 
 def test_the_canvas_is_derived_from_the_KEPT_photos():
@@ -394,3 +417,57 @@ def test_a_wallpaper_at_a_desktop_size_is_still_caught():
     """222 files at 1920x1200 in the reference library are downloaded
     wallpapers. Untagged, no camera metadata - correctly excluded."""
     assert is_screenshot(_p(size=(1920, 1200), make=None, model=None, name="IT-wp4.jpg")) is True
+
+
+# --------------------------------------------------------------------------
+# placement: downscale, upscale within tolerance, or pad
+
+
+def test_a_larger_photo_is_downscaled_to_fit():
+    target, mode = comp.plan_placement((7008, 4672), (3984, 2988))
+    assert mode == comp.FIT_DOWNSCALE
+    assert target[0] <= 3984 and target[1] <= 2988
+
+
+def test_a_slightly_smaller_photo_is_upscaled_within_tolerance():
+    """Padding a photo 5% below the canvas would read as an inconsistency
+    rather than a deliberate signal, and a 25% linear stretch is
+    imperceptible."""
+    _, mode = comp.plan_placement((3800, 2850), (3984, 2988))
+    assert mode == comp.FIT_UPSCALE
+
+
+def test_a_far_smaller_photo_is_padded_at_NATIVE_size():
+    target, mode = comp.plan_placement((640, 480), (3984, 2988))
+    assert mode == comp.FIT_PAD
+    assert target == (640, 480), "a padded photo must not be resized at all"
+
+
+def test_the_tolerance_boundary_is_exact():
+    # Exactly 1.25x is still an upscale; a hair beyond it pads.
+    _, mode = comp.plan_placement((800, 600), (1000, 750))
+    assert mode == comp.FIT_UPSCALE
+    _, mode = comp.plan_placement((790, 592), (1000, 750))
+    assert mode == comp.FIT_PAD
+
+
+def test_nothing_is_ever_excluded_for_being_small():
+    """The rule that keeps a memory's earliest years.
+
+    On this library small means OLD, so excluding sub-canvas photos would
+    quietly delete the early years of exactly the memories - "person over the
+    years" - whose whole subject is the span. Two individually reasonable
+    rules would have combined to defeat each other.
+    """
+    photos = [_p(f"big{i}", size=(4000, 3000)) for i in range(9)]
+    photos.append(_p("old2014", size=(640, 480)))
+    kept, report = compose(photos)
+    assert len(kept) == 10
+    assert "too_small" not in report.dropped
+
+
+def test_the_resolution_FLOOR_still_applies_though():
+    """Padding is for photos below the canvas, not for thumbnails. The 480px
+    floor is a separate gate and still removes genuine junk."""
+    _, report = compose([_p("ok"), _p("thumb", size=(320, 240))])
+    assert report.dropped[comp.DROP_TOO_SMALL] == 1

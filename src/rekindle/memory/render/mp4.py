@@ -24,7 +24,13 @@ FFMPEG_MISSING = (
     "Install ffmpeg and re-run to get the full-resolution MP4."
 )
 
-DEFAULT_WIDTH = 1280
+# 2560 (1440p class), not 1280. The MP4 is the full memory, and this library's
+# median photo is ~3984px wide - rendering that into 1280 throws away 90% of
+# the pixel count for no reason. Native resolution is not the default because
+# a 7008x4672 video is useful to nobody and takes minutes to encode; a flag
+# raises the bound for anyone who wants it. The canvas is still never
+# UPSCALED past what the photos support.
+DEFAULT_WIDTH = 2560
 DEFAULT_SECONDS = 2.5
 TITLE_SECONDS = 3.5
 # How much of ffmpeg's stderr to show when it fails. Enough to name the real

@@ -315,21 +315,80 @@ def cohesive_orientation(photos: list[Photo]) -> Orientation:
 
 
 def canvas_for(photos: list[Photo]) -> tuple[int, int] | None:
-    """The render canvas: the smallest width and the smallest height present.
+    """The render canvas: the MEDIAN width and the MEDIAN height of the set.
 
-    Derived from the set itself so that NOTHING is upscaled. Upscaling a 640px
-    photo to sit beside a 4000px one produces visible mush, and the whole
-    point of a common canvas is that every photo downscales into it.
+    Not the minimum. The minimum was the first rule here and it was
+    catastrophic on a library spanning 2000-2026: one 640x480 photo from 2014
+    pinned an entire "Paramita over the years" memory to 640x480, rendering
+    two 7008x4672 photos at a 120th of their pixel count. Measured across 45
+    memories under the old rule, **11 of them landed on 640x480** and one on
+    1105x510 - each because of whichever single weakest photo happened to be
+    selected.
 
-    Width and height are minimised INDEPENDENTLY. Taking the dimensions of the
-    single smallest photo instead would let one unusually narrow photo dictate
-    a canvas that is too tall, and vice versa; the independent minimum is the
-    largest box that every photo can fill in at least one axis.
+    The median keeps the intent (a canvas the set actually supports, derived
+    from the photos rather than a constant) without letting the weakest member
+    dictate it. Width and height are still minimised INDEPENDENTLY of each
+    other, so a set mixing 4:3 and 16:9 gets a canvas both can sit in.
+
+    Photos above the canvas are downscaled. Photos BELOW it are not excluded
+    and not stretched - see `plan_placement`.
     """
     sizes = [s for s in (dimensions(p) for p in photos) if s is not None]
     if not sizes:
         return None
-    return (min(s[0] for s in sizes), min(s[1] for s in sizes))
+    return (_median(sorted(s[0] for s in sizes)), _median(sorted(s[1] for s in sizes)))
+
+
+def _median(values: list[int]) -> int:
+    """Lower median. An even-length set takes the smaller of the two middles
+    rather than averaging them, so the canvas is always a size at least half
+    the set can meet or exceed, and is always an integer without rounding."""
+    return values[(len(values) - 1) // 2]
+
+
+# How far a photo may be upscaled to meet the canvas before it is padded
+# instead. A 25% linear stretch is about 1.6x the pixel count and is
+# imperceptible at viewing size; beyond that the softness starts to show, and
+# "mush" is exactly what the never-upscale rule exists to prevent.
+#
+# The tolerance matters because without it a photo 3% below the canvas would
+# be padded, which reads as an inconsistency rather than as a deliberate
+# signal that the photo is older and smaller.
+UPSCALE_TOLERANCE = 1.25
+
+FIT_DOWNSCALE = "downscale"
+FIT_UPSCALE = "upscale"
+FIT_PAD = "pad"
+
+
+def plan_placement(
+    size: tuple[int, int], canvas: tuple[int, int], *, tolerance: float = UPSCALE_TOLERANCE
+) -> tuple[tuple[int, int], str]:
+    """How one photo meets the canvas: (rendered size, mode).
+
+    Three cases, and **nothing is ever excluded for being small**:
+
+    * larger than the canvas - downscale to fit, preserving aspect.
+    * slightly smaller (within `tolerance`) - upscale to fit. Imperceptible,
+      and it avoids padding a photo that is only marginally below.
+    * far smaller - render at NATIVE size and pad the remainder. A 640x480
+      photo from 2014 then reads as an old photo rather than a broken one,
+      and the memory keeps its earliest years.
+
+    Excluding the small ones was considered and rejected: on this library
+    small means OLD, so it would quietly delete the early years of exactly the
+    memories - "person over the years" - whose whole subject is the span. Two
+    individually reasonable rules would have combined to defeat each other.
+    """
+    width, height = size
+    # scale > 1 means the CANVAS is larger, i.e. the photo would have to be
+    # blown up. scale < 1 means the photo is larger and must come down.
+    scale = min(canvas[0] / width, canvas[1] / height)
+    if scale <= 1.0:
+        return (max(1, round(width * scale)), max(1, round(height * scale))), FIT_DOWNSCALE
+    if scale <= tolerance:
+        return (max(1, round(width * scale)), max(1, round(height * scale))), FIT_UPSCALE
+    return (width, height), FIT_PAD
 
 
 def compose(
@@ -380,10 +439,9 @@ def compose(
 def fit_within(size: tuple[int, int], canvas: tuple[int, int]) -> tuple[int, int]:
     """Scale `size` to fit inside `canvas`, preserving aspect, NEVER upscaling.
 
-    The `min(..., 1.0)` is the no-upscale rule and is the whole reason this is
-    a function rather than an inline `thumbnail()` call: Pillow's thumbnail
-    also refuses to upscale, but the renderer needs the target size before it
-    opens the file.
+    A hard bound, used where a maximum matters and padding does not - the MP4
+    and GIF canvas caps. Per-photo placement goes through `plan_placement`,
+    which has the tolerance and the padding case.
     """
     width, height = size
     scale = min(canvas[0] / width, canvas[1] / height, 1.0)
@@ -406,6 +464,11 @@ def name_of(photo: Photo) -> str:
 
 __all__ = [
     "Orientation",
+    "plan_placement",
+    "UPSCALE_TOLERANCE",
+    "FIT_DOWNSCALE",
+    "FIT_UPSCALE",
+    "FIT_PAD",
     "CompositionReport",
     "classify",
     "aspect",

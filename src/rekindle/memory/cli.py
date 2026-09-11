@@ -19,7 +19,7 @@ from rich.table import Table
 
 from rekindle.db import PhotoStore
 from rekindle.memory import engine
-from rekindle.memory.composition import describe_drops
+from rekindle.memory.composition import FIT_PAD, describe_drops
 from rekindle.memory.history import (
     KIND_ALBUM,
     KIND_DATES,
@@ -32,7 +32,9 @@ from rekindle.memory.index import MemoryIndex
 from rekindle.memory.policy import CONFIG_NAME, PolicyError, load_policy
 from rekindle.memory.recipes import registered
 from rekindle.memory.render.frames import build_frames
-from rekindle.memory.render.gif import gif_canvas, write_gif
+from rekindle.memory.render.gif import DEFAULT_WIDTH as PREVIEW_WIDTH
+from rekindle.memory.render.gif import preview_canvas, write_gif, write_webp
+from rekindle.memory.render.mp4 import DEFAULT_WIDTH as MP4_WIDTH
 from rekindle.memory.render.mp4 import mp4_canvas, write_mp4
 from rekindle.memory.render.music import NO_MUSIC_HINT, resolve_music
 from rekindle.memory.spec import MemorySpec, safe_slug
@@ -179,6 +181,8 @@ def memory_cmd(
     no_mp4: bool,
     limit: int,
     captions: str = "deterministic",
+    preview_width: int = 0,
+    mp4_width: int = 0,
     today: datetime | None = None,
 ) -> None:
     store, index = open_index(data_dir, public_safe=public_safe)
@@ -223,7 +227,7 @@ def memory_cmd(
 
         specs = _maybe_caption(specs, captions)
         for spec in specs:
-            _render_one(spec, index, out_dir, gif_frames, music, no_mp4)
+            _render_one(spec, index, out_dir, gif_frames, music, no_mp4, preview_width, mp4_width)
             state.record_surfaced(memory_id(spec.recipe, spec.key), title=spec.title)
         _render_build_report(report)
     finally:
@@ -312,20 +316,24 @@ def _render_one(
     gif_frames: int,
     music: Path | None,
     no_mp4: bool,
+    preview_width: int = 0,
+    mp4_width: int = 0,
 ) -> None:
     from rekindle.memory.composition import canvas_for
 
     photos = [index.get(s.file_hash) for s in spec.shots]
+    # The MEDIAN size of the chosen photos, not the minimum - see
+    # composition.canvas_for for why the minimum was catastrophic.
     canvas = canvas_for([p for p in photos if p is not None]) or (1280, 960)
 
     folder = out_dir / f"{date.today().isoformat()}-{spec.recipe}-{safe_slug(spec.key)}"
     folder.mkdir(parents=True, exist_ok=True)
     (folder / "memory.json").write_text(spec.dumps(), encoding="utf-8")
 
-    gif_size = gif_canvas(canvas)
+    preview_size = preview_canvas(canvas, preview_width or PREVIEW_WIDTH)
     frames, frame_report = build_frames(
         spec,
-        gif_size,
+        preview_size,
         resolve=index.get,
         locate=index.resolve_path,
         limit=gif_frames,
@@ -335,17 +343,26 @@ def _render_one(
         _render_frame_drops(frame_report)
         return
 
+    # WebP first: it is the preview worth looking at. GIF is written too
+    # because it embeds everywhere, but it quantises to 256 colours and bands
+    # photographs regardless of resolution.
+    webp_bytes = write_webp(frames, folder / "memory.webp")
     gif_bytes = write_gif(frames, folder / "memory.gif")
-    line = f"[green]{spec.title}[/green] - {len(spec.shots)} shots, GIF {gif_bytes // 1024} KB"
+    line = (
+        f"[green]{spec.title}[/green] - {len(spec.shots)} shots, "
+        f"{preview_size[0]}x{preview_size[1]} preview "
+        f"(WebP {webp_bytes // 1024} KB, GIF {gif_bytes // 1024} KB)"
+    )
 
     if not no_mp4:
+        video_size = mp4_canvas(canvas, mp4_width or MP4_WIDTH)
         mp4_frames, mp4_report = build_frames(
-            spec, mp4_canvas(canvas), resolve=index.get, locate=index.resolve_path
+            spec, video_size, resolve=index.get, locate=index.resolve_path
         )
         bed = resolve_music(music)
         result = write_mp4(mp4_frames, folder / "memory.mp4", music=bed)
         if result.ok:
-            line += f", MP4 {result.size // 1024} KB"
+            line += f", MP4 {video_size[0]}x{video_size[1]} {result.size // 1024} KB"
         elif result.skipped:
             line += " (GIF only)"
         else:
@@ -371,6 +388,15 @@ def _render_one(
 
     console.print(line)
     console.print(f"  [dim]{folder}[/dim]")
+    padded = frame_report.placement.get(FIT_PAD, 0)
+    if padded:
+        # Not a fault: it says the photos of that period are genuinely smaller
+        # than the rest of the memory. Worth surfacing because a memory that
+        # is mostly padded is telling the user something real.
+        console.print(
+            f"  [dim]{padded} of {frame_report.rendered} shots were below the "
+            f"{canvas[0]}x{canvas[1]} canvas and are shown at native size.[/dim]"
+        )
     _render_frame_drops(frame_report)
 
 

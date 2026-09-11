@@ -14,9 +14,10 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+from rekindle.memory import composition as comp
 from rekindle.memory.render import frames as fr
 from rekindle.memory.render import mp4 as mp4mod
-from rekindle.memory.render.gif import gif_canvas, write_gif
+from rekindle.memory.render.gif import preview_canvas, write_gif, write_webp
 from rekindle.memory.render.mp4 import mp4_canvas, write_mp4
 from rekindle.memory.render.music import NO_MUSIC_HINT, resolve_music
 from rekindle.memory.spec import FactSheet, MemorySpec, Shot
@@ -49,6 +50,19 @@ def _jpeg(path: Path, size=(800, 600), colour=(120, 90, 60), exif_orientation=No
     return path
 
 
+def _gradient_jpeg(path: Path, size=(160, 120)) -> Path:
+    """A photo with actual variation, so a blurred backdrop is distinguishable
+    from a flat matte. A solid-colour fixture blurs to the same solid colour
+    and the test could not tell them apart."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    im = Image.new("RGB", size)
+    for x in range(size[0]):
+        for y in range(size[1]):
+            im.putpixel((x, y), (30 + (x * 200) // size[0], 60, 200 - (y * 150) // size[1]))
+    im.save(path, "JPEG", quality=95)
+    return path
+
+
 def _spec(hashes, **kw) -> MemorySpec:
     shots = tuple(
         Shot(h, kw.pop("caption", f"caption {h}"), "2020-05-01T12:00:00", True) for h in hashes
@@ -67,6 +81,12 @@ def _spec(hashes, **kw) -> MemorySpec:
 def _world(tmp_path, hashes):
     """A resolve/locate pair over real files on disk."""
     photos = {h: _photo(h, _jpeg(tmp_path / f"{h}.jpg")) for h in hashes}
+    return photos.get, lambda p: p.paths[0] if p.paths[0].is_file() else None
+
+
+def _world_from(tmp_path, hashes):
+    """Same, over files that already exist (written by the caller)."""
+    photos = {h: _photo(h, tmp_path / f"{h}.jpg") for h in hashes}
     return photos.get, lambda p: p.paths[0] if p.paths[0].is_file() else None
 
 
@@ -137,38 +157,71 @@ def test_a_shot_no_longer_in_the_index_is_dropped_and_counted(tmp_path):
 
 
 def test_aspect_is_preserved_and_letterboxed_black(tmp_path):
-    """A 2:1 photo on a 4:3 canvas gets black bars, not a squash."""
+    """A 2:1 photo on a 4:3 canvas gets black bars, not a squash.
+
+    The photo is LARGER than the canvas here, so it downscales and the
+    leftover is plain matte - the blurred backdrop is only for photos that
+    fall below the canvas.
+    """
     _jpeg(tmp_path / "w.jpg", size=(800, 400))
-    frame = fr.fit_photo(tmp_path / "w.jpg", (320, 240))
+    frame, mode = fr.fit_photo(tmp_path / "w.jpg", (320, 240))
+    assert mode == comp.FIT_DOWNSCALE
     assert frame.size == (320, 240)
-    # Top row is letterbox.
     assert frame.getpixel((160, 2)) == (0, 0, 0)
-    # Centre is the photo.
     assert frame.getpixel((160, 120)) != (0, 0, 0)
 
 
 def test_a_portrait_photo_fits_a_landscape_canvas(tmp_path):
     _jpeg(tmp_path / "p.jpg", size=(600, 900))
-    frame = fr.fit_photo(tmp_path / "p.jpg", (320, 240))
+    frame, _ = fr.fit_photo(tmp_path / "p.jpg", (320, 240))
     assert frame.size == (320, 240)
     assert frame.getpixel((2, 120)) == (0, 0, 0)
 
 
-def test_a_photo_is_never_upscaled(tmp_path):
-    """Upscaling a 640px photo to 1080p produces visible mush."""
-    _jpeg(tmp_path / "small.jpg", size=(160, 120))
-    frame = fr.fit_photo(tmp_path / "small.jpg", (1280, 960))
+def test_a_far_smaller_photo_is_PADDED_at_its_native_size(tmp_path):
+    """The rule that keeps old photos in a memory instead of deleting them or
+    stretching them into mush.
+
+    Excluding small photos was considered and rejected: on a library spanning
+    2000-2026, small means OLD, so it would quietly remove the early years of
+    exactly the memories whose subject is the span.
+    """
+    _gradient_jpeg(tmp_path / "small.jpg", size=(160, 120))
+    frame, mode = fr.fit_photo(tmp_path / "small.jpg", (1280, 960))
+    assert mode == comp.FIT_PAD
     assert frame.size == (1280, 960)
-    # The photo occupies only its native 160x120 in the centre.
+    # The photo sits at NATIVE size in the centre: 160x120 means the sharp
+    # region spans x in [560, 720). Just outside it is backdrop.
     assert frame.getpixel((640, 480)) != (0, 0, 0)
-    assert frame.getpixel((100, 480)) == (0, 0, 0)
+
+
+def test_the_padding_is_a_blurred_enlargement_not_a_black_matte(tmp_path):
+    """A 640x480 photo centred in a 3984x2988 canvas fills 2.5% of the area.
+    On black it reads as broken; on a blurred enlargement of itself it reads
+    as a small old photo, which is what it is."""
+    _gradient_jpeg(tmp_path / "small.jpg", size=(160, 120))
+    frame, mode = fr.fit_photo(tmp_path / "small.jpg", (1280, 960))
+    assert mode == comp.FIT_PAD
+    corner = frame.getpixel((10, 10))
+    assert corner != (0, 0, 0), "the pad area is a black matte, not a backdrop"
+
+
+def test_a_slightly_smaller_photo_is_upscaled_within_tolerance(tmp_path):
+    """Padding a photo 3% below the canvas would read as an inconsistency
+    rather than as a deliberate signal. A 25% linear stretch is imperceptible."""
+    _jpeg(tmp_path / "near.jpg", size=(1200, 900))
+    frame, mode = fr.fit_photo(tmp_path / "near.jpg", (1280, 960))
+    assert mode == comp.FIT_UPSCALE
+    assert frame.size == (1280, 960)
+    # It fills the canvas, so there is no matte at the edge.
+    assert frame.getpixel((5, 480)) != (0, 0, 0)
 
 
 def test_exif_orientation_is_applied_when_rendering(tmp_path):
     """Without this a phone portrait renders on its side. The stored
     dimensions are already post-rotation, so the renderer must match them."""
     _jpeg(tmp_path / "r.jpg", size=(800, 400), exif_orientation=6)
-    frame = fr.fit_photo(tmp_path / "r.jpg", (400, 400))
+    frame, _ = fr.fit_photo(tmp_path / "r.jpg", (400, 400))
     # 800x400 rotated is 400x800: portrait, so it letterboxes left and right.
     assert frame.getpixel((5, 200)) == (0, 0, 0)
     assert frame.getpixel((200, 200)) != (0, 0, 0)
@@ -226,13 +279,92 @@ def test_an_empty_frame_list_is_refused(tmp_path):
         write_gif([], tmp_path / "m.gif")
 
 
-def test_the_gif_canvas_scales_down_but_never_up():
-    assert gif_canvas((1600, 1200), 480) == (480, 360)
-    assert gif_canvas((320, 240), 480) == (320, 240)
+def test_the_preview_canvas_scales_down_but_never_up():
+    assert preview_canvas((1600, 1200), 480) == (480, 360)
+    assert preview_canvas((320, 240), 480) == (320, 240)
 
 
-def test_the_gif_canvas_keeps_a_portrait_memory_portrait():
-    assert gif_canvas((1200, 1600), 480) == (480, 640)
+def test_the_preview_canvas_keeps_a_portrait_memory_portrait():
+    assert preview_canvas((1200, 1600), 480) == (480, 640)
+
+
+def test_the_preview_default_is_no_longer_a_thumbnail():
+    """480px was chosen to keep a GIF small enough to drop into a README
+    without thinking. That constraint was lifted and 480 was far too low for
+    anyone actually looking at their own photos."""
+    from rekindle.memory.render.gif import DEFAULT_WIDTH
+
+    assert DEFAULT_WIDTH >= 1280
+
+
+# --------------------------------------------------------------------------
+# WebP: the preview worth looking at
+
+
+def test_a_webp_is_written_animated_and_looping(tmp_path):
+    resolve, locate = _world(tmp_path, ["a", "b", "c"])
+    built, _ = fr.build_frames(_spec(["a", "b", "c"]), CANVAS, resolve=resolve, locate=locate)
+    out = tmp_path / "memory.webp"
+
+    size = write_webp(built, out)
+
+    assert size > 0
+    with Image.open(out) as im:
+        assert im.format == "WEBP"
+        assert im.is_animated
+        assert im.n_frames == 4
+
+
+def test_the_webp_is_smaller_than_the_gif_for_photographic_content(tmp_path):
+    """The whole reason GIF stopped being the preview of record: it quantises
+    every frame to 256 colours, which both bands a photograph AND costs more
+    bytes than true-colour WebP for the same content."""
+    photos = [_gradient_jpeg(tmp_path / f"g{i}.jpg", size=(640, 480)) for i in range(3)]
+    assert photos
+    resolve, locate = _world_from(tmp_path, ["g0", "g1", "g2"])
+    built, _ = fr.build_frames(
+        _spec(["g0", "g1", "g2"]), (640, 480), resolve=resolve, locate=locate
+    )
+    webp = write_webp(built, tmp_path / "m.webp")
+    gif = write_gif(built, tmp_path / "m.gif")
+    assert webp < gif, f"webp {webp} was not smaller than gif {gif}"
+
+
+def test_an_empty_webp_is_refused(tmp_path):
+    with pytest.raises(ValueError):
+        write_webp([], tmp_path / "m.webp")
+
+
+def test_the_webp_title_card_is_held_longer(tmp_path):
+    """Asserted on the ENCODED BYTES, not through Pillow's reader.
+
+    Pillow's WebP decoder does not surface per-frame durations at all - it
+    exposes only `background` and `loop` on seek - so the obvious assertion
+    (`im.info["duration"]`) raises KeyError rather than failing. Comparing two
+    encodings that differ ONLY in the title hold proves the value reaches the
+    encoder and lands in the file, which is what the test is actually about.
+    """
+    resolve, locate = _world(tmp_path, ["a", "b"])
+    built, _ = fr.build_frames(_spec(["a", "b"]), CANVAS, resolve=resolve, locate=locate)
+
+    short = tmp_path / "short.webp"
+    long = tmp_path / "long.webp"
+    write_webp(built, short, frame_ms=1000, title_ms=1000)
+    write_webp(built, long, frame_ms=1000, title_ms=5000)
+
+    assert short.read_bytes() != long.read_bytes()
+
+
+def test_the_webp_title_hold_is_skipped_when_there_is_no_title(tmp_path):
+    resolve, locate = _world(tmp_path, ["a", "b"])
+    built, _ = fr.build_frames(
+        _spec(["a", "b"]), CANVAS, resolve=resolve, locate=locate, with_title=False
+    )
+    with_hold = tmp_path / "a.webp"
+    without = tmp_path / "b.webp"
+    write_webp(built, with_hold, frame_ms=1000, title_ms=5000, has_title=False)
+    write_webp(built, without, frame_ms=1000, title_ms=1000, has_title=False)
+    assert with_hold.read_bytes() == without.read_bytes()
 
 
 # --------------------------------------------------------------------------
@@ -295,6 +427,14 @@ def test_the_mp4_canvas_is_always_even():
 
 def test_the_mp4_canvas_never_upscales():
     assert mp4_canvas((640, 480), 1280) == (640, 480)
+
+
+def test_the_mp4_default_carries_real_resolution():
+    """1280 threw away ~90% of the pixel count of this library's median photo.
+    Native is not the default because a 7008x4672 video helps nobody."""
+    from rekindle.memory.render.mp4 import DEFAULT_WIDTH
+
+    assert DEFAULT_WIDTH >= 1920
 
 
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not on PATH")
@@ -455,3 +595,29 @@ def test_an_unreadable_music_folder_means_silence(tmp_path, monkeypatch):
     monkeypatch.setattr(Path, "iterdir", boom)
     (tmp_path / "music").mkdir()
     assert resolve_music(folder=tmp_path / "music") is None
+
+
+def test_the_frame_report_counts_how_each_shot_met_the_canvas(tmp_path):
+    """A memory where most shots are padded is telling the user something real
+    about that period of their library, so the count is surfaced. Nothing
+    asserted this until a mutation deleted the line and the suite stayed
+    green."""
+    _jpeg(tmp_path / "big.jpg", size=(2000, 1500))
+    _jpeg(tmp_path / "small.jpg", size=(300, 225))
+    photos = {
+        "big": _photo("big", tmp_path / "big.jpg"),
+        "small": _photo("small", tmp_path / "small.jpg"),
+    }
+    resolve = photos.get
+
+    _, report = fr.build_frames(
+        _spec(["big", "small"]),
+        (1600, 1200),
+        resolve=resolve,
+        locate=lambda p: p.paths[0],
+    )
+
+    assert report.rendered == 2
+    assert report.placement[comp.FIT_DOWNSCALE] == 1
+    assert report.placement[comp.FIT_PAD] == 1
+    assert sum(report.placement.values()) == report.rendered

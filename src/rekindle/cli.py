@@ -194,7 +194,26 @@ def memory(
         ),
     ] = False,
     max_shots: Annotated[int, typer.Option("--max-shots")] = 24,
-    gif_frames: Annotated[int, typer.Option("--gif-frames")] = 12,
+    gif_frames: Annotated[
+        int, typer.Option("--preview-frames", help="Frames in the GIF/WebP preview.")
+    ] = 16,
+    preview_width: Annotated[
+        int,
+        typer.Option(
+            "--preview-width",
+            help="Width of the GIF/WebP preview. 0 uses the default (1280).",
+        ),
+    ] = 0,
+    mp4_width: Annotated[
+        int,
+        typer.Option(
+            "--mp4-width",
+            help=(
+                "Maximum MP4 width. 0 uses the default (2560). Raise it to go "
+                "up to the native resolution the photos support."
+            ),
+        ),
+    ] = 0,
     music: Annotated[Path | None, typer.Option("--music", help="Audio bed for the MP4.")] = None,
     no_mp4: Annotated[
         bool, typer.Option("--no-mp4", help="Skip the MP4 even if ffmpeg is here.")
@@ -233,6 +252,8 @@ def memory(
         no_mp4,
         limit,
         captions,
+        preview_width,
+        mp4_width,
     )
 
 
