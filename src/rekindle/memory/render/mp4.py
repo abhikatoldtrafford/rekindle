@@ -129,7 +129,7 @@ def write_mp4(
             cmd += ["-stream_loop", "-1"]
             # The audio is re-encoded to AAC because an arbitrary
             # user-supplied file may be anything.
-            cmd += ["-i", str(music), "-c:a", "aac", "-b:a", "160k"]
+            cmd += ["-i", str(music), "-c:a", "aac", "-b:a", "160k", "-shortest"]
         cmd += [
             "-vf",
             # fps must be set explicitly: a concat of stills has no inherent
