@@ -230,6 +230,73 @@ def test_the_cli_tells_the_music_layer_which_memory_it_is_rendering(tmp_path, mo
     )
 
 
+def test_naming_one_memory_overrides_its_cooldown(tmp_path):
+    """The cooldown stops `--auto` repeating itself next week. It must not
+    refuse a person who names one memory and asks for it - which is exactly
+    what you type after changing the code that builds it, and what this
+    milestone's re-render ran into."""
+    data = _library(tmp_path)
+    out = tmp_path / "out"
+    argv = [
+        "memory",
+        "--recipe",
+        "album_story",
+        "--key",
+        "Kashmir",
+        "--out",
+        str(out),
+        "--no-mp4",
+        "--data-dir",
+        str(data),
+    ]
+
+    assert runner.invoke(app, argv).exit_code == 0
+    again = runner.invoke(app, argv)
+    assert again.exit_code == 0, again.output
+    assert "cooldown" not in again.output
+    assert (next(out.iterdir()) / "memory.json").is_file()
+
+
+def test_an_unnamed_build_still_respects_the_cooldown(tmp_path):
+    """The other half. Without it "override the cooldown" becomes "there is no
+    cooldown", and `--auto` shows the same memory every day."""
+    data = _library(tmp_path)
+    out = tmp_path / "out"
+    base = ["memory", "--out", str(out), "--no-mp4", "--data-dir", str(data)]
+
+    assert runner.invoke(app, [*base, "--recipe", "album_story", "--key", "Kashmir"]).exit_code == 0
+    again = runner.invoke(app, base)
+    assert "cooldown" in again.output, again.output
+
+
+def test_a_dismissed_memory_is_still_refused_when_named(tmp_path):
+    """Dismissal is deliberate and permanent; `undismiss` is how it is taken
+    back. Only the automatic cooldown is overridden."""
+    data = _library(tmp_path)
+    assert (
+        runner.invoke(app, ["dismiss", "album_story", "Kashmir", "--data-dir", str(data)]).exit_code
+        == 0
+    )
+    out = tmp_path / "out"
+    result = runner.invoke(
+        app,
+        [
+            "memory",
+            "--recipe",
+            "album_story",
+            "--key",
+            "Kashmir",
+            "--out",
+            str(out),
+            "--no-mp4",
+            "--data-dir",
+            str(data),
+        ],
+    )
+    assert not out.exists() or list(out.iterdir()) == []
+    assert "dismissed" in result.output.lower()
+
+
 def test_a_merged_album_is_reported_not_silent(tmp_path):
     """A silent merge is the same defect as a silent drop: the user goes
     looking for `Christmas 2025`, finds `Christmas`, and has no way to know

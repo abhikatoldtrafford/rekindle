@@ -252,12 +252,24 @@ def memory_cmd(
         else:
             offers = engine.all_offers(index)
 
+        # Naming ONE memory overrides the cooldown. The cooldown exists to
+        # stop `--auto` and an unfiltered build from showing the same memory
+        # again next week; `rekindle memory --recipe X --key Y` is a person
+        # pointing at one memory and saying build this, and answering
+        # "1 in cooldown" is the tool second-guessing an explicit instruction
+        # with no way to override it. Found while trying to re-render a memory
+        # after changing the code that builds it, which is the commonest
+        # reason to type that command at all.
+        #
+        # DISMISSAL still applies. "Never show me this again" is deliberate
+        # and permanent, and `rekindle undismiss` is how it is taken back.
+        named = bool(recipe and key)
         specs, report = engine.build_all(
             index,
             offers,
             max_shots=max_shots,
             dismissed=state.dismissed_memory_ids(),
-            cooling=state.cooling(),
+            cooling=frozenset() if named else state.cooling(),
             limit=limit,
         )
         if not specs:
