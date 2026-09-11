@@ -230,6 +230,50 @@ def test_the_cli_tells_the_music_layer_which_memory_it_is_rendering(tmp_path, mo
     )
 
 
+def test_a_merged_album_is_reported_not_silent(tmp_path):
+    """A silent merge is the same defect as a silent drop: the user goes
+    looking for `Christmas 2025`, finds `Christmas`, and has no way to know
+    why. The line also names the override, because "you can change this" is
+    useless without "here is what to type"."""
+    data = tmp_path / "data"
+    photos = [
+        _photo(
+            "c1",
+            _jpeg(tmp_path / "lib" / "c1.jpg"),
+            local=datetime(2015, 12, 25, 9, 0),
+            albums=["Christmas 15"],
+        ),
+        _photo(
+            "c2",
+            _jpeg(tmp_path / "lib" / "c2.jpg"),
+            local=datetime(2025, 12, 25, 9, 0),
+            albums=["Christmas 2025"],
+        ),
+        _photo(
+            "c3",
+            _jpeg(tmp_path / "lib" / "c3.jpg"),
+            local=datetime(2025, 12, 26, 9, 0),
+            albums=["Christmas 2025"],
+        ),
+    ]
+    with PhotoStore(data / "rekindle.sqlite") as store:
+        store.upsert_many(photos)
+
+    result = runner.invoke(app, ["memories", "--data-dir", str(data)])
+    assert result.exit_code == 0, result.output
+    flat = " ".join(result.output.split())
+    assert "Albums merged as 'Christmas'" in flat, result.output
+    assert "album_aliases" in flat
+    assert "exclusions.toml" in flat
+
+
+def test_nothing_is_said_when_no_album_was_merged(tmp_path):
+    data = _library(tmp_path, album="Kashmir")
+    result = runner.invoke(app, ["memories", "--data-dir", str(data)])
+    assert result.exit_code == 0
+    assert "merged" not in result.output.lower()
+
+
 def test_recipe_alone_builds_only_that_recipe(tmp_path):
     """`rekindle memory --recipe on_this_month` used to fall through to "build
     anything" and cheerfully render album stories - the command doing

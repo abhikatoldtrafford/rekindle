@@ -303,7 +303,16 @@ These entries were carried into M2 as open questions. Each is now closed.
   named wrongly in a title someone is shown is worse than a description that
   is merely dull. An `album_aliases` config would fix the naming, and is the
   same mechanism the entry below asks for.
-- **Album merging is manual.** `Leh Ladakh` / `ladakh` and the three Kashmir
+- **Album merging is manual, except for a year on the end.** `Christmas 2025`
+  and `Christmas 15` are now one `Christmas` album, because stripping a
+  year-like suffix is the one merge no metadata can contradict. It is applied
+  ONLY where two names share a family: measured on this library, stripping the
+  suffix everywhere merges exactly one pair and renames seven more albums that
+  have no partner (`Durga Puja 25` to `Durga Puja`, `Puri 25` to `Puri`), and
+  each of those renames changes a memory id so every dismissal of one stops
+  applying. The merge is printed by `rekindle memories` and overridable with
+  `album_aliases`.
+- **Everything else about album merging is manual.** `Leh Ladakh` / `ladakh` and the three Kashmir
   albums are each one trip, but no metadata says so, and `Diwali 25` /
   `Diwali Kali Puja 22` are different years under an equally similar pair of
   names. An `album_aliases` config table lets the user say so; the default

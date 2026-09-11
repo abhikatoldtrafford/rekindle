@@ -155,6 +155,7 @@ def memories_cmd(data_dir: Path, recipe_filter: str | None, limit: int) -> None:
                 table.add_row(recipe.name, f"[dim]... {len(offers) - limit} more[/dim]", "", "", "")
         console.print(table)
         console.print(f"\n{shown} shown. Render one with: rekindle memory --recipe R --key K")
+        _render_album_merges(index)
         _render_exclusions(index)
     finally:
         store.close()
@@ -166,6 +167,27 @@ def _render_exclusions(index: MemoryIndex) -> None:
         return
     parts = ", ".join(f"{n} {reason}" for reason, n in sorted(report.by_reason.items()))
     console.print(f"[dim]{report.excluded} photos withheld by the guardrails: {parts}[/dim]")
+
+
+def _render_album_merges(index: MemoryIndex) -> None:
+    """Say which albums were treated as one, because it changes memory ids.
+
+    A silent merge is the same defect as a silent drop: the user goes looking
+    for `Christmas 2025`, finds `Christmas`, and has no way to know why. The
+    override is named here so that whoever reads the line knows what to type.
+    """
+    merges = getattr(index, "album_merges", {})
+    if not merges:
+        return
+    targets: dict[str, list[str]] = {}
+    for name, target in sorted(merges.items()):
+        targets.setdefault(target, []).append(name)
+    for target, names in sorted(targets.items()):
+        joined = ", ".join(repr(n) for n in names)
+        console.print(
+            f"[dim]Albums merged as {target!r}: {joined} - override with "
+            f"album_aliases in exclusions.toml[/dim]"
+        )
 
 
 def memory_cmd(

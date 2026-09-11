@@ -25,6 +25,7 @@ from datetime import datetime
 from pathlib import Path
 
 from rekindle.db import PhotoStore
+from rekindle.memory import albums
 from rekindle.memory.policy import ExclusionPolicy, is_public_safe
 from rekindle.models import MediaType, Photo
 
@@ -113,7 +114,14 @@ class MemoryIndex:
         self._by_album: dict[str, list[Photo]] = defaultdict(list)
         self._by_cell: dict[tuple[float, float], list[Photo]] = defaultdict(list)
 
-        aliases = self._policy.album_aliases
+        aliases = dict(self._merged_year_suffixes())
+        # An explicit alias always wins over the automatic rule.
+        aliases.update(self._policy.album_aliases)
+        self.album_merges = {
+            name: target
+            for name, target in aliases.items()
+            if name not in self._policy.album_aliases
+        }
         for photo in self._photos:
             local = photo.meta.taken_at_local
             # `deny_reason` already rejected a dateless photo, so this is a
@@ -138,6 +146,42 @@ class MemoryIndex:
 
             if photo.meta.gps is not None:
                 self._by_cell[gps_cell(photo.meta.gps.lat, photo.meta.gps.lon)].append(photo)
+
+    def _merged_year_suffixes(self) -> dict[str, str]:
+        """Album names that are the same album with a year on the end.
+
+        `Christmas 2025` and `Christmas 15` are one recurring event that
+        `album_story` otherwise publishes as two unrelated memories, one of
+        eight photos and one of eleven.
+
+        **It merges only where it actually merges.** Stripping the suffix
+        everywhere is the obvious version and measured on the reference
+        library it is a bad trade: it merges exactly one family and RENAMES
+        seven more albums that have no partner - `Durga Puja 25` to
+        `Durga Puja`, `Puri 25` to `Puri`. Each of those renames changes a
+        memory id, so every dismissal of one stops applying, and it buys
+        nothing. A name the user wrote is left exactly as they wrote it unless
+        another name shares its family.
+
+        Conservative in the other direction too: the rule strips a suffix and
+        never matches on a prefix or a shared word, so `Diwali 25` and
+        `Diwali Kali Puja 22` stay apart. `Leh Ladakh` and `ladakh` are one
+        trip and are NOT merged, because no honest automatic rule separates
+        that from two different places with similar names - that case is what
+        `album_aliases` in `exclusions.toml` is for.
+        """
+        families: dict[str, set[str]] = {}
+        for photo in self._photos:
+            for album in photo.albums:
+                if albums.presentable(album):
+                    families.setdefault(albums.family(album), set()).add(album)
+        return {
+            name: family
+            for family, names in families.items()
+            if len(names) > 1
+            for name in names
+            if name != family
+        }
 
     # ---- queries. Every one reads self._photos or an index derived from it.
 

@@ -291,6 +291,86 @@ def test_album_aliases_merge_two_spellings_when_configured(tmp_path):
         store.close()
 
 
+def test_the_same_album_with_two_different_years_becomes_one(tmp_path):
+    """`Christmas 2025` and `Christmas 15` are one recurring event that
+    `album_story` otherwise publishes as two unrelated memories, one of eight
+    photos and one of eleven. Measured on the reference library, this is the
+    only pair the rule merges."""
+    photos = [_p("a", albums=["Christmas 2025"]), _p("b", albums=["Christmas 15"])]
+    store = _store(tmp_path, photos)
+    try:
+        index = MemoryIndex.open(store)
+        assert len(index.by_album("Christmas")) == 2
+        assert index.by_album("Christmas 2025") == []
+        assert index.album_merges == {
+            "Christmas 15": "Christmas",
+            "Christmas 2025": "Christmas",
+        }
+    finally:
+        store.close()
+
+
+def test_an_album_with_no_partner_keeps_the_name_the_user_wrote(tmp_path):
+    """The measured reason the rule only merges where it merges. Stripping the
+    suffix everywhere renames seven albums on the reference library -
+    `Durga Puja 25` to `Durga Puja`, `Puri 25` to `Puri` - and merges none of
+    them. Each rename changes a memory id, so every dismissal of one stops
+    applying, and it buys nothing."""
+    photos = [_p("a", albums=["Durga Puja 25"]), _p("b", albums=["Puri 25"])]
+    store = _store(tmp_path, photos)
+    try:
+        index = MemoryIndex.open(store)
+        assert len(index.by_album("Durga Puja 25")) == 1
+        assert index.by_album("Durga Puja") == []
+        assert index.album_merges == {}
+    finally:
+        store.close()
+
+
+def test_related_but_distinct_festivals_are_not_merged(tmp_path):
+    """`Diwali 25` and `Diwali Kali Puja 22` are different years of
+    related-but-distinct festivals. A shared-prefix or shared-word rule merges
+    them; a suffix rule does not, and conservative beats clever."""
+    photos = [_p("a", albums=["Diwali 25"]), _p("b", albums=["Diwali Kali Puja 22"])]
+    store = _store(tmp_path, photos)
+    try:
+        index = MemoryIndex.open(store)
+        assert index.album_merges == {}
+        assert len(index.by_album("Diwali 25")) == 1
+        assert len(index.by_album("Diwali Kali Puja 22")) == 1
+    finally:
+        store.close()
+
+
+def test_googles_year_folders_are_never_merged_with_each_other(tmp_path):
+    """`Photos from 2019` and `Photos from 2020` share a family under any
+    suffix rule, and merging them would produce one album called `Photos from`
+    holding the entire library."""
+    photos = [_p("a", albums=["Photos from 2019"]), _p("b", albums=["Photos from 2020"])]
+    store = _store(tmp_path, photos)
+    try:
+        index = MemoryIndex.open(store)
+        assert index.album_merges == {}
+        assert index.by_album("Photos from") == []
+    finally:
+        store.close()
+
+
+def test_an_explicit_alias_beats_the_automatic_rule(tmp_path):
+    """The user always wins. `album_aliases` is the documented override and it
+    must be able to undo, not just extend, what the automatic rule did."""
+    photos = [_p("a", albums=["Christmas 2025"]), _p("b", albums=["Christmas 15"])]
+    store = _store(tmp_path, photos)
+    try:
+        index = MemoryIndex.open(
+            store, ExclusionPolicy(album_aliases={"Christmas 15": "Christmas 15"})
+        )
+        assert len(index.by_album("Christmas 15")) == 1
+        assert len(index.by_album("Christmas")) == 1
+    finally:
+        store.close()
+
+
 def test_earliest_and_latest_break_ties_on_file_hash(tmp_path):
     """1,430 timestamps in this library are shared by more than one photo, so
     a bare date key is not a total order."""
