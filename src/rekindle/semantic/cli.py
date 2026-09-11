@@ -21,6 +21,7 @@ from rich.console import Console
 from rich.table import Table
 
 from rekindle.semantic.availability import SemanticUnavailable
+from rekindle.semantic.embed import PREFETCH_BATCHES
 
 #: Exit code for "the optional dependency or the model is not here". Distinct
 #: from 2 ("you pointed me at the wrong thing"), because a wrapper script
@@ -263,6 +264,14 @@ def semantic_embed(
     device: DeviceOpt = "auto",
     batch: Annotated[int, typer.Option("--batch", help="Images per forward pass.")] = 32,
     workers: Annotated[int, typer.Option("--workers", help="JPEG decode threads.")] = 6,
+    prefetch: Annotated[
+        int,
+        typer.Option(
+            "--prefetch",
+            help="Batches decoded+preprocessed ahead of the device. "
+            "This is the throughput knob; --batch is not.",
+        ),
+    ] = PREFETCH_BATCHES,
     limit: Annotated[int | None, typer.Option("--limit", help="Stop after N new photos.")] = None,
     include_archived: Annotated[
         bool, typer.Option("--include-archived", help="Embed archived photos too.")
@@ -308,6 +317,7 @@ def semantic_embed(
                 store,
                 batch_size=batch,
                 workers=workers,
+                prefetch=prefetch,
                 target_px=spec.image_size,
                 limit=limit,
                 progress=tick,
