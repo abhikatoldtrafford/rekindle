@@ -63,9 +63,19 @@ CREATE TABLE IF NOT EXISTS photos (
     sidecar_match TEXT NOT NULL DEFAULT 'none'
 );
 
--- `paths` is a JSON blob and therefore unqueryable. The enricher must look a
--- photo up by filename 20,000 times; without this table that is a full table
--- scan per lookup.
+-- `paths` is a JSON blob and therefore unqueryable, so this table exists to
+-- make "which photo has a path named X?" answerable in SQL.
+--
+-- MAINTAINED BUT NOT YET READ BY ANY PRODUCTION CODE PATH. The claim this
+-- comment used to make - that the enricher needs it 20,000 times - is false:
+-- `TakeoutEnricher.enrich()` materialises `list(store.iter_photos())` once
+-- and builds its lookups in memory, and `hashes_for_filename` below has no
+-- caller outside the tests. Every `_insert` still pays for it (roughly 19k
+-- deletes and 24k inserts per enrich run on the reference export). Kept
+-- deliberately for one more milestone: dropping it is a v3 schema migration,
+-- and shipping a migration to delete infrastructure one milestone after
+-- adding it is worse than carrying it. See docs/known-limitations.md - M2
+-- must either wire `resolve()` to it or drop it.
 CREATE TABLE IF NOT EXISTS photo_paths (
     file_hash TEXT NOT NULL,
     path      TEXT NOT NULL,

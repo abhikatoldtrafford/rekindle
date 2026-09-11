@@ -1,4 +1,4 @@
-# Known limitations and deferred work (M0)
+# Known limitations and deferred work
 
 Every item here was raised by a code reviewer during M0's implementation, then
 triaged and consciously deferred. None is a correctness bug in shipped
@@ -73,7 +73,7 @@ XMP still has no real-world coverage. Takeout now does, via
 
 ## Fixed during M1, recorded so they are not reintroduced
 
-*These four bugs were found and fixed during M1 (the Takeout enrichment
+*These five bugs were found and fixed during M1 (the Takeout enrichment
 milestone this document otherwise predates), not M0 - the "Fixed during M0"
 heading above already means something specific (M0 task numbers T2-T10), so
 these get their own heading rather than being misfiled under it.*
@@ -114,6 +114,44 @@ does not exist.
 Today's risk is nil: there is no memory engine, so nothing can surface a person
 unprompted. **The exclusion list must land before anything auto-triggers.** This
 is recorded so the ordering stays deliberate rather than accidental.
+
+## Carried into M2: `photo_paths` is written on every run and read by nobody
+
+The `photo_paths` table, its `idx_photo_paths_name` index and
+`PhotoStore.hashes_for_filename` have **zero production consumers**.
+`TakeoutEnricher.enrich()` materialises `list(store.iter_photos())` once and
+builds its lookups in memory; the only callers of `hashes_for_filename` are
+tests. The schema comment that justified the table — "the enricher must look a
+photo up by filename 20,000 times" — was simply false, and has been corrected
+in place.
+
+It still costs roughly **19k deletes and 24k inserts per `enrich` run** on the
+reference export (`_insert` clears and rewrites a photo's rows every time),
+for no current reader.
+
+It is deliberately **not** removed here: deleting it is a v3 schema migration,
+and shipping a second migration to delete infrastructure one milestone after
+adding it is worse than carrying it one more milestone. **M2 must either wire
+`resolve()` to it or drop it** — carrying it a third milestone is not the
+intent of this entry.
+
+## Carried into M2: `metadata_conflict` is one boolean for two causes
+
+`Photo.metadata_conflict` is set by two different comparisons:
+`models.merge_meta` raises it when two sightings of the same bytes disagree on
+a real capture date **or carry different non-empty descriptions**, and
+`enrich.apply_sidecar` raises it when Google's `photoTakenTime` disagrees with
+the displaced EXIF instant.
+
+M1 made the enrichment verdict **retractable** — a date the user corrects in
+Google Photos now clears the flag, where `or` had made it permanent. Because
+there is one boolean and no record of which comparison set it, that recompute
+also clears a *description* conflict `merge_meta` had raised on a photo
+enrichment then dates. The window is narrow (it needs two copies of one file
+carrying different XMP descriptions, and 0 rows on the reference export have
+any XMP description at all) and the alternative — never retracting — was the
+worse bug. **M2 should split the flag by cause** rather than widening either
+side of this trade.
 
 ## Album collision detection is metadata-only, not folder-name-complete
 

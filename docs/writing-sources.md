@@ -52,21 +52,45 @@ and the report is built as you go.
 ### What a `Photo` carries
 
 `Photo` and `PhotoMeta` are in
-[`src/rekindle/models.py`](../src/rekindle/models.py). Today: `file_hash`,
-`paths`, `media_type`, `first_seen`/`last_seen`, `albums`, `edited_of`,
-`source`, `metadata_conflict`, and a `PhotoMeta` of `taken_at_utc`,
-`taken_at_local`, `tz_source`, `gps`, `people`, `face_regions`, `keywords`,
-`description`, `favorite`, `camera_make`, `camera_model`, `width`, `height`.
+[`src/rekindle/models.py`](../src/rekindle/models.py). Today `Photo` carries
+`file_hash`, `paths`, `media_type`, `first_seen`/`last_seen`, `albums`,
+`edited_of`, `source`, `metadata_conflict` and `sidecar_match`; its
+`PhotoMeta` carries `taken_at_utc`, `taken_at_local`, `tz_source`, `gps`,
+`people`, `face_regions`, `keywords`, `description`, `favorite`,
+`camera_make`, `camera_model`, `width`, `height`, `exif_taken_at_utc`,
+`takeout_people`, `archived` and `trashed`.
+
+Keep this list current, and keep `models.merge_meta` current with it.
+`merge_meta` builds a new record from an explicit field list, so a field you
+add to `PhotoMeta` but not to `merge_meta` is silently destroyed by the next
+`rekindle index` — a real M1 bug, recorded in
+[known-limitations.md](known-limitations.md).
 
 Set `source=self.name` explicitly. It is what lets a later source enrich rows a
 different source wrote, and it cannot be added retroactively without a schema
 migration that does not exist.
 
+### Recording match confidence: `Photo.sidecar_match`
+
+`sidecar_match` **shipped in M1**. It is a `NOT NULL` column on **`Photo`**
+(not `PhotoMeta`), `rekindle enrich` writes it on every row it touches, and
+`rekindle doctor --from-index` renders it. It has exactly four states:
+
+- `"exact"` — a sidecar was resolved for this photo and applied.
+- `"ambiguous"` — candidates disagreed, or another photo had an equal claim,
+  and enrichment was **refused**. Never guess instead.
+- `"inherited"` — this photo had no sidecar of its own; its metadata was
+  copied from an `-edited` original or a motion-photo still
+  (`enrich.takeout.propagate_to_derivatives`). Never `"exact"`: it did not
+  itself match a sidecar.
+- `"none"` — no sidecar, or enrichment has never run. Tell those two apart by
+  the `enriched_at` key in the `meta` table, **not** by this field.
+
+`"exact"` and `"ambiguous"` are *earned* — the photo's own resolution ran to a
+decision. A later pass must not overwrite either.
+
 **Planned, not yet present** — do not write code against these:
 
-- `PhotoMeta.sidecar_match`, the confidence tier described under "Record
-  confidence" below. Until it lands, a match you are unsure of should not be
-  recorded at all.
 - `source_id`, for formats with stable native IDs.
 - Any `RawItem` type. There isn't one; `scan` yields `Photo` records directly.
 
@@ -97,9 +121,10 @@ two folders read as two problems.
 **Record confidence, not just values.** If you matched metadata to a file by
 guessing, say so. This exists because aggressive metadata matching in a
 well-known Takeout tool produced roughly a third of its GPS pointing at the
-wrong place — silently. The `sidecar_match` tier that will carry this is not
-implemented yet, so for now: if you cannot justify a match, drop the metadata
-and count it.
+wrong place — silently. `Photo.sidecar_match` (above) is the field that
+carries this, and it is shipped: set it on every row you touch. If you cannot
+justify a match, record `"ambiguous"`, drop the metadata, and count the
+refusal in your report.
 
 **Never invent a value to stand in for a broken one.** A damaged EXIF rational
 must reject the whole coordinate, not contribute a zero to it. A missing face
