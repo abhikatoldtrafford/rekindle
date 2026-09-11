@@ -18,11 +18,51 @@ dependencies = [
 [project.optional-dependencies]
 heic = ["pillow-heif>=1.7.0"]
 
+# Semantic features (embeddings, search, scene clusters, aesthetics, the face
+# gate). NEITHER extra is installed by `uv sync`, and CI never installs them:
+# every semantic feature degrades to a message naming the command to run.
+#
+# Two extras, not one, because the split is real: `semantic` is ~120 MB of
+# ONNX runtime and numpy and runs everything on CPU; `semantic-gpu` adds 2.5 GB
+# of torch for the CUDA path. A contributor who wants to run the tests or try
+# a search does not need the second.
+semantic = [
+    "numpy>=2.1",
+    "onnxruntime>=1.20",
+    "huggingface-hub>=0.26",
+    "tokenizers>=0.20",
+]
+semantic-gpu = [
+    "numpy>=2.1",
+    "huggingface-hub>=0.26",
+    "torch>=2.6",
+    "transformers>=4.45",
+]
+
 [project.scripts]
 rekindle = "rekindle.cli:app"
 
 [dependency-groups]
 dev = ["pytest>=8.3.0", "pytest-cov>=6.0.0", "ruff>=0.8.0"]
+
+# PyPI's Windows torch wheel is CPU-ONLY: `pip install torch` on Windows gives
+# you a build whose torch.version.cuda is None, and the only symptom is that
+# embedding runs two orders of magnitude slower. The CUDA wheels live on
+# PyTorch's own index. `explicit = true` means this index is consulted ONLY for
+# packages mapped to it below, so adding it cannot change how any other
+# dependency resolves.
+#
+# Restricted to Windows and Linux by marker: there are no CUDA wheels for macOS
+# at all, and on macOS the PyPI wheel already has Metal support.
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu126", marker = "sys_platform == 'win32' or sys_platform == 'linux'" },
+]
 
 [build-system]
 requires = ["hatchling"]
