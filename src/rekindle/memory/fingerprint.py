@@ -31,9 +31,10 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PIL import Image, ImageChops, ImageFilter, ImageOps, ImageStat
+from PIL import Image, ImageChops, ImageFilter, ImageStat
 
 from rekindle.db import FingerprintRow, PhotoStore
+from rekindle.meta.exif import open_upright
 from rekindle.models import MediaType, Photo
 
 # The hash reads an 8x8 grid of horizontal gradients, so it needs 9 columns.
@@ -378,32 +379,27 @@ def fingerprint_file(path: Path) -> Fingerprint:
     what stops the next run retrying it forever.
     """
     try:
-        with Image.open(path) as im:
-            # draft() is a no-op on formats that do not support it, so it is
-            # safe to call unconditionally; on JPEG it is the whole speedup.
-            im.draft("RGB", _DRAFT)
-            im.load()
-            # ORIENTATION FIRST. Everything below measures the image a viewer
-            # sees, not the bytes on disk: a phone stores a portrait photo as
-            # landscape pixels plus a tag, so measuring before transposing
-            # classifies it as landscape and sizes the canvas wrongly. It also
-            # REPAIRS the index - M0 stored the raw size, leaving ~2,475 rows
-            # with width and height swapped (see meta.exif.read_exif).
-            #
-            # draft() may already have scaled the image down, so `size` here
-            # is NOT the native resolution; `_native_size` re-reads that from
-            # the header, which is what the resolution floor needs.
-            upright = ImageOps.exif_transpose(im) or im
-            width, height = _native_size(path, upright)
-            return Fingerprint(
-                phash=dhash(upright),
-                sharpness=sharpness(upright),
-                brightness=brightness(upright),
-                colour=colour_signature(upright),
-                width=width,
-                height=height,
-                error=None,
-            )
+        # ORIENTATION FIRST. Everything below measures the image a viewer
+        # sees, not the bytes on disk: a phone stores a portrait photo as
+        # landscape pixels plus a tag, so measuring before transposing
+        # classifies it as landscape and sizes the canvas wrongly. It also
+        # REPAIRS the index - M0 stored the raw size, leaving ~2,475 rows
+        # with width and height swapped (see meta.exif.read_exif).
+        #
+        # draft() may already have scaled the image down, so `size` here is
+        # NOT the native resolution; `_native_size` re-reads that from the
+        # header, which is what the resolution floor needs.
+        upright = open_upright(path, draft=_DRAFT)
+        width, height = _native_size(path, upright)
+        return Fingerprint(
+            phash=dhash(upright),
+            sharpness=sharpness(upright),
+            brightness=brightness(upright),
+            colour=colour_signature(upright),
+            width=width,
+            height=height,
+            error=None,
+        )
     except FileNotFoundError:
         return Fingerprint(None, None, ERR_MISSING)
     except OSError:

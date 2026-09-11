@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from PIL import Image
+from PIL import Image, ImageOps
 
 from rekindle.models import Gps
 
@@ -33,6 +33,49 @@ _ORIENTATION = 0x0112
 # or without a mirror. 1/2 are upright, 3/4 are 180 degrees - none of those
 # swap width and height.
 _SWAPS_AXES = frozenset({5, 6, 7, 8})
+
+
+def open_upright(path: Path, *, draft: tuple[int, int] | None = None) -> Image.Image:
+    """Decode `path` with its EXIF orientation ALREADY APPLIED.
+
+    **This is the one place pixels are turned the right way up.** Every
+    consumer of image PIXELS goes through it - the renderer, the fingerprint
+    pass, the embedder and the face gate - so that "upright" means the same
+    thing to all four. The stored `width`/`height` in the index are
+    post-rotation too (see `read_exif` below), which is what makes a canvas
+    sized from the index and a frame drawn from the file agree.
+
+    The rule was already understood here and in the two `memory` modules, and
+    was still missing from both `semantic` decode sites, where it cost the
+    face gate 14.5% of its verdicts on rotated photos. A shared function is
+    the only version of this rule that a new decode site inherits by default.
+
+    `draft` is an optional decode-size hint, given in the axis order of the
+    UPRIGHT image - the same order a caller's canvas is in. It is transposed
+    back into the file's raw axis order before being handed to Pillow, which
+    measures the pixels on disk and knows nothing about the tag. Passing the
+    upright order straight through compares width against height on rotated
+    photos, which can pick a decode scale SMALLER than the caller asked for
+    and hand back an image that then has to be upscaled.
+
+    Never applies the tag twice, and never raises anything `Image.open` would
+    not: callers keep their existing error handling.
+    """
+    with Image.open(path) as im:
+        if draft is not None:
+            target = draft
+            if im.getexif().get(_ORIENTATION) in _SWAPS_AXES:
+                target = (draft[1], draft[0])
+            # A no-op on every format but JPEG, so it is safe unconditionally.
+            im.draft("RGB", target)
+        upright = ImageOps.exif_transpose(im)
+        if upright is None:  # pragma: no cover - defensive; Pillow returns a copy
+            upright = im.copy()
+        # Force the decode while the file is still open. `exif_transpose`
+        # returns a detached copy, but loading here means a truncated file
+        # raises OSError HERE, inside the caller's try, rather than later.
+        upright.load()
+        return upright
 
 
 @dataclass(frozen=True)

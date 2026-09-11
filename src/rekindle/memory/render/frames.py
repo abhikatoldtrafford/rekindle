@@ -15,10 +15,11 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PIL import Image, ImageDraw, ImageFilter, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 from rekindle.memory.composition import FIT_PAD, plan_placement
 from rekindle.memory.spec import MemorySpec
+from rekindle.meta.exif import open_upright
 from rekindle.models import Photo
 
 BACKGROUND = (0, 0, 0)
@@ -111,18 +112,15 @@ def fit_photo(path: Path, canvas: tuple[int, int]) -> tuple[Image.Image, str]:
     user how many shots were padded - a memory where most shots are padded is
     telling them something real about that period of their library.
     """
-    with Image.open(path) as im:
-        # Hint the JPEG decoder, but never below the canvas: draft() scales in
-        # powers of two and asking for a small size on a large canvas would
-        # throw away the resolution this whole change exists to keep.
-        im.draft("RGB", canvas)
-        # ORIENTATION FIRST, always. A phone stores a portrait photo as
-        # landscape pixels plus a tag; skipping this renders it on its side.
-        upright = ImageOps.exif_transpose(im) or im
-        rgb = upright.convert("RGB")
-        target, mode = plan_placement(rgb.size, canvas)
-        resized = rgb.resize(target, Image.Resampling.LANCZOS)
-        backdrop = _backdrop(rgb, canvas) if mode == FIT_PAD else None
+    # ORIENTATION FIRST, always. A phone stores a portrait photo as landscape
+    # pixels plus a tag; skipping this renders it on its side. `open_upright`
+    # also hints the JPEG decoder with the canvas - but never below it, since
+    # draft() scales in powers of two and asking for a small size on a large
+    # canvas would throw away the resolution this whole change exists to keep.
+    rgb = open_upright(path, draft=canvas).convert("RGB")
+    target, mode = plan_placement(rgb.size, canvas)
+    resized = rgb.resize(target, Image.Resampling.LANCZOS)
+    backdrop = _backdrop(rgb, canvas) if mode == FIT_PAD else None
 
     frame = backdrop if backdrop is not None else Image.new("RGB", canvas, BACKGROUND)
     frame.paste(resized, ((canvas[0] - target[0]) // 2, (canvas[1] - target[1]) // 2))

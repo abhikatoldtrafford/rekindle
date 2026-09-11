@@ -496,7 +496,7 @@ def _examine(
     ran and saw nothing" returns something other than ELIGIBLE, including
     both of the paths that mean "I could not look at it".
     """
-    from PIL import Image as PILImage
+    from rekindle.meta.exif import open_upright
 
     tagged = {p.casefold() for p in getattr(photo, "people", ())}
     if tagged - allowed:
@@ -508,15 +508,21 @@ def _examine(
     if path is None:
         return Detection(photo.file_hash, photo.path, (), Verdict.ERROR, error="file not found")
     try:
-        with PILImage.open(path) as im:
-            im.draft("RGB", (detector.size * 2, detector.size * 2))
-            rgb = im.convert("RGB")
-            size = rgb.size
-            boxes, _ = detector.detect(
-                rgb,
-                detect_threshold=detect_threshold,
-                gate_threshold=gate_threshold,
-            )
+        # UPRIGHT, or the detector is looking at a photo lying on its side.
+        # A face detector is not rotation invariant and this is not a cosmetic
+        # difference: measured on 200 real orientation-5-8 photos, decoding
+        # without the transpose changed 14.5% of gate VERDICTS. 7% showed the
+        # detector no face at all where the upright image has one - the gate
+        # failing OPEN, which is the direction that publishes a stranger - and
+        # one frame scored ten faces sideways against zero upright, which is
+        # the gate rejecting a photograph for no reason.
+        rgb = open_upright(path, draft=(detector.size * 2, detector.size * 2)).convert("RGB")
+        size = rgb.size
+        boxes, _ = detector.detect(
+            rgb,
+            detect_threshold=detect_threshold,
+            gate_threshold=gate_threshold,
+        )
     except (OSError, ValueError, RuntimeError) as exc:
         return Detection(
             photo.file_hash,

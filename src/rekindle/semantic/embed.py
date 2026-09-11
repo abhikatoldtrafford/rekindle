@@ -144,21 +144,26 @@ class EmbedReport:
 
 
 def _decode(path: Path, target: int) -> Image:
-    """Open `path` as RGB, decoded no smaller than `target` on the short side.
+    """Open `path` UPRIGHT and as RGB, decoded no smaller than `target`.
 
-    `draft` mutates the image in place and only ever picks a scale whose
-    result is still at least as large as the requested size, so the subsequent
+    `draft` (inside `open_upright`) only ever picks a scale whose result is
+    still at least as large as the requested size, so the subsequent
     high-quality resize has the pixels it needs. It is the single biggest
     speed lever in this module.
-    """
-    from PIL import Image as PILImage
 
-    with PILImage.open(path) as im:
-        # A generous multiple of the target: draft rounds DOWN to a power-of-two
-        # scale, and asking for exactly `target` can land on a scale whose
-        # output is slightly smaller than the crop, which upsamples.
-        im.draft("RGB", (target * 2, target * 2))
-        return im.convert("RGB")
+    ORIENTATION IS PART OF THE DECODE, not a rendering concern. 2,503 of this
+    library's 18,363 images (13.6%) carry a 90/270-degree EXIF tag, and this
+    function used to hand every one of them to the encoder on its side: the
+    vector for a sideways photo has a median cosine of 0.935 against the
+    upright one, where two entirely unrelated photos sit at 0.553. The
+    aesthetic head reads those same vectors, so it inherited the error.
+    """
+    from rekindle.meta.exif import open_upright
+
+    # A generous multiple of the target: draft rounds DOWN to a power-of-two
+    # scale, and asking for exactly `target` can land on a scale whose output
+    # is slightly smaller than the crop, which upsamples.
+    return open_upright(path, draft=(target * 2, target * 2)).convert("RGB")
 
 
 def _batches(items: Sequence, size: int) -> Iterator[list]:
