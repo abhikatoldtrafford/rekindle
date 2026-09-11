@@ -187,6 +187,15 @@ def _burst(year: int, run: list[date], days: dict[date, int]) -> Burst:
 
 
 def _circular(a: int, b: int) -> int:
+    """Distance around the year, so late December is near early January.
+
+    365 even in a leap year, deliberately. The only value that differs is a
+    31 December burst in a leap year, whose day-of-year is 366: against a
+    centre near 1 January this still measures 0, and against a centre at 365
+    it measures 1 rather than 0. One day, on one day of one year in four, in a
+    measure whose window is +/-12 - and correcting it would mean carrying a
+    year into a function about seasons.
+    """
     gap = abs(a - b)
     return min(gap, 365 - gap)
 
@@ -207,7 +216,7 @@ def events(
     remaining = bursts(photos)
     found: list[RecurringEvent] = []
     while True:
-        best: tuple[tuple[int, int], int, list[Burst]] | None = None
+        best: tuple[tuple[int, int, int], int, list[Burst]] | None = None
         for centre in range(1, 366):
             near = [b for b in remaining if _circular(b.doy, centre) <= half_window]
             # One burst per year, the biggest: a year with four dense
