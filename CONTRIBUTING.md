@@ -94,6 +94,11 @@ REKINDLE_TAKEOUT_DIR="/path/to/Takeout/Google Photos" uv run pytest \
 Those tests skip without the variable, so CI never needs your photos. Never
 commit an export, or any file from one.
 
+Every genuine bug in the Takeout enrichment milestone was found this way and
+none by reading. If you want to know what that means in practice before writing
+a patch, [docs/decision-log-takeout-enrichment.md](docs/decision-log-takeout-enrichment.md)
+records the defects, the judgement calls and the testing discipline they led to.
+
 ## Pull requests
 
 Keep them focused, explain the why, and add tests. If you're planning something
