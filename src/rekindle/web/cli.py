@@ -9,6 +9,7 @@ would not be one.
 from __future__ import annotations
 
 import contextlib
+import threading
 import webbrowser
 from pathlib import Path
 
@@ -86,6 +87,11 @@ def ui_cmd(
             webbrowser.open(app.url())
 
     if not serve_forever:
+        # For a caller that wants to drive this server rather than block on it.
+        # The loop still RUNS: returning a bound-but-unserved socket would hand
+        # back something that looks alive - the OS accepts connections into the
+        # backlog - and answers nothing. The caller owns `shutdown()`.
+        threading.Thread(target=server.serve_forever, daemon=True).start()
         return server
     try:
         server.serve_forever()
