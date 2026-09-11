@@ -564,7 +564,6 @@ class RecurringEvent:
         chosen = chronological(recurring.photos_in(event, photos))
         if len(chosen) < MIN_SHOTS:
             return None
-        years = sorted(years_of(chosen))
         return Selection(
             photos=chosen,
             facts=_facts(chosen, title=self._title(event, photos, reserved), recipe=self.name),
@@ -573,7 +572,13 @@ class RecurringEvent:
             # memory of one year's festival is `album_story`, not this.
             stratify=strata.BY_YEAR,
             min_strata=2,
-            captions={p.file_hash: captions.anniversary_caption(p, years[-1]) for p in chosen},
+            # The FULL DATE, not `anniversary_caption`. That helper renders
+            # "14 years ago today", which is true for `on_this_day` and false
+            # here by up to three weeks - this recipe exists precisely because
+            # the date moves. The drift is also the interesting thing to show:
+            # 20 December 2009 next to 28 December 2021 says what the memory
+            # is about better than any phrasing could.
+            captions={p.file_hash: captions.date_caption(p) for p in chosen},
         )
 
     @staticmethod

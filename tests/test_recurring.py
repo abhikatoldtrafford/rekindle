@@ -463,6 +463,28 @@ def test_two_peaks_can_land_in_one_fortnight():
     assert events[0].key == events[1].key == "12-b"
 
 
+def test_the_captions_do_not_claim_the_photos_share_a_date(tmp_path):
+    """`anniversary_caption` renders "14 years ago today", which is true for
+    `on_this_day` and false here by up to three weeks - this recipe exists
+    because the date MOVES. The full date is used instead, which is both true
+    and the interesting thing to show."""
+    from rekindle.memory.recipes.registry import get
+
+    store, index = _index(tmp_path, _library(DURGA))
+    try:
+        recipe = get("recurring_event")
+        selection = recipe.select(index, recipe.offers(index)[0])
+    finally:
+        store.close()
+
+    captions = list(selection.captions.values())
+    assert captions
+    assert not any("today" in c for c in captions), captions
+    # ...and the drift is visible: more than one calendar day is named.
+    days = {c.split()[0] for c in captions if c}
+    assert len(days) > 1, captions
+
+
 def test_two_peaks_in_one_fortnight_do_not_offer_the_same_id_twice(tmp_path):
     """The key is quantised to a fortnight so that it survives the library
     growing, which means two peaks CAN land in one bucket. Offering both would
