@@ -101,7 +101,12 @@ uv run rekindle doctor ~/Pictures --from-index   # report on the stored index
 `enrich` requires `index` to have run first — it reads the database, not the
 filesystem, so photo rows must already exist.
 
-No `.env` needed unless you want the optional LLM narration.
+No `.env` needed. The optional GPT captions are off by default and, in
+testing against the reference library, **added very little** — the model
+mostly returns the deterministic caption unchanged, because it is given only a
+fact sheet and forbidden from asserting anything the facts do not support. The
+deterministic captions are the product; the flag exists for people who want to
+experiment. See [the caption layer](#optional-gpt-captions).
 
 ## How it works
 
@@ -126,6 +131,27 @@ a folder of photos
 Photo selection is **deterministic Python** — an LLM never picks your photos,
 and the whole v1 engine runs with no model, no network and no randomness. The
 same library produces the same memories, byte for byte.
+
+Each recipe also declares the dimension its memory is *about* — years for "on
+this day", months for a year in review, the album's own span for an album
+story — and slots are spread across it before quality ranking chooses within
+each period. Without that, selection collapses onto whichever week happened to
+photograph best.
+
+### Optional GPT captions
+
+`--captions gpt` rewrites the caption strings only. It is **off by default**,
+needs `OPENAI_API_KEY`, and sees **only a fact sheet** — dates, counts, names,
+albums and coordinates already derived from your index. Never the pixels, never
+a path, never your library. Every caption it returns is checked back against
+that fact sheet and rejected if it asserts a year or a name the facts do not
+contain.
+
+**It currently adds little.** Measured across five recipes, the model returned
+the existing deterministic caption verbatim in four of five cases. That is the
+prompt working as intended rather than a fault, but it means enabling this
+costs an API call for a change you will usually not see. Leave it off unless
+you are experimenting.
 
 ## Guardrails
 

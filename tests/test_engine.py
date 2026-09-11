@@ -5,6 +5,7 @@ REGISTERED RECIPE, via the registry, rather than against a hand-picked list -
 so a recipe added later cannot opt out of dedup, the cap, or the guardrails.
 """
 
+import collections
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
@@ -262,17 +263,49 @@ def test_the_score_is_a_documented_sum():
     assert engine.score(plain, 0.75) == 0.75
 
 
-def test_a_photo_with_people_outranks_one_without(tmp_path):
-    """People are what makes a memory a memory."""
-    photos = [_p(f"a{i}", local=datetime(2020, 5, i + 1), albums=["A"]) for i in range(5)]
+def test_a_photo_with_people_outranks_one_without_WITHIN_A_BUCKET(tmp_path):
+    """People are what makes a memory a memory.
+
+    Both groups share a single day, so they land in ONE stratum and ranking
+    alone decides. An earlier version of this test put them in different
+    months and asserted that the tagged ones swept every slot - which is
+    exactly the clustering the stratification fix removed, so it started
+    failing when the fix landed. Ranking now decides WITHIN a period; the
+    spread across periods is decided first, and `test_spread_beats_score...`
+    below pins that half.
+    """
+    photos = [_p(f"a{i}", local=datetime(2020, 5, 1, 9, i), albums=["A"]) for i in range(5)]
     photos += [
-        _p(f"p{i}", local=datetime(2020, 6, i + 1), albums=["A"], people=["Amy"]) for i in range(5)
+        _p(f"p{i}", local=datetime(2020, 5, 1, 14, i), albums=["A"], people=["Amy"])
+        for i in range(5)
     ]
     store, index = _index(tmp_path, photos)
     try:
         offer = REGISTRY["album_story"].offers(index)[0]
         spec = engine.build(index, offer, max_shots=5)
         assert all(s.file_hash.startswith("p") for s in spec.shots)
+    finally:
+        store.close()
+
+
+def test_spread_beats_score_across_buckets(tmp_path):
+    """The deliberate behaviour change. A weak period still gets a slot ahead
+    of a second slot for the strongest period - otherwise the highest-scoring
+    run sweeps the memory, which is what it used to do."""
+    photos = [
+        _p(f"weak{i}", local=datetime(2020, 5, i + 1), albums=["A"], sharp=1.9) for i in range(2)
+    ]
+    photos += [
+        _p(f"strong{i}", local=datetime(2021, 6, i + 1), albums=["A"], people=["Amy"], sharp=9.0)
+        for i in range(20)
+    ]
+    store, index = _index(tmp_path, photos)
+    try:
+        offer = REGISTRY["album_story"].offers(index)[0]
+        spec = engine.build(index, offer, max_shots=6)
+        years = collections.Counter(s.taken_at_local[:4] for s in spec.shots)
+        assert years["2020"] >= 1, "the weak period was swept away entirely"
+        assert years["2021"] > years["2020"], "the rich period lost its larger share"
     finally:
         store.close()
 
@@ -673,3 +706,184 @@ def test_a_registry_with_no_sharpness_at_all_still_ranks():
     and must not divide by zero."""
     photos = [_p(f"a{i}", sharp=None) for i in range(3)]
     assert len(engine._ranked(photos)) == 3
+
+
+# --------------------------------------------------------------------------
+# stratified selection
+#
+# The defect these pin: selection took top-N by quality score with no temporal
+# constraint, so shots clustered wherever the strongest-scoring run happened
+# to sit. Measured on the real library BEFORE the fix: 16 of 37 rendered
+# memories were confined to a single year and 10 to a single month -
+# `on_this_day:12-22` showed 24 shots all from 2019 while 2020 and 2022 had
+# photos available, and three `year_in_review` memories showed one month each.
+
+
+def _dominant_year_library(album="A"):
+    """The real `on_this_day:12-22` shape: one year with far more photos than
+    the others, plus two thin years that must still be represented.
+
+    The dominant year is also given GPS, which is worth +1 in the score - on
+    the real library that is exactly what let one year sweep every slot.
+    """
+    photos = []
+    for i in range(60):
+        photos.append(
+            _p(
+                f"big{i:02d}",
+                local=datetime(2019, 12, 22, 9, 0) + timedelta(minutes=i * 7),
+                albums=[album],
+                people=["Amy"],
+                gps=(22.5, 87.25),
+                sharp=9.0,
+            )
+        )
+    for i in range(3):
+        photos.append(
+            _p(f"mid{i}", local=datetime(2020, 12, 22, 10, i * 11), albums=[album], sharp=2.0)
+        )
+    for i in range(2):
+        photos.append(
+            _p(f"thin{i}", local=datetime(2022, 12, 22, 11, i * 13), albums=[album], sharp=1.9)
+        )
+    return photos
+
+
+def test_on_this_day_is_not_confined_to_one_year(tmp_path):
+    """An "on this day" showing a single year defeats the entire concept -
+    the point of the recipe is the SAME DATE ACROSS YEARS."""
+    store, index = _index(tmp_path, _dominant_year_library())
+    try:
+        offer = REGISTRY["on_this_day"].offers(index)[0]
+        spec = engine.build(index, offer, max_shots=12)
+        years = {s.taken_at_local[:4] for s in spec.shots}
+        assert years == {"2019", "2020", "2022"}, f"only {years} represented"
+    finally:
+        store.close()
+
+
+def test_every_year_with_photos_gets_at_least_one_slot(tmp_path):
+    """The floor: a year that has photos on that date must not be silently
+    absent while another contributes every shot."""
+    store, index = _index(tmp_path, _dominant_year_library())
+    try:
+        offer = REGISTRY["on_this_day"].offers(index)[0]
+        spec = engine.build(index, offer, max_shots=12)
+        by_year = collections.Counter(s.taken_at_local[:4] for s in spec.shots)
+        # Explicit per-year assertions. `min(by_year.values()) >= 1` looks
+        # like the same check and is VACUOUS: an absent year is simply not a
+        # key, so the minimum over the years that ARE present is always >= 1
+        # and the test passes on the very code it is meant to catch.
+        for year in ("2019", "2020", "2022"):
+            assert by_year[year] >= 1, f"{year} got no slot at all: {dict(by_year)}"
+        # ...and the rich year still gets the largest share.
+        assert by_year.most_common(1)[0][0] == "2019"
+    finally:
+        store.close()
+
+
+def test_a_richer_bucket_still_gets_more_slots(tmp_path):
+    """Proportional-with-a-floor, not an equal split: a bucket with two weak
+    photos must not get the same weight as one with sixty good ones."""
+    store, index = _index(tmp_path, _dominant_year_library())
+    try:
+        offer = REGISTRY["on_this_day"].offers(index)[0]
+        spec = engine.build(index, offer, max_shots=12)
+        by_year = collections.Counter(s.taken_at_local[:4] for s in spec.shots)
+        # The thin buckets must be PRESENT before "more than" means anything -
+        # otherwise `by_year["2020"]` is 0 by absence and the comparison holds
+        # against the unstratified code this test exists to reject.
+        assert by_year["2020"] >= 1 and by_year["2022"] >= 1
+        assert by_year["2019"] > by_year["2020"]
+        assert by_year["2019"] >= 6
+    finally:
+        store.close()
+
+
+def test_year_in_review_spreads_across_MONTHS(tmp_path):
+    """A "year in review" showing one month is not a year in review. Three of
+    them did exactly that on the real library."""
+    photos = []
+    for month in (1, 4, 7, 11):
+        count = 40 if month == 7 else 4
+        for i in range(count):
+            photos.append(
+                _p(
+                    f"m{month:02d}{i:02d}",
+                    local=datetime(2021, month, 1, 9, 0) + timedelta(hours=i * 5),
+                    people=["Amy"] if month == 7 else [],
+                    sharp=9.0 if month == 7 else 2.0,
+                )
+            )
+    store, index = _index(tmp_path, photos)
+    try:
+        offer = REGISTRY["year_in_review"].offers(index)[0]
+        spec = engine.build(index, offer, max_shots=12)
+        months = {s.taken_at_local[5:7] for s in spec.shots}
+        assert months == {"01", "04", "07", "11"}, f"only {months} represented"
+    finally:
+        store.close()
+
+
+def test_person_years_spreads_across_the_persons_span(tmp_path):
+    photos = []
+    for year in (2015, 2018, 2022, 2026):
+        count = 30 if year == 2018 else 3
+        for i in range(count):
+            photos.append(
+                _p(
+                    f"p{year}{i:02d}",
+                    local=datetime(year, 6, 1, 9, 0) + timedelta(days=i),
+                    people=["Avyan"],
+                    sharp=9.0 if year == 2018 else 2.0,
+                )
+            )
+    store, index = _index(tmp_path, photos)
+    try:
+        offer = next(o for o in REGISTRY["person_years"].offers(index) if o.key == "Avyan")
+        spec = engine.build(index, offer, max_shots=12)
+        years = {s.taken_at_local[:4] for s in spec.shots}
+        assert years == {"2015", "2018", "2022", "2026"}, f"only {years} represented"
+    finally:
+        store.close()
+
+
+def test_an_album_spanning_years_is_represented_across_them(tmp_path):
+    """The `Avyan` album spans that child's life and the memory showed one
+    August."""
+    photos = []
+    for year, month in [(2024, 3), (2024, 9), (2025, 2), (2025, 8)]:
+        count = 40 if (year, month) == (2025, 8) else 4
+        for i in range(count):
+            photos.append(
+                _p(
+                    f"a{year}{month:02d}{i:02d}",
+                    local=datetime(year, month, 1, 9, 0) + timedelta(hours=i * 3),
+                    albums=["Avyan"],
+                    people=["Avyan"] if (year, month) == (2025, 8) else [],
+                    sharp=9.0 if (year, month) == (2025, 8) else 2.0,
+                )
+            )
+    store, index = _index(tmp_path, photos)
+    try:
+        offer = REGISTRY["album_story"].offers(index)[0]
+        spec = engine.build(index, offer, max_shots=12)
+        periods = {s.taken_at_local[:7] for s in spec.shots}
+        assert len(periods) >= 4, f"only {periods} represented"
+    finally:
+        store.close()
+
+
+def test_then_and_now_is_NOT_stratified(tmp_path):
+    """The opposite case: it wants the extremes, not the spread. Stratifying
+    it would defeat the recipe."""
+    photos = [_p(f"a{i}", local=datetime(2015 + i, 5, 1), people=["Avyan"]) for i in range(9)]
+    store, index = _index(tmp_path, photos)
+    try:
+        offer = next(o for o in REGISTRY["then_and_now"].offers(index) if o.key == "person:Avyan")
+        spec = engine.build(index, offer)
+        assert len(spec.shots) == 2
+        assert spec.shots[0].taken_at_local[:4] == "2015"
+        assert spec.shots[1].taken_at_local[:4] == "2023"
+    finally:
+        store.close()

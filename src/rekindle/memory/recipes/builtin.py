@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 from datetime import timedelta
 
-from rekindle.memory import captions
+from rekindle.memory import captions, strata
 from rekindle.memory.composition import compose
 from rekindle.memory.index import MemoryIndex
 from rekindle.memory.recipes.base import (
@@ -96,6 +96,9 @@ class AlbumStory:
             photos=ordered,
             facts=_facts(ordered, title=offer.key, recipe=self.name, albums=(offer.key,)),
             ordering=CHRONOLOGICAL,
+            # Across the album's OWN span: days for a one-week trip, months
+            # for an album covering a child's first two years.
+            stratify=strata.BY_SPAN,
             captions={p.file_hash: captions.date_caption(p) for p in ordered},
         )
 
@@ -146,6 +149,10 @@ class OnThisDay:
             # captioned with how long ago it was - relative to the most
             # recent year in the memory, NOT to the wall clock, or the same
             # index would render differently tomorrow.
+            # BY YEAR, always. The entire concept of this recipe is the same
+            # calendar date ACROSS YEARS; a memory confined to one year is not
+            # a weaker version of it, it is a different thing.
+            stratify=strata.BY_YEAR,
             captions={p.file_hash: captions.anniversary_caption(p, years[-1]) for p in ordered},
         )
 
@@ -191,6 +198,9 @@ class OnThisMonth:
             photos=ordered,
             facts=_facts(ordered, title=offer.title, recipe=self.name),
             ordering=CHRONOLOGICAL,
+            # By year: this is the same MONTH across years, so the years are
+            # what must be represented.
+            stratify=strata.BY_YEAR,
             captions={p.file_hash: captions.year_caption(p) for p in ordered},
         )
 
@@ -234,6 +244,9 @@ class PersonYears:
             photos=ordered,
             facts=_facts(ordered, title=offer.title, recipe=self.name),
             ordering=CHRONOLOGICAL,
+            # "over the years" is a promise about the SPAN. One year of a
+            # person's life is not it.
+            stratify=strata.BY_YEAR,
             captions={p.file_hash: captions.year_caption(p) for p in ordered},
         )
 
@@ -281,6 +294,7 @@ class PairYears:
             photos=ordered,
             facts=_facts(ordered, title=offer.title, recipe=self.name),
             ordering=CHRONOLOGICAL,
+            stratify=strata.BY_YEAR,
             captions={p.file_hash: captions.year_caption(p) for p in ordered},
         )
 
@@ -372,6 +386,10 @@ class ThenAndNow:
             # Two IS the form. The engine's default floor of three would
             # reject every then-and-now ever built.
             min_shots=2,
+            # NOT stratified, deliberately. This recipe wants the EXTREMES of
+            # a span, not an even spread across it - spreading it would
+            # replace the two photos that are the whole point with a sample.
+            stratify=strata.NONE,
             captions={
                 first.file_hash: f"Then - {captions.month_year(first.meta.taken_at_local)}",
                 last.file_hash: f"Now - {captions.month_year(last.meta.taken_at_local)}",
@@ -417,6 +435,10 @@ class YearInReview:
             photos=ordered,
             facts=_facts(ordered, title=offer.title, recipe=self.name),
             ordering=CHRONOLOGICAL,
+            # Across the MONTHS of its one year. Everything here shares a
+            # year, so year-stratification would be a single bucket - and
+            # three of these showed one month each before it was fixed.
+            stratify=strata.BY_MONTH,
             captions={p.file_hash: captions.month_year(p.meta.taken_at_local) for p in ordered},
         )
 
@@ -486,5 +508,8 @@ class PlaceCluster:
             photos=ordered,
             facts=_facts(ordered, title=offer.title, recipe=self.name),
             ordering=CHRONOLOGICAL,
+            # Adaptive: the memory is about RETURNING to a place, so it must
+            # show the separate visits rather than the busiest one.
+            stratify=strata.BY_SPAN,
             captions={p.file_hash: captions.month_year(p.meta.taken_at_local) for p in ordered},
         )

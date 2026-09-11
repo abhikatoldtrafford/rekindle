@@ -282,6 +282,27 @@ def _render_build_report(report: engine.BuildReport) -> None:
     drops = describe_drops(report.composition)
     if drops:
         console.print(f"[dim]Composition guardrails dropped: {'; '.join(drops)}[/dim]")
+    for stratum in report.strata:
+        # A period that could not be represented is a CORRECT outcome when the
+        # quality gates emptied it - but a silent one looks exactly like the
+        # clustering bug that stratification fixed, so it is always named.
+        if stratum.keys_lost_to_gates:
+            shown = ", ".join(stratum.keys_lost_to_gates[:8])
+            more = (
+                f" (+{len(stratum.keys_lost_to_gates) - 8} more)"
+                if len(stratum.keys_lost_to_gates) > 8
+                else ""
+            )
+            console.print(
+                f"  [yellow]![/yellow] {stratum.memory_id}: no usable photos from "
+                f"{shown}{more} - every candidate there failed a guardrail."
+            )
+        if stratum.unslotted:
+            console.print(
+                f"  [dim]{stratum.memory_id}: {stratum.unslotted} further "
+                f"{stratum.dimension}s had photos but no room in "
+                f"{stratum.used} slots.[/dim]"
+            )
 
 
 def _render_one(

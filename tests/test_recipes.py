@@ -526,3 +526,71 @@ def test_then_and_now_offers_nothing_when_too_few_photos_are_showable(tmp_path):
         assert "person:Avyan" not in keys
     finally:
         store.close()
+
+
+def test_then_and_now_DECLARES_no_stratification(tmp_path):
+    """Pinned at the declaration, not through `build()`, and deliberately.
+
+    This recipe hands the engine exactly two photos, which the year-gap rule
+    guarantees are in different years - so ANY stratification of them is a
+    no-op today and a mutation flipping the declaration cannot be caught
+    end-to-end. The declaration still matters: it is the contract that says
+    this memory wants the EXTREMES of a span rather than a sample across it,
+    and it is what would break if the recipe were ever changed to hand over a
+    generous pool and rely on AS_GIVEN ordering.
+    """
+    from rekindle.memory import strata
+
+    photos = [_p(f"a{i}", local=datetime(2015 + i, 5, 1), people=["Avyan"]) for i in range(9)]
+    store, index = _index(tmp_path, photos)
+    try:
+        recipe = REGISTRY["then_and_now"]
+        offer = next(o for o in recipe.offers(index) if o.key == "person:Avyan")
+        selection = recipe.select(index, offer)
+        assert selection.stratify is strata.NONE
+    finally:
+        store.close()
+
+
+def test_every_other_recipe_declares_a_dimension(tmp_path):
+    """The mirror: a recipe that forgets to declare one falls back to the
+    BY_SPAN default, which is right for an album and wrong for `on_this_day`.
+    Asserted through the registry so a new recipe cannot quietly skip it."""
+    from rekindle.memory import strata
+
+    expected = {
+        "album_story": strata.BY_SPAN,
+        "on_this_day": strata.BY_YEAR,
+        "on_this_month": strata.BY_YEAR,
+        "person_years": strata.BY_YEAR,
+        "pair_years": strata.BY_YEAR,
+        "year_in_review": strata.BY_MONTH,
+        "place_cluster": strata.BY_SPAN,
+        "then_and_now": strata.NONE,
+    }
+    assert set(expected) == set(REGISTRY), "a recipe was added without a declared dimension"
+
+    photos = _across_years(
+        "a",
+        years=(2020, 2021, 2022),
+        per_year=12,
+        people=["Amy", "Bob"],
+        albums=["Kashmir"],
+        gps=(22.5, 87.25),
+    )
+    photos += [
+        _p(f"y{i}", local=datetime(2021, (i % 12) + 1, 1, 9), albums=["Kashmir"]) for i in range(40)
+    ]
+    store, index = _index(tmp_path, photos)
+    try:
+        for name, dimension in expected.items():
+            recipe = REGISTRY[name]
+            offers = recipe.offers(index)
+            if not offers:
+                continue
+            selection = recipe.select(index, offers[0])
+            if selection is None:
+                continue
+            assert selection.stratify == dimension, f"{name} declares {selection.stratify}"
+    finally:
+        store.close()

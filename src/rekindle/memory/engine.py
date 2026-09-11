@@ -26,6 +26,7 @@ from rekindle.memory.index import MemoryIndex
 from rekindle.memory.recipes import MIN_SHOTS, Offer, registered
 from rekindle.memory.recipes.base import AS_GIVEN, chronological
 from rekindle.memory.spec import MemorySpec, Shot, build_fact_sheet
+from rekindle.memory.strata import StratumReport, stratify
 from rekindle.models import Photo
 
 # How many photos reach a memory. 24 is already long for a montage - at 2.5
@@ -51,6 +52,11 @@ class BuildReport:
     skipped: dict[str, int] = field(default_factory=dict)
     composition: CompositionReport = field(default_factory=CompositionReport)
     deduped: int = 0
+    # One per memory built: how its shots were spread, and which periods could
+    # not be represented. A bucket emptied by the quality gates is a correct
+    # outcome, but a silent one would look exactly like the clustering bug
+    # this reporting was added alongside.
+    strata: list[StratumReport] = field(default_factory=list)
 
     def skip(self, reason: str) -> None:
         self.skipped[reason] = self.skipped.get(reason, 0) + 1
@@ -159,10 +165,23 @@ def build(
         report.skip(SKIP_TOO_FEW)
         return None
 
-    # 3. Rank, cap, then restore the recipe's ordering. Ranking first and
-    #    re-sorting after is what lets a chronological memory still contain
-    #    the best 24 of 500 photos rather than the first 24.
-    chosen = _ranked(kept)[:max_shots]
+    # 3. Spread, rank, cap, then restore the recipe's ordering.
+    #
+    #    Ranking first and re-sorting after is what lets a chronological
+    #    memory still contain the best 24 of 500 photos rather than the first
+    #    24. But ranking ALONE clustered every memory into whichever period
+    #    scored highest - 16 of 37 confined to a single year on the real
+    #    library - so slots are allocated across the dimension the recipe
+    #    declared and each bucket is then filled best-first.
+    chosen, stratum = stratify(
+        kept,
+        level=selection.stratify,
+        slots=max_shots,
+        rank=_ranked,
+        offered=selection.photos,
+    )
+    stratum.memory_id = offer.memory_id
+    report.strata.append(stratum)
     if selection.ordering != AS_GIVEN:
         chosen = chronological(chosen)
     else:

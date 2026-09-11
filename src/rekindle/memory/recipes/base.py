@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
+from rekindle.memory import strata
 from rekindle.memory.index import MemoryIndex
 from rekindle.memory.spec import FactSheet
 from rekindle.models import Photo
@@ -59,6 +60,14 @@ class Selection:
     # of three would otherwise reject every one of them - which it silently
     # did until a test caught it.
     min_shots: int | None = None
+    # The dimension this memory is ABOUT, across which its shots are spread.
+    # See memory.strata: without it, selection is top-N by quality and shots
+    # cluster wherever the strongest-scoring run happens to sit - which on the
+    # real library confined 16 of 37 memories to a single year.
+    #
+    # None means "do not stratify", which `then_and_now` needs: it wants the
+    # extremes, not the spread.
+    stratify: str | None = strata.BY_SPAN
 
 
 @runtime_checkable

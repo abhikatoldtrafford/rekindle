@@ -26,6 +26,8 @@ won and the disagreement is recorded in §14.
 19,480 photos          18,363 images · 1,117 videos
 19,318 live            162 archived · 0 trashed
 19,480 with a capture date (100%)
+24 distinct years      2000-2026 (the brief's table began at 2008 and omitted
+                       13 photos in 2000, 2003, 2005, 2006 and 2007)
 10,887 with people (55.9%)      8,433 live photos have NO face tag (43.7%)
  2,330 with GPS (12.0%)         2,318 live, in 19 cells at 0.25 degrees
     40 distinct people          66 albums (43 named + 23 auto `Photos from YYYY`)
@@ -84,6 +86,7 @@ Module layout under `src/rekindle/memory/`:
 | `index.py` | `MemoryIndex` — the chokepoint |
 | `fingerprint.py` | dHash, sharpness, brightness and post-rotation size, one decode per photo |
 | `dedup.py` | burst collapse |
+| `strata.py` | stratified selection - the spread across a memory's own dimension (§6.2a) |
 | `composition.py` | orientation cohesion, canvas, resolution/aspect/quality gates (§5A) |
 | `history.py` | dismissal and resurfacing state (§5B) |
 | `spec.py` | `MemorySpec`, `Shot`, `FactSheet` |
@@ -587,7 +590,7 @@ the measured yield per recipe is in the milestone report.
 | `pair_years` | `Abhik Maiti + Paramita` | Each unordered pair co-appearing in ≥8 photos across ≥3 years. The pair key is the two names sorted, so `A+B` and `B+A` are one offer. |
 | `then_and_now` | `person:Avyan` / `album:Kashmir` | Earliest and latest photo of a subject separated by ≥1 year. Exactly two shots. `ordering="as_given"`. |
 | `year_in_review` | `2016` | Each year with ≥30 photos. |
-| `place_cluster` | `22.50,87.25` | GPS cells at 0.25° with ≥20 photos, split into visits separated by >14 days. **Honestly weak: 12% coverage.** Titles never name a place — there is no offline gazetteer, so the memory says "A place you kept coming back to", never an invented place name. |
+| `place_cluster` | `22.50,87.25` | GPS cells at 0.25° with ≥20 photos and ≥2 separate visits (>14 days apart). **Honestly weak, and measured: 3 offers.** Titles never name a place — there is no offline gazetteer, so the memory says "A place you kept coming back to", never an invented place name. See §6.3 for why 3 is the ceiling. |
 
 **Albums are not merged.** `Kashmir` / `Kashmir, day 1 and 2` / `Kashmir day 3`
 are one trip in three albums, and `Leh Ladakh` / `ladakh` are one trip under two
@@ -597,6 +600,122 @@ Puja 22` are *different years* under an equally similar pair of names. An
 `album_aliases` table in the config file lets the user merge them explicitly;
 the default is empty and nothing is merged automatically. This is "never invent
 a fact" applied to the case where inventing would be convenient.
+
+### 6.2a Stratified selection — the dimension a memory is *about*
+
+**The defect this exists to fix.** Selection was top-N by quality score with no
+temporal constraint, so shots clustered wherever the strongest-scoring run
+happened to sit. Measured across the first full render of 37 memories:
+
+```
+16 of 37 memories were confined to a SINGLE YEAR
+10 of 37 were confined to a single MONTH
+
+on_this_day:12-22    24 shots, all 2019 — while 2020 and 2022 had photos
+                     available and unused
+year_in_review:2021  24 shots, all December
+year_in_review:2023  24 shots, all January
+album_story:Avyan    24 shots, all one August, from an album spanning that
+                     child's life
+on_this_day:11-23    2012:13  2016:9  2025:2 — the best-behaved example
+```
+
+An "on this day" showing a single year does not merely under-perform; it
+defeats the entire concept of the recipe, which *is* the same calendar date
+across years. The cause was structural rather than a tuning problem —
+`FactSheet.per_year` existed, but only as a field *computed from* the chosen
+shots for reporting. Nothing fed it back as a constraint on the choice.
+
+**The fix.** Each recipe declares the dimension its memory is about. Slots are
+allocated across the buckets of that dimension, and each bucket is then filled
+best-first by the same quality ranking as before. Ranking now decides *within*
+a period; the spread across periods is decided first.
+
+| Recipe | Dimension | Why |
+|---|---|---|
+| `on_this_day` | **year** | The concept is one date *across years*. |
+| `on_this_month` | **year** | Same month across years. |
+| `person_years` | **year** | "over the years" is a promise about the span. |
+| `pair_years` | **year** | As above. |
+| `year_in_review` | **month** | Everything shares a year, so months are the only axis. |
+| `album_story` | **adaptive** | Days for a one-week trip, months for a two-year album. |
+| `place_cluster` | **adaptive** | The memory is about *returning*, so the visits must show. |
+| `then_and_now` | **none** | The opposite case: it wants the extremes, not a spread. |
+
+**Adaptive** picks the finest granularity whose bucket count still fits the
+available slots, so every bucket can receive at least one shot. Kashmir's 510
+photos are all in May 2015 — only *days* separate them — while the 19-month
+`Avyan` album has far too many days for 24 slots and wants months. A fixed
+choice would be wrong for one of them.
+
+#### Allocation: proportional, with a floor
+
+**Every non-empty bucket gets one slot before any bucket gets a second**, and
+the remainder is distributed by weight using the largest-remainder method.
+
+Neither extreme works on the real data. The surviving buckets for
+`on_this_day:12-22` are 2019 with 126 photos, 2020 with 2 and 2022 with 1:
+
+- **Pure proportional** is what the broken code effectively did — 2019 takes
+  23 of 24 slots and the thin years vanish.
+- **An equal split** gives the year that actually has a story the same eight
+  slots as the year with one photo, and two of those slots cannot even be
+  filled.
+- **Floor-then-proportional** gives 2019:22, 2020:1, 2022:1 — every year
+  present, the rich one still carrying the memory.
+
+When there are more buckets than slots (a 26-year span into 24 shots) the
+*largest* buckets win, and the rest are reported rather than silently dropped.
+Everything is processed in sorted key order, so the result never depends on
+dict iteration order.
+
+#### Empty buckets are reported, never silent
+
+A period can legitimately fail to contribute: every photo in it was removed by
+the composition or quality gates. That is a **correct** outcome, but a silent
+one is indistinguishable from the clustering bug above, so `StratumReport`
+records it and the CLI names it:
+
+```
+! on_this_day:12-22: no usable photos from 2015, 2018, 2021 -
+  every candidate there failed a guardrail.
+```
+
+That is real output. `on_this_day:12-22` offers six years; three are emptied by
+the gates (2015 had one photo, 2018 seven, 2021 eighteen — all rejected), and
+the memory honestly shows the three that survive.
+
+### 6.3 Why `place_cluster` yields three memories, not thirty
+
+The brief expected this recipe to be weak on a library with 12% GPS coverage,
+and it is — but the binding constraint turned out not to be the obvious one.
+Measured over all 19 cells:
+
+| | |
+|---|---|
+| GPS photos | 2,318 in 19 cells |
+| Cells with ≥20 photos | **12** |
+| Cells with ≥20 photos **and ≥2 visits** | **3** |
+
+**Nine cells have plenty of photos and exactly one visit.** They are one-off
+trips — 320 photos at 21.50,87.50, 207 at 19.25,84.75 — and this recipe is
+specifically about *returning* to a place. A single trip is already served by
+`album_story`.
+
+Lowering the photo floor barely moves it: `min_photos` of 20 → 3 offers, 12 →
+4, and even 3 → only 5. Widening the cell to 1° gives 8 qualifying cells but
+merges genuinely different towns into one "place", which would make the memory
+a lie rather than a thin truth.
+
+So three is the honest ceiling on this library, not a threshold set too tight.
+The limitation is the data: this library records one-off trips with GPS, not
+repeat visits.
+
+One consequence worth naming: all three share the title "A place you kept
+coming back to", because none of them may be given a place name. They are
+distinguishable only by their subtitle (visit and photo counts) and their
+output folder, which carries the coordinates. Inventing three different titles
+would mean inventing three facts.
 
 ---
 
