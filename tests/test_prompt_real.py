@@ -4,12 +4,24 @@ Skipped everywhere except a machine that has both. CI has no photos, no GPU
 and no embeddings, and must stay green - but the numbers in
 `docs/decision-log-prompt-memories.md` are the whole justification for this
 feature, and a number nobody re-measures is a number that quietly goes wrong.
-Six figures in this project have now been carried forward without
-re-measurement and every one of them was wrong.
+Seven figures in this project have now been carried forward without
+re-measurement and every one of them was wrong. The seventh was three rows of
+the bleed table in `docs/decision-log-prompt-memories.md`, which did not
+reproduce against the store they were measured on — nothing to do with the
+orientation defect, and caught only because someone re-ran them.
 
 The assertions are RANGES, not the exact values. Re-embedding the library is
 legitimately a new store and a new answer; a test that pinned exact hashes
 would fail for a correct reason and teach everyone to ignore it.
+
+That caution turned out to be more conservative than it needed to be. The
+library HAS since been re-embedded, after `81d2565` found that
+`semantic/embed.py` had never applied the EXIF orientation tag and 13.9% of
+the stored vectors were computed from sideways pixels. Every assertion here
+was re-measured against both stores, and the two shipped festival memories
+came out as the same 24 photographs in the same order from each. The ranges
+below are still ranges, for the reason above; they are just not being leaned
+on as hard as was expected.
 
 Point it at another library with REKINDLE_REAL_DATA_DIR.
 """
@@ -255,10 +267,71 @@ def test_the_tags_are_what_separate_the_two_festivals(index, retrieve):
     assert tagged_bleed < naive_bleed, f"naive {naive_bleed}, tagged {tagged_bleed}"
 
 
+def test_the_day_quorum_is_what_removes_the_last_of_the_bleed(index, retrieve, monkeypatch):
+    """The second half of the separation argument, which had no test.
+
+    The tags get `kalipuja diwali celebration` most of the way there on their
+    own. What removes the last of the bleed is the DAY quorum: a capture day
+    is only a seed day if at least half the tags reached it. Measured on both
+    the sideways and the upright store, with the corpus month window on as it
+    ships, the quorum takes 15 seed days to 8 and 3 bleed shots to 0. Without
+    the window it is 4 bleed shots to 0.
+
+    This is the row of the bleed table the shipped behaviour actually turns
+    on, and the first version of that table recorded it as 7 -> 0 from a
+    configuration nobody has been able to reproduce. Pinned here as a
+    direction and a bound, so the next person gets a failing test rather than
+    a paragraph.
+
+    The two assertions below fail for different reasons on purpose. The first
+    says the fixture is still the interesting case; if it fails, the tag path
+    alone has become good enough to need no quorum (widening TAG_K to 400 does
+    exactly that on this library) and the claim above needs re-reading rather
+    than the gate needs fixing. Only the second is about the quorum working.
+    """
+    query = prompt.parse("kalipuja diwali celebration", index)
+    resolution = tags.resolve(query, data_dir=None)
+    assert len(resolution.tags) >= 4, "the quorum is inert on a short tag list"
+
+    def build(**kw):
+        b = prompt.build_selection(
+            index, query, resolution.tags, retrieve, months=resolution.months, **kw
+        )
+        return engine.build(
+            index,
+            Offer(recipe=prompt.RECIPE, key=query.text, title=query.text),
+            selection=b.selection,
+            report=engine.BuildReport(offered=1),
+        )
+
+    with_quorum = _tally(build(), index)
+
+    monkeypatch.setattr(prompt, "day_quorum", lambda n: 1)
+    without = _tally(build(), index)
+
+    assert without["durga"] >= 1, (
+        f"there is no bleed left for the quorum to remove: {dict(without)}. "
+        "The tag path alone now separates the two festivals on this library, "
+        "which is good news and makes this test's premise stale. Re-read the "
+        "bleed table in docs/decision-log-prompt-memories.md before relaxing "
+        "anything."
+    )
+    assert with_quorum["durga"] < without["durga"], (
+        f"the quorum is meant to be what removes the bleed: "
+        f"with {dict(with_quorum)}, without {dict(without)}"
+    )
+    assert with_quorum["durga"] <= 1, dict(with_quorum)
+
+
 def test_seed_and_expand_is_what_puts_people_in_the_memory(index, retrieve):
-    """Direct top-K gives a wall of idols: measured 2-4 of 24 shots with face
-    tags. Expanding a confirmed seed day to its whole capture session gives
-    20 or more."""
+    """Direct top-K gives a wall of idols: measured 0 of 24 shots with face
+    tags, on both the sideways and the upright store. Expanding a confirmed
+    seed day to its whole capture session gives 21.
+
+    `prompt.build_selection`'s own docstring says "4 of 24" for the direct
+    top-150 and 11 year-buckets; re-measured it is 0 of 24 and 14 buckets.
+    The conclusion is if anything understated by its own numbers.
+    """
     query = prompt.parse("durga puja over the years", index)
     resolution = tags.resolve(query, data_dir=None)
     consensus = prompt.consensus(resolution.tags, retrieve)

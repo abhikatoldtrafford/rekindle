@@ -570,3 +570,48 @@ about five and a half minutes on the GPU, five hours on CPU.
 **A `--redo` flag taking a set of hashes is the right fix**, and is not built
 here: it is a new CLI surface, and this change is deliberately confined to the
 decode.
+
+**Resolved.** The store was deleted and the library re-embedded upright
+(18,201 vectors). Measured against the preserved sideways store, 2,534 of the
+18,201 vectors changed, the changed ones have a median self-cosine of 0.9352
+against their upright replacement, and two unrelated photos of this library
+sit at 0.549. `--redo` is still the right fix and still is not built.
+
+### Some of this library's orientation tags are stale, and applying them is what turns the photo sideways
+
+Found by opening the shipped `kalipuja diwali celebration` memory after the
+re-embed, rather than by any number. **Three of its 24 shots render on their
+side, and they are sideways *because* the fix is applied, not despite it.**
+`DSC01306.jpg1.jpg`, `DSC01319.jpg2.jpg` and `DSC01320.jpg1.jpg` are stored
+portrait, carry EXIF orientation 6, and their raw pixels are already upright:
+some earlier tool rotated the pixels and left the tag behind. `open_upright`
+does exactly what the tag says and rotates a correct photograph 90 degrees.
+
+`open_upright` is not wrong. `ImageOps.exif_transpose` is the standard
+behaviour, and any viewer, Pillow-based or not, shows these three files the
+same way. The files are lying, and nothing in EXIF distinguishes a stale tag
+from a live one.
+
+**The population is small and is not quantified.** The obvious signature —
+stored portrait plus a 90/270-degree tag — matches 222 of 18,201 images, but
+it is *not* a detector: 18 of those were opened both ways by hand and only 5
+were actually stale, the other 13 being ordinary rotated photographs that the
+tag fixes correctly. So the real figure is on the order of tens of files,
+concentrated in particular shoots (all three in the Kali memory come from one
+2013 Diwali evening), and a reliable count needs content, not metadata.
+
+Consequences, in the order they bite:
+
+* the renderer draws these sideways, which is user-visible;
+* the embedder and the face gate see them sideways, so they are now the
+  photographs the *old* store happened to get right;
+* `meta.width`/`meta.height` are stored post-rotation, so the index agrees
+  with the wrong answer and no dimension assertion can see it.
+
+**Not fixed here, and it should not be fixed by loosening the rule.** A
+heuristic that second-guesses the tag whenever the stored pixels are portrait
+would break 13 files for every 5 it repaired, on this library's own numbers.
+The honest fixes are a per-file override the user can set, or an
+orientation-detection model, and both are new surface area. Recorded so the
+next person who opens a montage and sees a photograph on its side does not go
+looking for the bug in `open_upright`.

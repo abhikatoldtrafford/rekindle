@@ -7,10 +7,35 @@ rests on, the numbers that idea was measured against, the eighth refusal
 signal and why it is shipped switched off, and the places where the plan this
 work came from turned out to be wrong.
 
-Every number below was measured this session against the live index
-(19,318 photos after the guardrails, from 19,480 rows) and the live CLIP
-ViT-L/14 store (18,201 vectors, dim 768) on an RTX A4000. Nothing is carried
-forward from an earlier document without re-measurement.
+Every number below was measured against the live index (19,318 photos after
+the guardrails, from 19,480 rows) and the live CLIP ViT-L/14 store (18,201
+vectors, dim 768) on an RTX A4000. Nothing is carried forward from an earlier
+document without re-measurement.
+
+## Re-measured after the orientation fix (`81d2565`)
+
+Every figure in the first version of this document was measured against an
+embedding store in which `semantic/embed.py:_decode` had never applied the
+EXIF orientation tag, so roughly one image in seven was embedded on its side.
+The library was re-embedded upright and **every number below was re-measured
+on both stores**, old beside new. Comparing them vector by vector: 2,534 of
+18,201 vectors changed (13.9%), the changed ones have a median self-cosine of
+0.9352 against their upright replacement, and two unrelated photos of this
+library sit at 0.549 — so in the worst case (0.595) a photograph was further
+from itself than an unrelated pair is from each other.
+
+The short version:
+
+> **Every conclusion survived, and the shipped outputs did not move at all.**
+> `durga puja over the years` and `kalipuja diwali celebration` build *the same
+> 24 photographs in the same order* from the corrupted store and the corrected
+> one. `christmas in midnapur` shares 22 of its 24.
+
+What did move is smaller than that and mostly went the right way. What moved
+*most* was not caused by the defect at all: three rows of the bleed table below
+do not reproduce against the very store they were measured on. They are
+corrected here and the discrepancy is written up at the end, under
+"What the re-measurement found".
 
 ---
 
@@ -23,8 +48,9 @@ forward from an earlier document without re-measurement.
 It exists because of a measured failure. `kalipuja diwali celebration` sent
 straight to the encoder, through the unmodified `compose → collapse →
 stratify → cap` pipeline, builds a 24-shot memory of which **9 shots are from
-a Durga Puja day and 4 from a genuine Kali Puja or Diwali day**. The other 11
-are neither.
+a Durga Puja day**. That is the number the whole feature exists to kill, and
+it is the most robust figure in this document: 9 of 24, on both stores, at
+every value of `MIN_SEEDS`.
 
 "Durga Puja" and "Kali Puja" are nearly the same string to an image-text model
 as *event names*. As *pictures* they are not close at all: a ten-armed golden
@@ -34,14 +60,22 @@ combined by agreement, give:
 
 | `kalipuja diwali celebration` | Kali/Diwali | **Durga (bleed)** | neither | years |
 |---|---|---|---|---|
-| the prompt straight to CLIP | 4 / 24 | **9 / 24** | 11 / 24 | 10 |
-| + the corpus month window | 4 / 24 | **9 / 24** | 11 / 24 | 10 |
-| tag consensus, no window | 15 / 24 | **7 / 24** | 2 / 24 | 10 |
-| tag consensus + day quorum | 24 / 24 | **0 / 24** | 0 / 24 | 5 |
+| the prompt straight to CLIP | 6 → **7** / 24 | **9 / 24** | 9 → **8** / 24 | 10 |
+| + the corpus month window | 6 → **7** / 24 | **8 / 24** | 10 → **9** / 24 | 10 |
+| tag consensus, no quorum, no window | **17 / 24** | **4 / 24** | 3 / 24 | 10 |
+| tag consensus + day quorum, no window | **23 / 24** | **0 / 24** | 1 / 24 | 7 |
 | **shipped** (quorum, window, MIN_SEEDS=2) | **24 / 24** | **0 / 24** | 0 / 24 | 6 |
 
-The month window on its own does nothing, because October holds both
-festivals. The tags are what separate them.
+`a → b` is the sideways store's number before the arrow and the upright
+store's after it; a single number means the two stores agree exactly. Every
+row is at the shipped `MIN_SEEDS = 2`, `TAG_K = 100` and `SEED_K = 100`, with
+only the gate named in the row changed — which the first version of this table
+was not, and that is where its middle rows came from. See the end of this
+document.
+
+The month window on its own moves one shot, because October holds both
+festivals. The tags are what separate them, and the day quorum is what
+finishes the job.
 
 I looked at all 24 shots. They are oil lamps on steps, strings of fairy
 lights, a rangoli of diyas, and family in festive clothes at night. There is
@@ -106,14 +140,16 @@ tags reached it. This is the same question the photo-level vote count asks,
 asked of a day.
 
 It matters because of the stratifier. Seed-day *precision* was already good —
-17 of 19 Durga seed days were genuine — but the two wrong ones were
+17 of 19 Durga seed days genuine on the sideways store, 16 of 18 on the
+corrected one — and **the two wrong ones are the same two on both stores**:
 `2015-05-18` (144 photos) and `2020-11-23`, each the only day in its year, so
-each claimed an entire year-bucket of a 24-shot memory. Two bad days out of
-nineteen cost seven shots.
+each claimed an entire year-bucket of a 24-shot memory. Two bad days cost
+seven shots, on both stores: the Durga memory goes from 17 of 24 correct
+without the quorum to 24 of 24 with it.
 
-Measured effect on `kalipuja diwali celebration`: 15/24 correct → **24/24**,
-7/24 bleed → **0/24**, at a cost of four year-buckets (10 → 6). That trade is
-printed to the user rather than hidden.
+Measured effect on `kalipuja diwali celebration`: 17/24 correct → **24/24**,
+4/24 bleed → **0/24**, at a cost of four year-buckets (10 → 6). Identical on
+both stores. That trade is printed to the user rather than hidden.
 
 ---
 
@@ -125,7 +161,22 @@ everything else identical:
 | tags | correct | neither | note |
 |---|---|---|---|
 | 6 tags, four of them generic | 12 / 24 | 12 / 24 | pulled in a 271-photo wedding |
-| 4 tags, all distinctive | 17 / 24 | 7 / 24 | |
+| 4 tags, all distinctive | **17 / 24** | **7 / 24** | reproduces exactly, both stores |
+
+The second row re-measures exactly, on both stores, with the day quorum off —
+which is what "everything else identical" has to mean here, because the quorum
+is `ceil(n_tags / 2)` and therefore moves when the tag count does.
+
+**The first row is not reproducible, because this document only ever wrote
+down three of its four generic tags.** Reconstructions from the three that are
+named, added to the corpus set with the quorum off, give 10 of 24 correct on
+the sideways store and 11 on the upright one: the same direction, worse than
+logged, but not the same measurement. The claim itself is confirmed twice
+over. The 271-photo day is real — it is `2012-11-24`, the largest capture day
+in that month of the library — and *"women in white saris with red borders
+smearing red powder"* puts **22 of its own top 100 on that single day**, on
+both stores, and makes it a seed day. A tag list is a measurement input, and
+writing down three of four is how a row stops being checkable.
 
 The generic ones were *"a crowd walking under an illuminated arch of lights in
 a street"*, *"women in white saris with red borders smearing red powder"* and
@@ -149,12 +200,20 @@ best tag set, give 17. It is the corpus month window that recovers it to
 tag path is what runs, and on a concept CLIP already resolves well it is a
 small step backwards.
 
+All three of those numbers — 23, 17, 24-across-10 — reproduce exactly on both
+stores. This paragraph is the part of the document that most deserved to be
+wrong and is not.
+
 ---
 
 ## Seed and expand
 
 Direct top-K gives a wall of idols: the event albums' portraits sit at median
-rank 500–4,500, where no content query reaches them. Expanding a *confirmed*
+rank **1,800–4,800** across the four Durga tags (best single rank 572, worst
+14,431; on the bare query `durga puja` the median is 2,650), where no content
+query reaches them. The "500–4,500" first written here was the range of best
+ranks and medians mixed together; the medians are what the sentence claims and
+they are higher. Both stores agree to within about 2%. Expanding a *confirmed*
 seed day to its whole capture session does reach them. With visual tags the
 direct path is starker still than the plan measured for the bare query: the
 tags describe idols and decorations, not an occasion people are photographed
@@ -165,10 +224,20 @@ at.
 | the top 24 of the consensus ranking | **0 / 24** |
 | seed-and-expand (shipped) | **21 / 24** |
 
+Both rows reproduce exactly on both stores. One number in the same family does
+not: `prompt.build_selection`'s own docstring says direct top-150 "gives 11
+year-buckets but only 4 of 24 shots carry a face tag". Measured now, on
+*both* stores, direct top-150 gives **14 year-buckets and 0 of 24 shots with a
+face tag**. The docstring's conclusion is if anything understated; its numbers
+are wrong and were wrong before the re-embed.
+
 The album union is all-tokens, not any-token, and the difference is measured:
-`durga puja` all-tokens matches only `Durga Puja 25`, which is what gets 2025
-into the memory at all — those six photos are portraits and rank about 800 on
-any content query. Any-token also matches `Diwali Kali Puja 22` on the shared
+`durga puja` all-tokens matches only `Durga Puja 25` — re-confirmed on the
+live index — which is what gets 2025 into the memory at all. Those six photos
+are portraits: their *best* rank on any of the four tags is 572 and on the
+bare query `durga puja` it is 841, with medians between 1,800 and 4,800. None
+of the six is anywhere in the consensus order that the tags actually build.
+ Any-token also matches `Diwali Kali Puja 22` on the shared
 word "puja" and drags Kali Puja photos into a Durga Puja memory: precisely the
 confusion the feature exists to prevent.
 
@@ -193,13 +262,24 @@ before running anything, including two deliberately hard cases):
 
 | `tag_agreement` | min | median | max |
 |---|---|---|---|
-| present (16) | 0.10 | 0.49 | 0.86 |
-| absent (16) | 0.05 | 0.41 | 0.81 |
+| present (16), sideways | 0.10 | 0.49 | 0.86 |
+| absent (16), sideways | 0.05 | 0.41 | 0.81 |
+| **present (16), upright** | **0.09** | **0.45** | **0.87** |
+| **absent (16), upright** | **0.06** | **0.40** | **0.81** |
 
 At the threshold that maximises accuracy it **correctly refuses 7 of 16 absent
 concepts and wrongly refuses 2 of 16 present ones** — 66% accuracy against a
-50% base rate. Among the concepts described by three or more tags the
-direction *reverses*: absent median 0.68, present median 0.49.
+50% base rate. **On the corrected store the best threshold is the same 0.23
+and the accuracy is the same 66%.** Among the concepts described by three or
+more tags the direction *reverses* on both stores: absent median 0.68 against
+present 0.49 sideways, absent 0.69 against present 0.45 upright.
+
+This was the measurement most worth hoping about, because it is the one an
+upright store could plausibly have rescued: a signal built from whether
+independent descriptions converge is exactly the kind of thing a sideways
+image would scramble. It did not rescue it. Both distributions shifted down by
+about 0.04 and stayed on top of each other, and every concept named below kept
+its place in the ordering. The gate stays off.
 
 The reason is legible once you see it. `scuba diving underwater` (0.81) and
 `skiing on a glacier` (0.76) have tags that agree beautifully with one another
@@ -215,11 +295,19 @@ information. There is no threshold, by decision and not by omission.
 ### One that looked good and is not shipped
 
 Candidate pool size separates the two sets at 88% accuracy: refuse above 1,347
-photos and you refuse 12 of 16 absent concepts and 0 of 16 present ones. It is
-not shipped, for two reasons that are not close calls:
+photos and you refuse 12 of 16 absent concepts and 0 of 16 present ones.
+**Re-measured upright it is 84%** — refuse above 1,348 and you refuse 11 of 16
+absent concepts and 0 of 16 present ones. It got worse, and the one property
+that made it unshippable did not change at all: the threshold still sits
+exactly on `a wedding`, which moved from 1,347 to 1,348 photos and stayed the
+largest present value. It is not shipped, for two reasons that are not close
+calls:
 
 1. The threshold sits **exactly** on the largest present value (`a wedding`,
-   1,347). Zero margin, fitted to one point of 32.
+   1,347 sideways and 1,348 upright). Zero margin, fitted to one point of 32,
+   and a re-embed moved the fit by one photo while costing it four points of
+   accuracy — which is what fitting to one point of 32 looks like from the
+   outside.
 2. A raw pool size is a library-scale quantity. 1,347 means nothing on a
    library of 200,000 photos, which is the absolute-magnitude trap that killed
    the earlier seven signals wearing a different hat.
@@ -269,8 +357,17 @@ literal month table, exact person matching, no clock and no locale); hit
 ordering is made total on `file_hash`.
 
 Across devices it is **not** bit-identical — CUDA and CPU query embeddings
-differ by about 1.8e-4 — and re-embedding the library is a new store and a new
-answer. Do not claim more than that.
+differ by up to 2.5e-4 elementwise, re-measured over three queries — and
+re-embedding the library is a new store and a new answer. Do not claim more
+than that.
+
+Re-embedding the library is, however, a *smaller* new answer than that
+sentence implies, and this document now has evidence for how much smaller.
+Replacing 13.9% of the store's vectors with meaningfully different ones (see
+the header) left the shipped Durga and Kali memories byte-identical. The
+seed-day quorum is the reason: it asks a question about *days* that half a
+dozen independently-ranked tag lists have to agree on, and a day survives
+losing several of its photographs from several of those lists.
 
 ---
 
@@ -292,7 +389,10 @@ month purity. With one tag it would have. With the day quorum it does not: the
 quorum refuses the same days at every value. Measured across the three
 acceptance prompts, 1 → 2 → 3 takes the Durga memory from 23 correct shots in
 11 year-buckets, to 24 in 10, to 24 in 7, and changes the Kali memory not at
-all. It is kept at 2 because it is free, not because it is load-bearing.
+all. Upright the same sweep reads 22 in 11, 24 in 10, 24 in 6 — the two ends
+each lost one, the shipped middle did not move, and the Kali memory is still
+untouched at all three values. It is kept at 2 because it is free, not because
+it is load-bearing.
 
 **3. The month window cannot separate the two festivals, and the plan implied
 a date window could.** It cannot: Durga Puja and Kali Puja both fall in
@@ -301,9 +401,17 @@ noise, not a festival's. The tags do the separating.
 
 **4. The measured baseline is 47%, not 51%.** Re-running the plan's own
 seed-weight measurement gives 38 of 81 seed hits on a Durga Puja seed day, not
-41 of 81. The final-shot figure it also quotes — 9 of 24 — reproduced exactly.
-The difference is a slightly different seed-day set; the point stands either
-way, and this is exactly why the plan told its reader to re-measure.
+41 of 81. The final-shot figure it also quotes — 9 of 24 — reproduced exactly,
+and reproduces again now, on both stores.
+
+The 38-of-81 half **could not be re-measured**, because neither the plan nor
+this document records what produced an 81-seed list; the shipped `SEED_K` is
+100 and the obvious reconstruction of "the naive seeds for `durga puja`" gives
+93 of 100 on the sideways store and 94 of 100 on the upright one, which is
+plainly measuring something else. The number is left as written, flagged as
+unreproducible rather than quietly corrected to a figure from a different
+procedure. A percentage whose denominator nobody wrote down is not a
+measurement anyone can check.
 
 One thing in the brief also did not hold: **`christmas in midnapur` does not
 resolve to eight photos from one day in 2019.** That is what the *place*
@@ -312,6 +420,14 @@ builds is 24 shots across seven Decembers — santa hats, a church, a nativity
 scene, a mall Christmas tree, "MERRY CHRISTMAS" banners — with **0 of 24
 carrying GPS**, and the CLI says in as many words that "midnapur" narrowed
 nothing and was searched for as a picture.
+
+Re-measured: 24 shots, all in December, across the same seven Decembers
+(2013, 2014, 2016, 2017, 2018, 2020, 2025), 0 of 24 with GPS, "midnapur" still
+unmatched. 22 of the 24 photographs are the same ones the sideways store
+chose. The eight-photos-in-2019 figure the brief was arguing against is also
+still exactly right as a description of what a place filter *would* have done:
+this library holds 8 photographs with coordinates in the Medinipur cell in the
+week of Christmas, and all eight are from the morning of 2019-12-22.
 
 ---
 
@@ -325,8 +441,10 @@ nothing and was searched for as a picture.
   prompt parser is how "never name a place" gets quietly broken. The honest
   line in the CLI is what ships instead.
 * **Any cosine threshold.** `--min-score` exists for someone who insists and
-  is unset. A 0.25 floor returns 938 photos for `durga puja` and 0 for
-  `food on a plate`.
+  is unset. A 0.25 floor returns 938 photos for `durga puja` sideways and 948
+  upright, and 0 for `food on a plate` on both — which is the point: the same
+  floor is a useful filter for one query and a total refusal for another, and
+  re-embedding the library moved one of the two by 1%.
 * **Video.** All 1,117 videos are unembedded, so no prompt memory can contain
   one. The CLI says so rather than leaving it to a document.
 * **An LLM parser.** The rules parser covers all three acceptance prompts and
@@ -334,3 +452,114 @@ nothing and was searched for as a picture.
 * **Relative time, seasons, booleans, negation, `in <place>` as a cue.** Each
   either makes the memory id time-dependent, invents a fact about a West
   Bengal library, or measured worse than the whole phrase.
+
+---
+
+## What the re-measurement found
+
+Re-running this whole document against the corrected store, with the sideways
+store kept beside it. Ordered by how much it should change anyone's mind.
+
+### The architecture conclusion survived, and now has a stronger argument
+
+The claim was always structural: tag consensus separates two festivals that
+share a name-shaped embedding because it asks several *independent* visual
+questions and keeps only the photographs several of them agree on. That
+argument predicts robustness to noise in any one tag's ranking, and the
+re-embed turned out to be an unusually good test of it, with 13.9% of the
+store's vectors replaced by meaningfully different ones. The prediction held
+exactly: **the shipped Durga and Kali memories are the same 24 photographs in
+the same order from both stores.**
+
+I looked at all 72 shots of the three memories on the corrected store, rather
+than at their scores. The Kali memory is oil lamps on steps, a woman lighting
+diyas, a house outlined in fairy lights, a rangoli of diyas, and family in
+festive clothes at night — **not one idol of Durga in it**, which is the
+sentence the first version of this document earned and the corrected store
+does not take away. The Durga memory is idols, pandals, and families in front
+of pandals, with the one college-lawn shot the day-expansion caveat above
+predicts. The Christmas memory is santa hats, a nativity tableau, a church
+with a MERRY CHRISTMAS banner, and a mall tree.
+
+### Three rows of the bleed table were wrong when they were written
+
+This is the finding worth acting on, and it has nothing to do with
+orientation. Rows 1-3 of the original table **do not reproduce against the
+sideways store they were measured on**. A sweep of 288 configurations
+(`tag_k` x `seed_k` x `MIN_SEEDS` x tags x window x quorum), plus twelve
+direct-top-K variants, found nothing that produces them:
+
+| original row | as logged | reproducible? |
+|---|---|---|
+| the prompt straight to CLIP | 4 / 9 / 11, 10 years | counts only at `MIN_SEEDS=1`, where the year count is 13 |
+| + the corpus month window | 4 / 9 / 11, 10 years | same, and the window is *not* a no-op at `MIN_SEEDS=2` |
+| tag consensus, no window | 15 / 7 / 2, 10 years | **no configuration produces it** |
+| tag consensus + day quorum | 24 / 0 / 0, 5 years | only at `SEED_K=50`, which is not what ships |
+| **shipped** | **24 / 0 / 0, 6 years** | **exactly, at the shipped constants, on both stores** |
+
+The pattern says what happened: the rows were measured one at a time while
+other knobs moved, and the `years` column looks copied down. The two rows that
+were measured at shipped settings — the headline 9/24 bleed and the shipped
+24/24 — are both exactly right, on both stores. The corrected table above
+holds everything but the named gate fixed, which is what a table like this has
+to mean if its rows are to be read against each other.
+
+That makes seven figures this project has carried forward without
+re-measurement. Every one was caught by re-measuring, none by anyone doubting
+it first.
+
+### What moved, in full
+
+| figure | sideways | upright | verdict |
+|---|---|---|---|
+| `kalipuja` bleed, prompt straight to CLIP | 9 / 24 | 9 / 24 | unchanged |
+| `kalipuja` shipped: correct / bleed / years | 24 / 0 / 6 | 24 / 0 / 6 | unchanged, same photos |
+| `durga` shipped: correct / years / faces | 24 / 10 / 21 | 24 / 10 / 21 | unchanged, same photos |
+| `durga` straight to CLIP | 23 / 24 | 23 / 24 | unchanged |
+| `durga` tags alone, no window, no quorum | 17 / 24 | 17 / 24 | unchanged |
+| `christmas`: Decembers / shots with GPS | 7 / 0 | 7 / 0 | unchanged, 22 of 24 same photos |
+| faces: consensus top-24 / shipped | 0 / 21 | 0 / 21 | unchanged |
+| `tag_agreement` best accuracy | 66% | 66% | unchanged |
+| `tag_agreement` present min / median / max | 0.10 / 0.49 / 0.86 | 0.09 / 0.45 / 0.87 | median -0.04 |
+| `tag_agreement` absent min / median / max | 0.05 / 0.41 / 0.81 | 0.06 / 0.40 / 0.81 | median -0.01 |
+| three-or-more-tag reversal (absent vs present) | 0.68 vs 0.49 | 0.69 vs 0.45 | unchanged, still reversed |
+| pool-size gate accuracy | 88% | 84% | **worse**, still fitted to one point |
+| Durga seed days genuine, no quorum | 17 / 19 | 16 / 18 | same two wrong days |
+| `MIN_SEEDS` 1 / 2 / 3, Durga correct shots | 23, 24, 24 | 22, 24, 24 | shipped value unchanged |
+| `MIN_SEEDS` 1 / 2 / 3, Durga year-buckets | 11, 10, 7 | 11, 10, 6 | shipped value unchanged |
+| photos over a 0.25 cosine for `durga puja` | 938 | 948 | +1% |
+| photos over a 0.25 cosine for `food on a plate` | 0 | 0 | unchanged |
+| CUDA vs CPU query embedding drift | ~1.8e-4 | up to 2.5e-4 | same order |
+
+Library-level figures re-confirmed unchanged: 19,480 rows, 19,318 photos after
+the guardrails, 18,201 embedded images, 1,117 unembedded videos, `durga puja`
+matching exactly one album (`Durga Puja 25`) under all-tokens matching, and 8
+GPS-bearing photographs in the Medinipur cell in the week of Christmas.
+
+### Three numbers were wrong independently of the store
+
+1. **The bleed table's middle rows**, above.
+2. **`prompt.build_selection`'s docstring** says direct top-150 "gives 11
+   year-buckets but only 4 of 24 shots carry a face tag". Measured on both
+   stores it is **14 year-buckets and 0 of 24 with a face tag**. The same
+   docstring's "22 to 24 of 24 shots carry faces" for the shipped path is 21
+   on both stores, which the table above already says. Its conclusion is if
+   anything understated by its own numbers. Left uncorrected in source by the
+   scope of this pass; recorded here so nobody re-derives it.
+3. **"median rank 500-4,500"** for the album portraits, corrected above to
+   1,800-4,800.
+
+One number could not be re-measured at all: the plan's 38-of-81 seed weight,
+whose procedure nobody wrote down. It is flagged in place rather than replaced
+by a figure from a different procedure.
+
+### A limitation the eye check found that no number would have
+
+Three of the 24 shots in the shipped Kali Puja memory are turned on their side
+by the orientation fix, not by its absence. Their EXIF orientation tag is
+stale: the pixels on disk are already upright, and applying the tag rotates
+them 90 degrees. `open_upright` is correct and the files are lying. Written up
+in `docs/known-limitations.md`, because it is a decode fault affecting a small
+population of this library and not a prompt-memory fault at all. It was
+invisible to every number in this document, and obvious the moment anyone
+opened the photographs.
