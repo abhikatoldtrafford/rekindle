@@ -235,17 +235,32 @@ def test_a_blown_out_frame_is_dropped():
 
 
 def test_a_badly_out_of_focus_frame_is_dropped():
-    _, report = compose([_p("blur", sharpness=0.10)])
+    _, report = compose([_p("blur", sharpness=0.05)])
     assert report.dropped[comp.DROP_OUT_OF_FOCUS] == 1
 
 
 def test_the_quality_gates_do_not_touch_an_ordinarily_soft_old_photo():
-    """Measured on the current reblur measure, the 5th percentile is 0.252 in
-    2011 and 0.418 in 2008 - both above the 0.24 gate. Under the measure this
-    replaced the early years were the ones at risk; a contrast-invariant
-    measure is what removed that tilt, and this test is where it is pinned."""
-    kept, _ = compose([_p("soft2011", sharpness=0.26), _p("soft2008", sharpness=0.42)])
+    """Measured over the whole library on the current measure, the 5th
+    percentile is 0.244 in 2011 and 0.418 in 2008 - both far above the 0.12
+    gate, which takes 0.44% of 2011 where the measure it replaced took 3.83%.
+
+    The values below sit between the gate and those percentiles, which is
+    where an ordinarily soft old photo lives. A gate at or above 2011's p5
+    fails this test, and that is the point: a 120-per-year sample suggested
+    0.24, which is above it, and only the whole library said so."""
+    kept, _ = compose([_p("soft2011", sharpness=0.20), _p("soft2008", sharpness=0.30)])
     assert len(kept) == 2
+
+
+def test_the_gate_stays_below_the_worst_years_fifth_percentile():
+    """Stated as an invariant rather than left in a comment. Measured per-year
+    5th percentiles over all 18,363 fingerprinted photos: the lowest is 0.244
+    (2011), then 0.257 (2013). A gate above those deletes a twentieth of the
+    years holding the least replaceable photographs in the library."""
+    assert comp.MIN_SHARPNESS < 0.244, (
+        "MIN_SHARPNESS is above 2011's 5th percentile - it would single out "
+        "the early years, which is the failure this threshold exists to avoid"
+    )
 
 
 def test_the_gate_is_on_the_scale_the_measure_actually_produces():

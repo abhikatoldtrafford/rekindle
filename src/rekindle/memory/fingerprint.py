@@ -139,11 +139,13 @@ def sharpness(image: Image.Image) -> float:
 
     **It is a RATIO, so scene contrast cancels.** This is what makes a single
     threshold safe across a library spanning 2000-2026. Measured per-year 5th
-    percentiles over 2,240 photos, 120 per year: they span 4.70x for the old
-    measure and 4.44x for an unnormalised gradient at 1024, but only 1.71x for
-    this one. A low-contrast 2011 photo is no longer indistinguishable from a
-    blurred one - which is exactly the failure that forced the old gate to sit
-    far out in the tail to be safe.
+    percentiles over all 18,363 fingerprinted photos span **3.84x** for the old
+    measure and **1.75x** for this one; on a matched 2,240-photo sample an
+    unnormalised gradient at the same 1024 resolution still spans 4.44x, so it
+    is the normalisation and not the resolution that does this. A low-contrast
+    2011 photo is no longer indistinguishable from a blurred one - which is
+    exactly the failure that forced the old gate to sit far out in the tail to
+    be safe.
 
     **The sharpest tile, not the mean, so shallow depth of field survives.** A
     portrait with a sharp face and a deliberately blurred background is often
@@ -164,13 +166,17 @@ def sharpness(image: Image.Image) -> float:
     photograph, which is texture nearly everywhere, and it is why the measure
     is contrast-invariant at all - but a subject that is genuinely all flat
     regions and hard borders (a sign, a screenshot, a document) scores low
-    whether or not it is in focus. `is_screenshot` already removes the common
-    case; the rest are caught by the gate sitting at the 1st percentile.
+    whether or not it is in focus. The same weakness makes it unreliable on
+    heavily compressed sub-megapixel files, whose JPEG blocking is hard edges -
+    those are 53% of 2011 and hold most of what the gate rejects in that year.
+    `is_screenshot` already removes the common case, and `MIN_SHARPNESS` sits
+    BELOW the 1st percentile for this reason rather than at it.
 
     Still a RELATIVE measure and still not a quality score. A grossly blurred
     photo of a high-contrast scene can outscore a sharp photo of a soft one -
     measured, it happens - which is why the gate in `memory.composition` sits
-    at the 1st percentile rather than anywhere near the middle.
+    below the 1st percentile rather than anywhere near the middle, and why the
+    RANKING rather than the gate is what keeps blur out of a memory.
 
     ImageChops/ImageStat rather than a Python loop: both run in C, and the
     loop version measurably dominated the JPEG decode.

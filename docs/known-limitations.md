@@ -264,12 +264,21 @@ These entries were carried into M2 as open questions. Each is now closed.
   photographed sign or document sits low in the distribution on merit it does
   not lack. `is_screenshot` removes the common case and the gate sits at the
   1st percentile; the rest is accepted.
+- **The measure is unreliable on heavily compressed sub-megapixel photos**,
+  for the same reason as the entry above: JPEG blocking at 800x600 is hard
+  edges, and hard edges are what it cannot read. Those files are 53% of 2011
+  against 7.5% of the library, so a gate calibrated on library-wide
+  percentiles lands disproportionately on the early years — measured, a 0.24
+  gate took 2.25% of 2008–2013 against 0.83% of 2020–2026. `MIN_SHARPNESS` was
+  lowered to 0.12 for this reason, which flattens it to 0.15% against 0.16%.
+  The underlying weakness is unfixed; only the gate was moved out of its way.
 - **Sharpness still cannot be compared across libraries.** It is far more
-  stable than the measure it replaced — per-year 5th percentiles span 1.71x
-  where the old one spanned 4.70x, and 1.16x across resolution decades — but
-  `MIN_SHARPNESS = 0.24` was derived from *this* library. A library of
-  scanned film or of screenshots would need it re-derived, and nothing in the
-  code detects that.
+  stable than the measure it replaced — per-year 5th percentiles span 1.75x
+  where the old one spanned 3.84x, and 1.16x across resolution decades — but
+  `MIN_SHARPNESS = 0.12` was derived from *this* library, twice, and the
+  second derivation needed a person looking at the photographs it rejected.
+  A library of scanned film or of screenshots would need it re-derived, and
+  nothing in the code detects that.
 - **Album merging is manual.** `Leh Ladakh` / `ladakh` and the three Kashmir
   albums are each one trip, but no metadata says so, and `Diwali 25` /
   `Diwali Kali Puja 22` are different years under an equally similar pair of

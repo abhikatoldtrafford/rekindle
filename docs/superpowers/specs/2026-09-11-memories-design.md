@@ -249,7 +249,7 @@ Three properties, each measured rather than argued:
 | P(sharp > grossly blurred) | 0.704 | **1.000** |
 | P(sharp > mild), 44 photos hand-graded at 100% | 0.682 | **0.793** |
 | P(sharp > gross), same 44 | 0.600 | **0.800** |
-| per-year p5 spread, 2,240 photos | 4.70x | **1.71x** |
+| per-year p5 spread, all 18,363 photos | 3.84x | **1.75x** |
 | shallow-DoF retention (synthetic) | — | **0.800** |
 
 **Resolution.** 128 was not a tuning choice that came out low; it was the
@@ -261,11 +261,12 @@ separation stops improving materially against what it costs.
 **A ratio, not a magnitude.** This is the load-bearing decision, and it is
 what makes a *single* threshold safe across a library spanning 2000-2026. A
 gradient magnitude cannot tell a low-contrast photo from a blurred one, so the
-old measure's per-year 5th percentile spanned 4.70x and the gate had to cower
-in the tail to avoid gutting the early years. Dividing by the tile's own
-gradient energy cancels scene contrast, and the spread falls to 1.71x. A plain
-gradient at the same 1024 resolution still spans 4.44x, so the resolution is
-not what fixed this — the normalisation is.
+old measure's per-year 5th percentile spanned 3.84x across the whole library
+and the gate had to cower in the tail to avoid gutting the early years.
+Dividing by the tile's own gradient energy cancels scene contrast, and the
+spread falls to 1.75x. On a matched sample a plain gradient at the same 1024
+resolution still spans 4.44x, so the resolution is not what fixed this — the
+normalisation is.
 
 **The sharpest tile, not the mean.** A portrait with a sharp face against a
 deliberately blurred background is often the best photo in the set and scores
@@ -283,8 +284,12 @@ therefore nearly invisible to this measure — a 40px checkerboard scores 0.043
 sharp and 0.009 after a radius-4 blur. What the measure reads is the loss of
 fine *texture*, which is the right thing for a photograph and is exactly why
 it is contrast-invariant, but a genuinely flat-and-hard-edged subject (a sign,
-a document) scores low whether or not it is in focus. `is_screenshot` removes
-the common case; the gate sitting at the 1st percentile absorbs the rest.
+a document) scores low whether or not it is in focus. The same weakness makes
+it unreliable on heavily compressed sub-megapixel files, whose JPEG blocking is
+all hard edges — and those are **53% of 2011** against 7.5% of the library,
+which is where the threshold below had to be settled by looking rather than by
+arithmetic. `is_screenshot` removes the common case; the gate sitting *below*
+the 1st percentile absorbs the rest.
 
 It remains a **relative** measure. A grossly blurred photo of a high-contrast
 scene can still outscore a sharp photo of a soft one — measured, it happens —
@@ -525,7 +530,7 @@ something real about the photos of that period.
 | Extreme aspect | ratio <= **2.5:1** | 30 images (0.16%) | The widest image in the library is a 8874x943 VR panorama at 9.41:1, which would render as a 1280x136 band. A 1886x8485 crop is the same problem the other way. Essentially free. |
 | Near-black | mean luma >= **20** | ~0.26% | Mean-luma percentiles over 1,149 photos stratified across every year: p1=33, median=113. The gate sits far outside anything real. |
 | Blown out | mean luma <= **235** | ~0.09% | p99 is 186. |
-| Out of focus | sharpness >= **0.24** | ~1.07% | See below — the one that had to be tuned carefully, and re-derived from scratch when the measure changed. |
+| Out of focus | sharpness >= **0.12** | 0.19% (34 images) | See below — the one that had to be tuned carefully, re-derived from scratch when the measure changed, and then re-derived again when the whole library disagreed with the sample. |
 | Screenshots | see 5A.5 | 401 images (2.1%) | |
 | Videos | always | 1,117 (5.8%) | See 5A.6 |
 | Undecodable | always | counted | Never silently dropped. |
@@ -542,29 +547,50 @@ no year was singled out, and it removed about 1%.
 When §4.2's measure changed, that number became **meaningless, not merely
 mis-scaled**: the old gradient ran to about 25 and the new ratio to 1.0, and
 the distribution changed shape, not just units. Scaling 1.5 by a guess would
-have been the worst available option. It was re-derived by measuring the new
-measure over **2,240 photos, 120 per year, through the real decode path**:
+have been the worst available option.
 
-    p1 = 0.236   p2 = 0.267   p5 = 0.331   median = 0.554
+**The first re-derivation was wrong, and the whole library is what said so.**
+Measured over a 2,240-photo sample, 120 per year, the new percentiles came out
+p1=0.236, p5=0.331, and 0.24 looked like an exact reproduction of the original
+rules: ~1% removed, below every year's p5. Run over all 18,363 fingerprinted
+photos it rejected **1.50%**, and — the part that matters — **2.25% of
+2008–2013 against 0.83% of 2020–2026**. A uniform 120-per-year sample
+over-weights the sparse early years, so it was wrong in precisely the
+direction this gate must never be wrong in.
 
-**0.24** keeps both of the original design rules exactly — it removes about 1%
-overall (measured: 1.07%) and it sits below *every* year's 5th percentile, the
-lowest of which is 0.252 in 2011.
+The real distribution, all 18,363:
 
-What changed is the tilt. Rejection by era, measured:
+    p1 = 0.214   p2 = 0.252   p5 = 0.315   median = 0.543   p95 = 0.714
 
-| era | old measure @ 1.5 (as shipped) | new measure @ 0.24 |
+**The second re-derivation was done by looking at photographs.** In the band
+0.12–0.22, roughly a quarter of a hand-graded sample of 16 were pictures worth
+keeping — an 800x600 portrait, a 2012 face at 240x320 — because the measure is
+unreliable on the heavily compressed sub-megapixel files that make up 53% of
+2011. Below 0.12, fifteen of sixteen were indefensible: a blown-out sun,
+out-of-focus blobs, flat sky, motion smears.
+
+**0.12**, measured over the whole library:
+
+| | old measure @ 1.5 (as shipped) | new measure @ 0.12 |
 |---|---|---|
-| 2008–2013 | the years most at risk | **1.19%** |
-| 2020–2026 | the years least at risk | **1.19%** |
-| worst single year | 2011 | 2011, at 3.33% |
+| whole library | 0.99% (182 images) | **0.19% (34 images)** |
+| 2008–2013 | 1.22% | **0.15%** |
+| 2020–2026 | 1.32% | **0.16%** |
+| worst single year | 2021, at 5.55% | 2015, at 0.70% |
+| 2011 | 3.83% | **0.44%** |
+| 2008 | 2.82% | **0.00%** |
 
-The early years are no longer the ones a global threshold punishes, because a
-contrast-invariant measure does not mistake a soft 2011 CCD photo for a
-blurred one. That is the entire reason §4.2 chose a ratio.
+Flat across eras, and gentler than the old gate in every early year.
 
-Soft-but-acceptable photos are still not dropped: sharpness is *also* the
-ranking signal, so they simply rank lower.
+**This gate is deliberately weaker than the one it replaces, and that is not a
+retreat from the goal.** A gate that removes 1% of a library was never what
+kept mild blur out of a 24-shot memory drawn from a pool of hundreds — the
+*ranking* is, and sharpness is the ranking signal. That ranking scored a sharp
+photo above a mildly blurred one 51.9% of the time and now does so 90.3% of
+the time; that is where the blur removal the brief asked for actually happens.
+The gate's only job is to stop the indefensible from being ranked at all, and
+a false positive here deletes an irreplaceable photograph outright, so it
+belongs below the 1st percentile rather than at it.
 
 A photo with no measured brightness or sharpness has simply never been
 fingerprinted, and is **kept**. The quality gates filter on measured evidence;

@@ -65,29 +65,42 @@ MAX_ASPECT = 2.5
 MIN_BRIGHTNESS = 20.0
 MAX_BRIGHTNESS = 235.0
 
-# Sharpness gate, RE-DERIVED from measurement when the measure changed.
+# Sharpness gate, RE-DERIVED from measurement when the measure changed, and
+# then re-derived AGAIN when the whole library disagreed with the sample.
 #
 # `memory.fingerprint.sharpness` is now a reblur ratio in [0, 1], not a mean
-# gradient in [0, 255]. The old 1.5 is meaningless on that scale and scaling
-# it by a guess would have been the worst of both: the distribution changed
-# shape, not just units.
+# gradient running to about 25. The old 1.5 is meaningless on that scale, and
+# scaling it by a guess would have been the worst of both: the distribution
+# changed shape, not just units.
 #
-# Measured over 2,240 photos, 120 per year, through the real decode path:
-# p1=0.236, p2=0.267, p5=0.331, median=0.554. Per-year p5 now spans only
-# 0.252 (2011) to 0.432 (2025) - 1.71x, against 4.70x for the old measure,
-# because the ratio cancels scene contrast.
+# Measured over ALL 18,363 fingerprinted photos: p1=0.214, p2=0.252, p5=0.315,
+# median=0.543, p95=0.714. A 120-per-year sample put p1 at 0.236 and suggested
+# 0.24; the full library says that would have rejected 1.50% and, worse, would
+# have taken 2.25% of 2008-2013 against 0.83% of 2020-2026. The sample was
+# uniform per year, which over-weights the sparse early years - so the number
+# it produced was wrong in exactly the direction this gate must not be wrong.
 #
-# 0.24 keeps the old gate's two design rules exactly. It removes ~1% overall
-# (measured 1.07%) and it sits below EVERY year's 5th percentile, so no year
-# is singled out. The per-year rejection rate is now flat where the old gate
-# was tilted: 1.19% across 2008-2013 against 1.19% across 2020-2026, and the
-# worst year is 2011 at 3.33%. Under the old measure the early years were the
-# ones at risk; under this one they are not, which is the whole point of
-# choosing a contrast-invariant measure.
+# 0.12 was then chosen by LOOKING at what each candidate rejects. In the band
+# 0.12-0.22, roughly a quarter of a hand-graded sample of 16 were photographs
+# worth keeping - an 800x600 portrait, a 2012 face at 240x320 - because the
+# measure is unreliable on the heavily compressed sub-megapixel files that
+# make up 53% of 2011 and 7% of the library. Below 0.12, 15 of 16 were
+# indefensible: a blown-out sun, out-of-focus blobs, flat sky, motion smears.
 #
-# Soft-but-acceptable photos are still not dropped - they simply rank lower,
-# because sharpness is also the ranking signal.
-MIN_SHARPNESS = 0.24
+# Measured rejection at 0.12, whole library: 0.19% (34 photos) against the old
+# gate's 0.99% (182). No year loses more than 0.70%. 0.15% of 2008-2013 and
+# 0.16% of 2020-2026 - flat, and gentler than the old gate in every early year
+# (2011: 0.44% against 3.83%; 2008: 0.00% against 2.82%).
+#
+# This gate is DELIBERATELY weaker than the one it replaces, and that is not a
+# retreat from the goal. A gate that removes 1% of a library cannot be what
+# keeps mild blur out of a 24-shot memory drawn from a pool of hundreds; the
+# RANKING is, and sharpness is the ranking signal. That ranking used to score
+# a sharp photo above a mildly blurred one 51.9% of the time and now does so
+# 90.3% of the time. The gate's only job is to stop the indefensible from
+# being ranked at all, and a false positive here deletes an irreplaceable
+# photograph outright - so it belongs below the 1st percentile, not near it.
+MIN_SHARPNESS = 0.12
 
 # Common phone and desktop screen sizes, either orientation. Used ONLY in
 # conjunction with a total absence of camera metadata - see `is_screenshot`.
