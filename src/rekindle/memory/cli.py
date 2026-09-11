@@ -200,11 +200,29 @@ def memory_cmd(
             if not offers:
                 console.print("[yellow]No anniversary for today.[/yellow] Try `rekindle memories`.")
                 return
-        elif recipe and key:
-            found = [o for o in engine.all_offers(index) if o.recipe == recipe and o.key == key]
-            if not found:
+        elif recipe or key:
+            # `--recipe` ALONE used to fall through to "build anything", so
+            # `rekindle memory --recipe on_this_month` cheerfully rendered
+            # album stories - the command doing something other than what its
+            # own `--help` says, silently, which is this project's signature
+            # defect. `--key` alone is refused rather than guessed at: two
+            # recipes can share a key shape ("10" is a month and, for
+            # `on_this_day`, half a date).
+            if key and not recipe:
                 console.print(
-                    f"[red]No memory[/red] for recipe={recipe!r} key={key!r}. "
+                    "[red]--key needs --recipe[/red]: the same key can belong to "
+                    "more than one recipe. Run `rekindle memories` to see both."
+                )
+                raise typer.Exit(code=2)
+            found = [
+                o
+                for o in engine.all_offers(index)
+                if o.recipe == recipe and (key is None or o.key == key)
+            ]
+            if not found:
+                target = f"recipe={recipe!r}" + (f" key={key!r}" if key else "")
+                console.print(
+                    f"[red]No memory[/red] for {target}. "
                     "Run `rekindle memories` to see what is available."
                 )
                 raise typer.Exit(code=2)

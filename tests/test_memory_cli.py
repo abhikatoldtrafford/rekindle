@@ -6,6 +6,7 @@ open, so without an explicit check every one of these would silently report a
 healthy library of zero photos.
 """
 
+import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -227,6 +228,74 @@ def test_the_cli_tells_the_music_layer_which_memory_it_is_rendering(tmp_path, mo
         "the CLI did not hand the music layer the memory's id, so every "
         "memory would get the same track"
     )
+
+
+def test_recipe_alone_builds_only_that_recipe(tmp_path):
+    """`rekindle memory --recipe on_this_month` used to fall through to "build
+    anything" and cheerfully render album stories - the command doing
+    something other than what its own --help says, silently. Found by running
+    it, not by reading it."""
+    data = _library(tmp_path, n=8)
+    out = tmp_path / "out"
+    result = runner.invoke(
+        app,
+        [
+            "memory",
+            "--recipe",
+            "album_story",
+            "--limit",
+            "5",
+            "--out",
+            str(out),
+            "--no-mp4",
+            "--data-dir",
+            str(data),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    built = [json.loads((d / "memory.json").read_text(encoding="utf-8")) for d in out.iterdir()]
+    assert built, "nothing was built"
+    assert {s["recipe"] for s in built} == {"album_story"}
+
+
+def test_a_recipe_with_no_offers_exits_2_rather_than_building_something_else(tmp_path):
+    data = _library(tmp_path, n=8)
+    result = runner.invoke(
+        app,
+        [
+            "memory",
+            "--recipe",
+            "place_cluster",
+            "--out",
+            str(tmp_path / "o"),
+            "--no-mp4",
+            "--data-dir",
+            str(data),
+        ],
+    )
+    assert result.exit_code == 2, result.output
+    assert "No memory" in result.output
+    assert not (tmp_path / "o").exists() or list((tmp_path / "o").iterdir()) == []
+
+
+def test_key_without_recipe_is_refused_not_guessed(tmp_path):
+    """ "10" is a month to `on_this_month` and half a date to `on_this_day`."""
+    data = _library(tmp_path, n=8)
+    result = runner.invoke(
+        app,
+        [
+            "memory",
+            "--key",
+            "10",
+            "--out",
+            str(tmp_path / "o"),
+            "--no-mp4",
+            "--data-dir",
+            str(data),
+        ],
+    )
+    assert result.exit_code == 2, result.output
+    assert "--key needs --recipe" in result.output
 
 
 def test_memory_with_an_unknown_key_exits_2(tmp_path):
