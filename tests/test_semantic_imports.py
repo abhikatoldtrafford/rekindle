@@ -160,3 +160,25 @@ def test_face_models_are_onnx_files():
     for spec in FACE_MODELS.values():
         assert all(f.endswith(".onnx") for f in spec.pin.files)
         assert spec.family in {"yolo", "scrfd"}
+
+
+def test_the_onnx_pin_names_the_single_tower_graphs_not_the_combined_one():
+    """FOUND BY RUNNING the ONNX path against real photos.
+
+    `Xenova/clip-vit-large-patch14` ships three graphs whose names differ by
+    one word: `onnx/model.onnx` is the WHOLE CLIP model and requires
+    input_ids, pixel_values AND attention_mask in a single call; only
+    `onnx/vision_model.onnx` and `onnx/text_model.onnx` take one input each
+    and return the 768-d projected embedding.
+
+    Pinning the combined graph looked entirely correct in the file listing and
+    passed every test, because no test loaded the real session. It failed at
+    the first real image with "Required inputs (['pixel_values',
+    'attention_mask']) are missing from input feed (['input_ids'])".
+    """
+    pin = embed_model("clip-vit-l14").pin("onnx")
+    assert "onnx/vision_model.onnx" in pin.files
+    assert "onnx/text_model.onnx" in pin.files
+    assert "onnx/model.onnx" not in pin.files, (
+        "onnx/model.onnx is the combined CLIP graph; it cannot be given images on their own"
+    )

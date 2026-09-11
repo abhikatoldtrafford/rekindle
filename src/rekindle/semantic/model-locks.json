@@ -5,6 +5,7 @@
     "Xenova/clip-vit-large-patch14@c307790166907339eed5a9a53a249af534102536/config.json": "99d2f15ccaf4f72c1e4c656dc77ae0fa487696860617ea50626d3a14a018185d",
     "Xenova/clip-vit-large-patch14@c307790166907339eed5a9a53a249af534102536/onnx/model.onnx": "bd355425bce04518c54d2581c7c45732cbb66d41cbd96c5d7c00f3988d1bb35d",
     "Xenova/clip-vit-large-patch14@c307790166907339eed5a9a53a249af534102536/onnx/text_model.onnx": "a86051a90491b97e2ea1d0351ef664926735bca7536034384f901915ee91fd69",
+    "Xenova/clip-vit-large-patch14@c307790166907339eed5a9a53a249af534102536/onnx/vision_model.onnx": "ff49f8aa57c7abfd26e382eb083e4dbf988505223a9bd3767dbfd4e729206709",
     "Xenova/clip-vit-large-patch14@c307790166907339eed5a9a53a249af534102536/preprocessor_config.json": "6f638fb9401a6d6296feff533ee7efe657b787c49f954f82f5906b36ef2a1b1f",
     "Xenova/clip-vit-large-patch14@c307790166907339eed5a9a53a249af534102536/special_tokens_map.json": "c4864a9376a8401918425bed71fc14fc0e81f9b59ec45c1cf96cccb2df508eac",
     "Xenova/clip-vit-large-patch14@c307790166907339eed5a9a53a249af534102536/tokenizer.json": "72ed5c96db5729294468543e4bc75fce14ca63f58e37300290189ba1c1e52b85",

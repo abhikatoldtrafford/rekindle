@@ -99,7 +99,18 @@ class TorchEncoder:
         *,
         device: Device = "auto",
         cache_dir: Path | None = None,
+        allow_download: bool = False,
     ) -> None:
+        """Load `spec` on `device`, FROM THE LOCAL CACHE ONLY by default.
+
+        `allow_download=False` is the offline contract, and it is a default
+        rather than an option because the alternative was found by running:
+        without `local_files_only`, `from_pretrained` cheerfully fetches 1.7 GB
+        the first time anything touches an encoder. A test that expected an
+        instant "install the extra" message instead sat downloading CLIP into
+        a pytest temporary directory. Only `rekindle semantic setup` may use
+        the network; everything else says what to run.
+        """
         try:
             import torch
             from transformers import AutoModel, AutoProcessor
@@ -114,16 +125,29 @@ class TorchEncoder:
         self.report = resolve_device(device)
         self._torch = torch
         pin = spec.pin("torch")
-        kwargs = {"revision": pin.revision}
+        kwargs: dict[str, object] = {
+            "revision": pin.revision,
+            "local_files_only": not allow_download,
+        }
         if cache_dir is not None:
             kwargs["cache_dir"] = str(cache_dir)
-        self._proc = AutoProcessor.from_pretrained(pin.repo_id, **kwargs)
         dtype = torch.float16 if self.report.device == "cuda" else torch.float32
-        self._model = (
-            AutoModel.from_pretrained(pin.repo_id, dtype=dtype, **kwargs)
-            .to(self.report.device)
-            .eval()
-        )
+        try:
+            self._proc = AutoProcessor.from_pretrained(pin.repo_id, **kwargs)
+            self._model = (
+                AutoModel.from_pretrained(pin.repo_id, dtype=dtype, **kwargs)
+                .to(self.report.device)
+                .eval()
+            )
+        except Exception as exc:  # noqa: BLE001 - transformers raises a wide family
+            if allow_download:
+                raise
+            where = cache_dir or "the default Hugging Face cache"
+            raise SemanticUnavailable(
+                f"{pin.repo_id}@{pin.revision[:8]} is not in {where}. Run "
+                f"`rekindle semantic setup --model {spec.key}` first (it needs "
+                f"a network connection once). Underlying error: {exc}"
+            ) from exc
         self._dtype = dtype
 
     def encode_images(self, images: Sequence[Image]) -> list[Vector]:
@@ -177,7 +201,10 @@ class OnnxEncoder:
         self.dim = spec.dim
         self._np = np
         self.model_dir = model_dir
-        vision = model_dir / "onnx" / "model.onnx"
+        # vision_model, not model: see the comment on the ONNX pin in
+        # registry.py. `onnx/model.onnx` is the combined graph and cannot be
+        # given images on their own.
+        vision = model_dir / "onnx" / "vision_model.onnx"
         text = model_dir / "onnx" / "text_model.onnx"
         for path in (vision, text):
             if not path.is_file():

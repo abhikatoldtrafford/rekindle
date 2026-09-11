@@ -147,7 +147,15 @@ EMBED_MODELS: dict[str, EmbedModel] = {
                 "tokenizer.json",
                 "tokenizer_config.json",
                 "special_tokens_map.json",
-                "onnx/model.onnx",
+                # vision_model / text_model, NOT the combined `onnx/model.onnx`.
+                # The combined graph is the whole CLIP model: it requires
+                # input_ids, pixel_values AND attention_mask in one call and
+                # returns logits. Feeding it images alone fails with
+                # "Required inputs (['pixel_values', 'attention_mask']) are
+                # missing" - found by running the ONNX path against real
+                # photos, not by reading the file list. These two each take
+                # one input and return the 768-d projected embedding directly.
+                "onnx/vision_model.onnx",
                 "onnx/text_model.onnx",
             ),
         ),

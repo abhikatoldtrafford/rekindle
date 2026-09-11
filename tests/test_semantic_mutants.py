@@ -254,3 +254,36 @@ def test_preprocess_is_a_plain_record():
     a = Preprocess(224, 224, (0.0, 0.0, 0.0), (1.0, 1.0, 1.0), 1 / 255, 3)
     b = Preprocess(224, 224, (0.0, 0.0, 0.0), (1.0, 1.0, 1.0), 1 / 255, 3)
     assert a == b
+
+
+# 9 --------------------------------------------- the offline contract itself
+def test_the_torch_encoder_never_downloads(tmp_path):
+    """FOUND BY RUNNING, not by reading.
+
+    `TorchEncoder` originally called `from_pretrained` without
+    `local_files_only`. The moment torch was installed on this machine, a CLI
+    test that expected an instant "install the extra" message instead sat
+    there pulling 1.7 GB of CLIP weights into a pytest temporary directory -
+    silently breaking the milestone's central promise that only
+    `rekindle semantic setup` touches the network.
+
+    Skipped when torch is absent, because then the failure is a different
+    (also correct) one. On CI that is every run; on a developer machine with
+    the GPU extra it is this assertion.
+    """
+    import importlib.util
+
+    if importlib.util.find_spec("torch") is None:
+        pytest.skip("torch is absent; the no-extra path is covered elsewhere")
+
+    from rekindle.semantic.encoder import TorchEncoder
+    from rekindle.semantic.registry import embed_model
+
+    empty = tmp_path / "empty-cache"
+    empty.mkdir()
+    with pytest.raises(SemanticUnavailable) as exc:
+        TorchEncoder(embed_model("clip-vit-l14"), device="cpu", cache_dir=empty)
+    assert "semantic setup" in str(exc.value)
+    # Nothing may have been written to the cache: a download that failed late
+    # is still a download.
+    assert list(empty.rglob("*.safetensors")) == []
