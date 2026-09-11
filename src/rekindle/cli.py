@@ -156,6 +156,90 @@ def enrich(
 # cost on a cold Windows filesystem.
 
 
+# Repeated here rather than imported: importing `rekindle.fetch` at module
+# scope would pull urllib into `rekindle --version`, and it would make the
+# "nothing else imports the fetcher" guard depend on where a call happens to
+# sit. `test_fetch.py` pins the two together.
+_MUSIC_ITEM = "musopen-chopin"
+
+music_app = typer.Typer(
+    help="Music beds. `fetch` is the ONE command in rekindle that uses the network.",
+    no_args_is_help=True,
+)
+app.add_typer(music_app, name="music")
+
+
+@music_app.command("fetch")
+def music_fetch(
+    dest: Annotated[Path, typer.Option("--dest", help="Where to write the tracks.")] = Path(
+        "music"
+    ),
+    count: Annotated[
+        int, typer.Option("--count", help="How many tracks to fetch. 0 for all of them.")
+    ] = 12,
+    item: Annotated[str, typer.Option("--item", help="archive.org item identifier.")] = _MUSIC_ITEM,
+    yes: Annotated[bool, typer.Option("--yes", help="Skip the confirmation prompt.")] = False,
+) -> None:
+    """Download CC0 music beds from archive.org. Never runs on its own.
+
+    Nothing else in rekindle touches the network - not index, not enrich, not
+    fingerprint, not memory, not watch. This exists so that wanting a
+    soundtrack does not mean wiring a download into first run, which is how a
+    third party's uptime becomes your program's correctness. freepd.com, the
+    most obvious source for exactly this, shut down permanently in 2025.
+
+    Filenames and checksums are resolved through the metadata API at fetch
+    time; nothing is pinned in the source and no name is constructed by
+    pattern.
+    """
+    from rekindle.fetch import FetchError, fetch_tracks, list_tracks
+
+    try:
+        source, tracks = list_tracks(item)
+    except FetchError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+
+    if not source.cc0:
+        # Checked before a byte is downloaded, and refused rather than
+        # warned about. An item can be relicensed after this code is
+        # written, which is the whole reason the licence is read at fetch
+        # time instead of asserted in a comment.
+        console.print(
+            f"[red]{item} does not declare CC0[/red] "
+            f"(licence: {source.licence_url or 'none stated'}). Nothing downloaded."
+        )
+        raise typer.Exit(code=2)
+    if not tracks:
+        console.print(f"[red]{item} has no checksummed MP3s.[/red] Nothing downloaded.")
+        raise typer.Exit(code=2)
+
+    chosen = tracks if count <= 0 else tracks[:count]
+    total_mb = sum(t.size for t in chosen) / 1_000_000
+    console.print(f"[bold]{source.title}[/bold]")
+    console.print(f"  source   {source.page}")
+    console.print("  licence  CC0 1.0 - https://creativecommons.org/publicdomain/zero/1.0/")
+    console.print(f"  fetching {len(chosen)} of {len(tracks)} tracks, about {total_mb:.0f} MB")
+    console.print(f"  into     {dest}")
+
+    if not yes and not typer.confirm("Download now?"):
+        console.print("Nothing downloaded.")
+        raise typer.Exit(code=0)
+
+    def progress(index: int, total: int, track) -> None:
+        console.print(f"  [dim]{index}/{total}[/dim] {track.filename}")
+
+    report = fetch_tracks(chosen, dest, item=item, on_progress=progress)
+    console.print(
+        f"[green]{report.downloaded} downloaded[/green], {report.skipped} already present, "
+        f"{report.failed} failed ({report.bytes_written / 1_000_000:.0f} MB written)"
+    )
+    for line in report.errors:
+        console.print(f"  [yellow]![/yellow] {line}")
+    if report.failed:
+        raise typer.Exit(code=1)
+
+
 @app.command()
 def fingerprint(data_dir: DataDir = Path("./data")) -> None:
     """Compute perceptual fingerprints. One-time pass; needed for dedup."""
