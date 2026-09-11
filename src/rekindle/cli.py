@@ -12,10 +12,17 @@ from rekindle import __version__
 from rekindle.db import PhotoStore
 from rekindle.doctor import diagnose, diagnose_index, render, render_enrich, render_index
 from rekindle.enrich.takeout import EmptyIndexError, TakeoutEnricher
+from rekindle.semantic.cli import register as register_semantic
 from rekindle.sources.folder import FolderSource
 
 app = typer.Typer(help="Turn your photo library into memories.", no_args_is_help=True)
 console = Console()
+
+# The semantic verbs live in rekindle.semantic.cli and attach themselves, so
+# this file gains two lines rather than six command bodies. They import no
+# heavy dependency at module level, so `rekindle --help` still works - and is
+# still fast - on an install that has none of the optional extras.
+register_semantic(app)
 
 DataDir = Annotated[Path, typer.Option("--data-dir", help="Where rekindle stores its index.")]
 

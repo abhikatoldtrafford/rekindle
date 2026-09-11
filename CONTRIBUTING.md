@@ -81,6 +81,33 @@ uv run ruff check .
 uv run ruff format .
 ```
 
+### The semantic extras
+
+`rekindle semantic ...` (embeddings, search, scene clusters, aesthetic
+ranking, the face gate) lives behind two optional extras, and **CI installs
+neither**:
+
+```bash
+uv sync --extra semantic       # numpy + onnxruntime, CPU, ~120 MB
+uv sync --extra semantic-gpu   # adds torch + transformers, CUDA, ~2.5 GB
+```
+
+You do not need either to work on rekindle, or to run the tests. The semantic
+tests use `tests/fixtures/semantic.py`, whose `ToyEncoder` is a real (tiny)
+joint image/text embedding function over a colour grid — not a mock. If you
+add a test there, assert the *answer*, not that the encoder was called: a test
+that mocks the model and checks the mock was called proves nothing.
+
+Three rules for anything under `src/rekindle/semantic/`:
+
+- **No heavy import at module level.** `rekindle --help` must not import
+  numpy, torch, onnxruntime or transformers.
+  `tests/test_semantic_imports.py` checks this in a clean subprocess.
+- **Every feature degrades to a sentence**, never an ImportError, and exits 3.
+- **Model weights are pinned to a commit and checksummed.** Adding a model
+  means adding a `RepoPin` with a 40-hex revision, a licence with a URL, and
+  an entry in `model-locks.json` (`rekindle semantic setup --write-lock`).
+
 ### Testing against a real Takeout export
 
 Two of this project's three worst bugs were invisible to a green test suite and

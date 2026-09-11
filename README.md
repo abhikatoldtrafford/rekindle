@@ -174,6 +174,34 @@ properly, and several give face regions that Google never did. Each is one
 requires `index` to have run first — it reads the database, not the filesystem,
 so photo rows must already exist.
 
+### Semantic features (optional)
+
+Search your library by describing a photo, group it by scene, and rank it by
+predicted aesthetic quality. These need an optional extra and a one-time
+model download; everything afterwards runs with no network at all.
+
+```bash
+uv sync --extra semantic-gpu        # torch + CUDA;  --extra semantic for CPU/ONNX
+uv run rekindle semantic setup      # fetch and checksum the weights, once
+uv run rekindle semantic doctor     # which device will actually be used?
+
+uv run rekindle semantic embed                  # embed the indexed photos
+uv run rekindle semantic find "snowy mountains" # search
+uv run rekindle semantic cluster --untagged-only
+uv run rekindle semantic rank --album Kashmir -k 40
+uv run rekindle semantic facegate               # propose face-free photos
+```
+
+`semantic setup` is the only command in rekindle that makes a network
+request. Every other command loads from the local cache and fails with a
+message if something is missing, rather than downloading 1.7 GB you did not
+ask for. Model revisions are pinned to exact commits and every file's sha256
+is checked against `model-locks.json`; `rekindle semantic licences` prints
+the licence of everything rekindle can fetch.
+
+Without the extra, these commands print what to install and exit — nothing
+else changes, and the default `uv sync` stays small.
+
 ## How it works
 
 ```
@@ -181,7 +209,7 @@ a folder of photos
         ↓
   read metadata          XMP → EXIF → filesystem
         ↓
-  fingerprints           dHash + sharpness, one decode per photo
+  local embeddings       CLIP ViT-L/14 on your GPU, or ONNX on CPU (optional)
         ↓
   SQLite                 relational truth
         ↓

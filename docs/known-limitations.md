@@ -318,3 +318,119 @@ These entries were carried into M2 as open questions. Each is now closed.
   names. An `album_aliases` config table lets the user say so; the default
   merges nothing. The overlap cap catches the resulting redundancy at build
   time.
+
+## M3 (semantic): what was deferred, and one label that must not be trusted
+
+All measured; the evidence is in [audit-m3-semantic.md](audit-m3-semantic.md).
+
+### The cluster labels must not be wired to sensitive-context detection
+
+`cluster.SCENE_VOCABULARY` names a cluster by the cosine between its centroid
+and 32 candidate phrases. The label is documented in code as cosmetic, and on
+the reference library it mostly is — #31 really is green countryside, #50
+really is food, #56 really is dogs.
+
+**But cluster #16 (270 photos of institutional buildings with gardens — a
+campus, balcony views, an old colonial building) was labelled
+"a hospital or a clinic", and contains no hospital.** In this project a
+hospital is a *sensitive context* (main spec §7.2). A cosmetic label that
+lands on a sensitive-context word stops being cosmetic the moment anything
+reads it. Nothing does today. **Nothing may, until the labels are either
+calibrated against a hand-checked set or replaced by a classifier with a
+confidence a caller can act on.** Label scores range 0.127–0.282 and 12 of 57
+clusters were labelled "a religious ceremony or temple", so the vocabulary is
+absorbing whatever is nearest rather than recognising anything.
+
+### Clusters are slices of a cone, not islands
+
+48 of 57 clusters have a neighbouring centroid closer to them than their own
+members are (median cohesion 0.834, median nearest-centroid 0.894). CLIP
+embeddings occupy a narrow cone, so k-means partitions one continuous region
+rather than finding natural groups. The partition is stable, reproducible and
+useful — but `k` is a choice, not a discovery, and "57 scene types" is not a
+claim this milestone makes. A density-based clustering (HDBSCAN) would be the
+principled fix and would bring a "this photo is in no scene" answer that
+`min_cosine` only approximates. Deferred: it is another dependency with two
+parameters to tune per library.
+
+### The face gate's numbers rest on 19 positives
+
+Measured recall is 1.000 (19 of 19, zero misses) and precision 0.633 on 64
+hand-checked photos. **Nineteen consecutive successes bound the miss rate below
+about 15% at 95% confidence and no tighter.** The cases most likely to be
+missed — a face at 20 px, deep shade, a profile behind a shoulder — are
+under-represented in 64 random photos. The gate therefore proposes and never
+publishes; there is no code path from `Verdict.ELIGIBLE` to a published file.
+Before anyone relies on it, re-measure on several hundred hand-checked photos.
+
+Nine of the eleven false positives are statues, painted idols and printed
+portraits — this library is full of Durga Puja. Whether a statue should block
+publication is a policy question for the user, not a detector defect, and it
+is why the gate reports boxes and counts rather than a verdict alone.
+
+### The ONNX CPU path is 49× slower than CUDA
+
+Measured on 32 real photos: **1.04 img/s** (ONNX, fp32, CPU) against
+**51.1 img/s** (torch, fp16, CUDA). The whole library would take about five
+hours on CPU against five and a half minutes on the GPU. Agreement is good —
+mean cosine 0.9966 against the torch vectors, text vectors identical to five
+decimal places, and 3 of 4 test queries return a byte-identical top-5 — so the
+fallback is correct, just slow. `Xenova/clip-vit-large-patch14` also ships
+`vision_model_uint8.onnx` and `_fp16` variants that would be several times
+faster; they are not pinned because their agreement with the fp32 path has
+not been measured, and an unmeasured quantisation is exactly the kind of
+silent quality loss this milestone's storage design exists to prevent.
+
+### Deferred, with reasons
+
+- **No ANN index.** 18,201 × 768 float32 is 55.9 MB and a query measures 31 ms
+  end to end. The design spec's escalation gate for vector search has not been
+  tripped.
+- **Cluster ids are not written back to the index.** That is a schema change,
+  and the whole storage design exists to avoid making one while M2 is making
+  one. Re-running `spherical_kmeans` at a fixed seed reproduces them exactly.
+- **`semantic-gpu` pins the cu126 wheel index for win32/linux only.** macOS
+  gets the PyPI wheel (Metal). An AMD/ROCm user must install torch themselves;
+  `resolve_device` will report CPU and warn only if `nvidia-smi` sees a GPU,
+  so a ROCm machine gets a silent CPU fallback. Not a regression — there was
+  no GPU support at all before — but it is a gap.
+- **The aesthetic head is a model of average human preference**, not this
+  user's. It likes sunsets, bokeh and symmetry and undervalues a blurry photo
+  of someone who matters. It ranks within a candidate set and never filters
+  across the library.
+
+### Two silent CPU fallbacks in the accelerated path
+
+Both measured in [audit-m3-semantic.md](audit-m3-semantic.md) §12–13. Neither
+is a crash, neither logs anything a user reads, and the only symptom of each is
+being slower — which is exactly the shape the PyPI CPU-only torch wheel taught
+this milestone to distrust.
+
+- **`torchvision` is absent, so transformers silently falls back from
+  `CLIPImageProcessor` to `CLIPImageProcessorPil`.** CLIP preprocessing then
+  runs at 117 img/s on one CPU thread while the ViT-L/14 forward it feeds
+  sustains 236 img/s — **66% of the encode is CPU preprocessing**, which is why
+  raising the batch changes nothing and why the fix was to run that half in the
+  decode pool. Installing torchvision would change the pixel values the model
+  sees, so it cannot be done without re-measuring agreement and re-embedding
+  the library. Not a dependency line; a migration.
+- **`FaceDetector(prefer_gpu=True)` does nothing.** The installed onnxruntime
+  is the CPU build, whose `get_available_providers()` offers only
+  `AzureExecutionProvider` and `CPUExecutionProvider`, so the CUDA branch is
+  unreachable and the detector reports `('CPUExecutionProvider',)` without
+  complaint. The pinned graph is fixed batch 1 as well. Reaching the GPU means
+  `onnxruntime-gpu`, which *replaces* `onnxruntime` in the same import
+  namespace and would put the verified ONNX CPU fallback at risk for a stage
+  that is not CLIP. Threading brought the library scan to about 11 minutes
+  instead of 26, which made the swap not worth its risk — **but `prefer_gpu`
+  should say that it could not be honoured rather than quietly returning CPU.**
+
+### The batch size changes the stored vectors
+
+fp16 reduction order depends on batch shape. Against batch 32, batch 16 is
+bit-identical, while batches 64 and 128 differ at a minimum cosine of 0.99998.
+Irrelevant at the 0.25–0.29 cosines search and clustering work with, but **a
+store should be filled with one batch size throughout**: the reference store was
+built at 64 and a rebuild at the default 32 reproduced only 25 of 18,201 vectors
+bit-for-bit (worst cosine 0.99902). Nothing detects this, and nothing needs to;
+it is recorded so the next person measuring agreement does not chase it.
