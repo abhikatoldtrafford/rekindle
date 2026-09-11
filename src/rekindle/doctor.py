@@ -209,11 +209,17 @@ def diagnose_index(store: PhotoStore) -> IndexDiagnosis:
         )
     if counts["ambiguous"]:
         warnings.append(
-            f"{counts['ambiguous']} photos had two or more sidecars IN THE SAME FOLDER "
-            "that disagreed on capture time or people, so they were deliberately not "
-            "enriched. This number is small by construction: a disagreeing sidecar in a "
+            f"{counts['ambiguous']} PHOTOS were deliberately not enriched because their "
+            "sidecar could not be identified. Two different causes land here: (1) two or "
+            "more sidecars named the photo and disagreed about it - on capture time, "
+            "people, GPS, description or favourite; (2) a DIFFERENT photo that happens to "
+            "share the filename also claimed the one sidecar, and nothing identified "
+            "which of them it describes, so neither got it. `rekindle enrich` reports the "
+            "two causes separately, and its own 'ambiguous' row counts SIDECARS, not "
+            "photos - the two numbers measure different things and are not expected to "
+            "match. This number is also small by construction: a disagreeing sidecar in a "
             "DIFFERENT folder is overridden rather than refused, and `rekindle enrich` "
-            "reports those separately. Do not read a low count here as no conflicts."
+            "reports those separately too. Do not read a low count here as no conflicts."
         )
     if counts["archived"]:
         warnings.append(
@@ -241,7 +247,7 @@ def render_index(diagnosis: IndexDiagnosis, console: Console) -> None:
     table.add_row("With people", str(d.with_people), f"{d.pct(d.with_people)}%")
     table.add_row("Enriched from a sidecar", str(d.enriched), f"{d.pct(d.enriched)}%")
     table.add_row("Enriched via a derivative", str(d.inherited), f"{d.pct(d.inherited)}%")
-    table.add_row("[yellow]Ambiguous (not enriched)[/yellow]", str(d.ambiguous), "")
+    table.add_row("[yellow]Ambiguous photos (not enriched)[/yellow]", str(d.ambiguous), "")
     table.add_row("[yellow]Archived in Google Photos[/yellow]", str(d.archived), "")
     table.add_row("[yellow]EXIF/Google date conflicts[/yellow]", str(d.conflicts), "")
     console.print(table)
@@ -260,7 +266,7 @@ def render_enrich(report: EnrichReport, console: Console) -> None:
         ("  matched", report.matched),
         ("  superseded (another candidate won)", report.superseded),
         ("  [yellow]orphaned, vs. rows in the index[/yellow]", report.orphaned),
-        ("  [yellow]ambiguous (refused)[/yellow]", report.ambiguous),
+        ("  [yellow]ambiguous sidecars (refused)[/yellow]", report.ambiguous),
         ("  overridden by directory preference", report.directory_preference_broke_a_tie),
         ("  cross-photo collisions caught", report.cross_photo_collisions),
         ("Album metadata", report.album_metadata),
@@ -276,10 +282,25 @@ def render_enrich(report: EnrichReport, console: Console) -> None:
         ("Favourites added", report.favourites_added),
         ("Albums retitled", report.albums_retitled),
         ("[yellow]EXIF/Google conflicts[/yellow]", report.conflicts),
+        ("EXIF/Google conflicts retracted", report.conflicts_retracted),
         ("Clustered dates suppressed", report.clustered_dates_suppressed),
+        ("Sidecar title disagreed with filename", report.title_disagreements),
     ):
         table.add_row(label, str(value))
     console.print(table)
+
+    # `title_disagreements` was counted and never shown. It is the measured
+    # gap between a sidecar's own `title` field and the filename it actually
+    # describes - the discovery this whole pass was rebuilt around, because
+    # matching on `title` mis-paired 963 photos. Expected to be non-zero: it
+    # counts every `(N)` sidecar, whose title omits the counter by design.
+    console.print(
+        f"\n[dim]{report.title_disagreements} sidecars name a file in their `title` "
+        "field "
+        "that is not the file they describe. Matching on `title` rather than on the "
+        "sidecar's own filename would mis-pair every one of them; most are Takeout's "
+        "`(N)` duplicates, whose title omits the counter.[/dim]"
+    )
 
     # Report, never silently drop. If either identity fails, say so loudly -
     # a mismatch here is exactly the class of bug this whole pass was
@@ -325,7 +346,8 @@ def render_enrich(report: EnrichReport, console: Console) -> None:
             "sidecar in another album that DISAGREED with the one used; the same-directory "
             "copy was preferred (directory beats a distant disagreement by design). That is "
             "not the same as no conflict existing: compare it against the "
-            f"'ambiguous (refused)' count above ({report.ambiguous}) - a disagreement in "
-            "the SAME directory is refused outright, but a DISTANT one is silently "
+            f"'ambiguous sidecars (refused)' count above ({report.ambiguous}) - a "
+            "disagreement in the SAME directory is refused outright, but a DISTANT one "
+            "is silently "
             "overridden, so this number, not that one, is the true measure of disagreement."
         )

@@ -1,9 +1,22 @@
+import json
 from pathlib import Path
 
 from rich.console import Console
 
-from rekindle.doctor import Diagnosis, diagnose, render
+from rekindle.db import PhotoStore
+from rekindle.doctor import (
+    Diagnosis,
+    diagnose,
+    diagnose_index,
+    render,
+    render_enrich,
+    render_index,
+)
+from rekindle.enrich.takeout import EnrichReport, TakeoutEnricher
 from rekindle.models import SourceReport
+from rekindle.sources.folder import FolderSource
+from tests.fixtures.gen import make_jpeg
+from tests.fixtures.takeout import build_takeout
 
 
 def _report(**kw) -> SourceReport:
@@ -180,3 +193,133 @@ def test_the_unparsed_sidecar_warning_now_points_at_enrich(tmp_path):
     hits = [w for w in d.warnings if "rekindle enrich" in w]
     assert len(hits) == 1
     assert "not implemented yet" not in hits[0]
+
+
+def _both_ambiguity_causes(tmp_path):
+    """An export whose `ambiguous` photos come from BOTH causes.
+
+    Cause 1 - `resolve()` refuses: two sidecars name DISAGREE.jpg and tell
+    different stories, and neither sits in the photo's own directory, so
+    there is nothing to break the tie with.
+
+    Cause 2 - a cross-photo collision: TWIN.jpg names two DIFFERENT photos
+    (different bytes, different folders) and there is exactly one sidecar for
+    that name, in a third folder. `resolve()`, handed one photo at a time,
+    has nothing to disagree with and would give the same sidecar to both;
+    the enricher refuses both rather than guessing.
+    """
+    root = tmp_path / "Takeout"
+    make_jpeg(root / "Photos from 2011" / "DISAGREE.jpg", size=(24, 24))
+    for album, person, when in (
+        ("Album A", "Ada", "1400000000"),
+        ("Album B", "Grace", "1500000000"),
+        ("Album D", "Hopper", "1600000000"),
+    ):
+        (root / album).mkdir(parents=True, exist_ok=True)
+        (root / album / "DISAGREE.jpg.supplemental-metadata.json").write_text(
+            json.dumps(
+                {
+                    "title": "DISAGREE.jpg",
+                    "photoTakenTime": {"timestamp": when},
+                    "people": [{"name": person}],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    make_jpeg(root / "Photos from 2012" / "TWIN.jpg", size=(26, 26))
+    make_jpeg(root / "Photos from 2013" / "TWIN.jpg", size=(28, 28))
+    (root / "Album C").mkdir(parents=True, exist_ok=True)
+    (root / "Album C" / "TWIN.jpg.supplemental-metadata.json").write_text(
+        json.dumps({"title": "TWIN.jpg", "photoTakenTime": {"timestamp": "1700000000"}}),
+        encoding="utf-8",
+    )
+    return root
+
+
+def test_the_ambiguous_warning_names_both_causes_and_its_unit(tmp_path):
+    """`enrich` printed `ambiguous (refused): 1` and `doctor --from-index`
+    printed `Ambiguous (not enriched): 5` for one word, on one export.
+
+    They are different units - SIDECARS against PHOTOS - and the doctor
+    warning additionally claimed all of them "had two or more sidecars IN THE
+    SAME FOLDER that disagreed on capture time or people". Measured on the
+    reference export: `resolve()` refused 2 photos, and the other 3 were
+    cross-photo collisions, a different cause entirely that the warning never
+    mentioned. So it misdescribed 3 of its 5 photos, and a user running the
+    two commands the README puts side by side saw `1` and `5`.
+
+    MUTATION (run, not assumed): change any asserted fragment of the warning
+    (e.g. "nothing identified" -> "NOTHING identified") and this fails.
+    """
+    root = _both_ambiguity_causes(tmp_path)
+    photos, _ = FolderSource().scan(root)
+    store = PhotoStore(tmp_path / "data" / "rekindle.sqlite")
+    store.upsert_many(photos)
+    report = TakeoutEnricher().enrich(root, store)
+    diagnosis = diagnose_index(store)
+    store.close()
+
+    # Both causes really did fire, and the two numbers really do differ - so
+    # neither half of the wording below is vacuous.
+    assert report.cross_photo_collisions == 2
+    assert diagnosis.ambiguous == 3  # DISAGREE.jpg + both TWIN.jpg photos
+    assert report.ambiguous == 4  # 3 DISAGREE sidecars + 1 TWIN sidecar
+    assert report.ambiguous != diagnosis.ambiguous
+
+    warning = next(w for w in diagnosis.warnings if "not enriched" in w)
+    assert "3 PHOTOS" in warning
+    # Cause 1, no longer restricted to "IN THE SAME FOLDER".
+    assert "two or more sidecars named the photo and disagreed" in warning
+    assert "IN THE SAME FOLDER" not in warning
+    # Cause 2, which the old text never mentioned at all.
+    assert "share the filename also claimed the one sidecar" in warning
+    assert "nothing identified" in warning
+    # The unit mismatch, stated rather than left for the user to discover.
+    assert "counts SIDECARS, not photos" in warning
+
+    console = Console(record=True, width=200)
+    render_index(diagnosis, console)
+    assert "Ambiguous photos (not enriched)" in console.export_text()
+
+
+def test_render_enrich_shows_the_title_disagreement_count(tmp_path):
+    """`title_disagreements` was counted and never rendered - 993 on the
+    reference export, and deleting the whole counting block left all 241
+    tests passing (verified by mutation at final review).
+
+    It is the measured gap between a sidecar's own `title` field and the file
+    it actually describes: the discovery this milestone was rebuilt around,
+    because matching on `title` mis-paired 963 photos.
+
+    MUTATION (run, not assumed): change `report.title_disagreements += 1` to
+    `+= 2` in `build_index` and this fails - the rendered row reads 2.
+    """
+    root = build_takeout(tmp_path / "Takeout")
+    photos, _ = FolderSource().scan(root)
+    store = PhotoStore(tmp_path / "data" / "rekindle.sqlite")
+    store.upsert_many(photos)
+    report = TakeoutEnricher().enrich(root, store)
+    store.close()
+    # DSC00107.JPG.supplemental-metadata(1).json describes DSC00107(1).JPG
+    # while its `title` says DSC00107.JPG - the (N) case, which is the bulk
+    # of the real export's 993.
+    assert report.title_disagreements == 1
+
+    console = Console(record=True, width=200)
+    render_enrich(report, console)
+    output = console.export_text()
+    row = next(ln for ln in output.splitlines() if "Sidecar title disagreed" in ln)
+    assert row.split("│")[2].strip() == "1"
+    assert "1 sidecars name a file in their `title` field" in " ".join(output.split())
+
+
+def test_render_enrich_labels_ambiguous_as_a_sidecar_count(tmp_path):
+    """The enrich table's row and the index table's row are different units;
+    each must say which."""
+    report = EnrichReport(ambiguous=7, directory_preference_broke_a_tie=3)
+    console = Console(record=True, width=200)
+    render_enrich(report, console)
+    flat = " ".join(console.export_text().split())
+    assert "ambiguous sidecars (refused)" in flat
+    assert "'ambiguous sidecars (refused)' count above (7)" in flat
