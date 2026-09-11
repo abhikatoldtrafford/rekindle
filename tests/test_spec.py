@@ -261,3 +261,20 @@ def test_describe_people_lists_the_most_present_first():
 
 def test_the_place_title_never_names_a_place():
     assert captions.PLACE_TITLE == "A place you kept coming back to"
+
+
+def test_the_title_substantiated_flag_round_trips():
+    facts = FactSheet(
+        title="durga puja over the years",
+        recipe="prompt",
+        photo_count=4,
+        title_substantiated=False,
+    )
+    assert FactSheet.from_json(facts.to_json()).title_substantiated is False
+
+
+def test_an_ordinary_fact_sheet_does_not_carry_the_flag_at_all():
+    """Absent when true, so every spec already on disk round-trips unchanged."""
+    facts = FactSheet(title="Kashmir", recipe="album_story", photo_count=4)
+    assert "title_substantiated" not in facts.to_json()
+    assert FactSheet.from_json(facts.to_json()).title_substantiated is True

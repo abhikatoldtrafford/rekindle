@@ -520,3 +520,19 @@ def test_an_excluded_person_removes_hits_without_any_filtering_here(tmp_path):
 @pytest.mark.parametrize("text", ["", "   "])
 def test_an_empty_prompt_normalises_to_nothing(text):
     assert prompt.normalise(text) == ""
+
+
+def test_a_prompt_fact_sheet_marks_its_title_unsubstantiated(tmp_path):
+    photos = [_p(f"d{i}", local=datetime(2019, 12, 25, 12, i)) for i in range(4)]
+    store, index = _index(tmp_path, photos)
+    try:
+        query = prompt.parse("Christmas in Midnapur", index)
+        build = prompt.build_selection(index, query, ["t"], _seed_tags({"t": ["d0", "d1"]}))
+        facts = build.selection.facts
+        assert facts.title_substantiated is False
+        # And the title is the NORMALISED prompt, so it is also lowercase -
+        # two independent reasons a place name in a prompt cannot reach a
+        # caption. See tests/test_llm.py for which one is load-bearing.
+        assert facts.title == "christmas in midnapur"
+    finally:
+        store.close()

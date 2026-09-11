@@ -15,6 +15,7 @@ import pytest
 
 from rekindle.memory import llm
 from rekindle.memory.llm import (
+    REJECT_UNKNOWN_PERSON,
     CaptionReport,
     GptCaptioner,
     LLMUnavailable,
@@ -458,3 +459,43 @@ def test_the_real_transport_is_never_called_by_any_other_test(monkeypatch):
     # A normal captioning run with an injected transport touches none of it.
     _, report = apply_captions(_spec(), GptCaptioner(SECRET, transport=_fake(["May 2015"] * 2)))
     assert report.accepted == 2
+
+
+# --------------------------------------------------------------------------
+# A prompt memory's title is a QUERY, not a fact
+
+
+def test_a_prompt_title_does_not_substantiate_its_own_words():
+    """The caption whitelist is built from the fact sheet, and the title is
+    part of it - correct for `album_story:Kashmir`, where the title IS an
+    album the user named. A prompt's title is whatever the user typed, so
+    trusting it would let the layer print an unresolvable place name under a
+    photograph and defeat the rule that a memory never names a place.
+    """
+    facts = FactSheet(
+        title="Christmas in Midnapur",
+        recipe="prompt",
+        photo_count=3,
+        title_substantiated=False,
+    )
+    assert substantiated("Midnapur in the evening", facts) == REJECT_UNKNOWN_PERSON
+
+
+def test_a_recipe_title_still_substantiates_its_own_words():
+    """Guards the test above against passing for the wrong reason: the flag,
+    and nothing else about these two sheets, is what changes the verdict."""
+    facts = FactSheet(title="Christmas in Midnapur", recipe="album_story", photo_count=3)
+    assert substantiated("Midnapur in the evening", facts) is None
+
+
+def test_casefolding_is_the_first_line_of_defence_not_the_only_one():
+    """The plan this work came from recorded the title whitelist as a live
+    defect for prompt memories. Measured, it is not one TODAY: `normalise`
+    casefolds a prompt before it ever reaches a fact sheet, and `_NAME` only
+    matches a capitalised word, so "midnapur" in the sheet never whitelists
+    "Midnapur" in a caption. That is one narrow coincidence of two unrelated
+    rules, which is not a guardrail - hence the flag, and hence this test
+    recording which of the two is actually doing the work.
+    """
+    lowercase = FactSheet(title="christmas in midnapur", recipe="album_story", photo_count=3)
+    assert substantiated("Midnapur in the evening", lowercase) == REJECT_UNKNOWN_PERSON

@@ -88,6 +88,19 @@ class FactSheet:
     albums: tuple[str, ...] = ()
     places: tuple[tuple[float, float], ...] = ()
     video_count: int = 0
+    # Is the TITLE itself a fact?
+    #
+    # For every recipe it is: an album title the user typed, a person's name
+    # from their own tags, a month. `llm.substantiated` therefore treats the
+    # words of the title as substantiated proper nouns, which is right for
+    # `album_story:Kashmir`.
+    #
+    # For a prompt memory it is NOT. The title is the user's QUERY, and a
+    # query may contain anything - `christmas in midnapur` would whitelist
+    # "Midnapur" as a proper noun the caption layer may then print under a
+    # photograph, defeating both REJECT_UNKNOWN_PERSON and the rule that a
+    # memory never names a place.
+    title_substantiated: bool = True
 
     def to_json(self) -> dict:
         out = {
@@ -100,6 +113,10 @@ class FactSheet:
             "albums": list(self.albums),
             "video_count": self.video_count,
         }
+        # Absent when true, so every existing spec on disk round-trips
+        # byte-for-byte and only a prompt memory carries the flag.
+        if not self.title_substantiated:
+            out["title_substantiated"] = False
         # Absent rather than null. An LLM handed `"date_from": null` will
         # cheerfully write around it; a missing key is unambiguous, and the
         # same reasoning applies to `places` - see the class docstring.
@@ -125,6 +142,7 @@ class FactSheet:
             albums=tuple(raw.get("albums", ())),
             places=tuple(tuple(p) for p in raw.get("places", ())),  # type: ignore[misc]
             video_count=raw.get("video_count", 0),
+            title_substantiated=raw.get("title_substantiated", True),
         )
 
 
@@ -206,6 +224,7 @@ def build_fact_sheet(
     title: str,
     recipe: str,
     albums: tuple[str, ...] = (),
+    title_substantiated: bool = True,
 ) -> FactSheet:
     """Facts derived from the photos that actually made it into the memory.
 
@@ -244,6 +263,7 @@ def build_fact_sheet(
         albums=albums,
         places=tuple(sorted(set(places))),
         video_count=sum(1 for p in photos if p.media_type is MediaType.VIDEO),
+        title_substantiated=title_substantiated,
     )
 
 

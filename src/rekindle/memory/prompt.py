@@ -65,8 +65,17 @@ TAG_K = 100
 SEED_K = 100
 
 #: A capture day needs this many of the seed photos before it is treated as a
-#: day the concept happened on. At 1, a single stray hit drags in a whole
-#: unrelated day; at 3 the pool thins to a handful of days.
+#: day the concept happened on.
+#:
+#: **Measured, and it turned out to be nearly inert** once `day_quorum` exists.
+#: On the reference library, across the three prompts this feature was built
+#: for, moving it 1 -> 2 -> 3 changes the durga memory from 23 correct shots in
+#: 11 year-buckets to 24 in 10 to 24 in 7, and changes the kali memory not at
+#: all. The plan this work came from expected `min_seeds = 1` to wreck month
+#: purity; with one tag it would have, but the tag quorum is what actually
+#: refuses a day, and it refuses the same days at every value here. Kept at 2
+#: because it is the cheaper of the two gates and it costs nothing; do not
+#: describe it as load-bearing.
 MIN_SEEDS = 2
 
 #: Reciprocal-rank constant. Standard RRF. Its only job here is to order
@@ -462,7 +471,16 @@ def build_selection(
     by_year = query.shape == SHAPE_YEARS
     selection = Selection(
         photos=photos,
-        facts=build_fact_sheet(photos, title=query.text, recipe=RECIPE, albums=matched_albums),
+        facts=build_fact_sheet(
+            photos,
+            title=query.text,
+            recipe=RECIPE,
+            albums=matched_albums,
+            # See FactSheet.title_substantiated: a prompt's title is a query,
+            # not a fact, so the caption layer may not treat its words as
+            # substantiated proper nouns.
+            title_substantiated=False,
+        ),
         stratify=strata.BY_YEAR if by_year else strata.BY_SPAN,
         min_strata=3 if by_year else 1,
     )

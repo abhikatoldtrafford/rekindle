@@ -268,7 +268,13 @@ def substantiated(caption: str, facts: FactSheet) -> str | None:
     # Names the sheet contains, split so "Abhik Maiti" admits "Abhik".
     allowed_names = {part for person in facts.people for part in person.split() if part}
     allowed_names |= {part for album in facts.albums for part in album.split() if part}
-    allowed_names |= set(facts.title.split())
+    # A recipe's title is itself a fact - an album name, a person's name, a
+    # month - so its words are substantiated. A PROMPT's title is the user's
+    # query, which may contain anything at all: whitelisting it would let
+    # `christmas in midnapur` substantiate "Midnapur" and put an unresolvable
+    # place name under a photograph.
+    if facts.title_substantiated:
+        allowed_names |= set(facts.title.split())
     for candidate in _NAME.findall(text):
         if candidate in _COMMON or candidate in allowed_names:
             continue

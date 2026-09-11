@@ -239,6 +239,10 @@ def build(
             title=offer.title,
             recipe=offer.recipe,
             albums=selection.facts.albums,
+            # Carried from the Selection, not recomputed: whether a TITLE is a
+            # fact is a property of who wrote it, and the engine cannot tell
+            # an album name from a user's query by looking at the string.
+            title_substantiated=selection.facts.title_substantiated,
         ),
         # A memory is publishable only when EVERY shot in it is. One
         # non-qualifying photo makes the whole thing unpublishable.

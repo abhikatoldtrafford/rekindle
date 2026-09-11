@@ -30,7 +30,7 @@ from rekindle.memory.history import (
 )
 from rekindle.memory.index import MemoryIndex
 from rekindle.memory.policy import CONFIG_NAME, PolicyError, load_policy
-from rekindle.memory.recipes import registered
+from rekindle.memory.recipes import Offer, registered
 from rekindle.memory.render.frames import build_frames
 from rekindle.memory.render.gif import DEFAULT_WIDTH as PREVIEW_WIDTH
 from rekindle.memory.render.gif import preview_canvas, write_gif, write_webp
@@ -585,3 +585,342 @@ def watch_cmd(
         now=(lambda: now) if now else (lambda: datetime.now(UTC)),
         sleep=None,
     )
+
+
+# --------------------------------------------------------------------------
+# Prompt memories
+#
+# This is the ONLY place `rekindle.semantic` is reached from the memory CLI,
+# and the import is inside the function body. `rekindle --help` must never
+# load torch, and a machine without the extra must get a sentence naming the
+# command to run rather than an ImportError traceback.
+
+EXIT_UNAVAILABLE = 3
+EXIT_REFUSED = 4
+
+PROMPT_CAVEAT = (
+    "No automated check can tell whether these photos match your words.\n"
+    "Look at the memory before you keep it."
+)
+
+WEAK_PATH_WARNING = (
+    "Nothing describes this prompt visually, so the words themselves were "
+    "searched. That is the measured-bad path: it put 9 of 24 shots of a Kali "
+    "Puja memory on a Durga Puja day. Add an entry to the tag cache, name a "
+    "festival the corpus knows, or set OPENAI_API_KEY."
+)
+
+NO_VIDEO_NOTE = (
+    "No video can appear in a prompt memory: videos are not embedded, so the "
+    "search cannot see them."
+)
+
+_MONTH_NAMES = {
+    1: "January",
+    2: "February",
+    3: "March",
+    4: "April",
+    5: "May",
+    6: "June",
+    7: "July",
+    8: "August",
+    9: "September",
+    10: "October",
+    11: "November",
+    12: "December",
+}
+
+
+class PromptUnavailable(RuntimeError):
+    """The extra is installed but this library has no embeddings yet."""
+
+
+def _retriever_for(data_dir: Path, model_key: str | None):
+    """A `prompt.Retriever` backed by the real embedding store.
+
+    Raises `SemanticUnavailable` when the extra is not installed and
+    `PromptUnavailable` when it is installed but the library has never been
+    embedded. Two different problems with two different fixes, so they are
+    never folded into one message - an un-embedded library must not look like
+    a missing dependency, or like a query that found nothing.
+    """
+    from rekindle.semantic.availability import require
+    from rekindle.semantic.encoder import load_encoder
+    from rekindle.semantic.registry import embed_model
+    from rekindle.semantic.search import SemanticSearch, embed_query
+    from rekindle.semantic.setup import cache_dir_for
+    from rekindle.semantic.store import EmbeddingStore, store_root
+
+    require(feature="Prompt memories")
+    spec = embed_model(model_key)
+    root = store_root(data_dir, spec.key)
+    if not (root / "manifest.sqlite").is_file():
+        raise PromptUnavailable(
+            f"No embeddings for '{spec.key}' at {root}. Run `rekindle semantic embed` first."
+        )
+    store = EmbeddingStore(
+        root,
+        dim=spec.dim,
+        model_key=spec.key,
+        model_revision=spec.pin("torch").revision if spec.torch else "",
+    )
+    search = SemanticSearch(store, None)
+    if not len(search.matrix):
+        raise PromptUnavailable(
+            f"The embedding store at {root} holds no vectors. Run `rekindle semantic embed` first."
+        )
+    encoder = load_encoder(spec.key, device="auto", cache_dir=cache_dir_for(data_dir)).encoder
+
+    def retrieve(text: str, k: int) -> list[tuple[str, float]]:
+        hits = search.search_vector(embed_query(encoder, text), k=k)
+        return [(h.file_hash, h.score) for h in hits]
+
+    return retrieve, f"{len(search.matrix)} vectors, model {spec.key}"
+
+
+def prompt_cmd(
+    data_dir: Path,
+    text: str,
+    out_dir: Path,
+    *,
+    public_safe: bool = False,
+    max_shots: int = engine.DEFAULT_MAX_SHOTS,
+    gif_frames: int = 16,
+    music: Path | None = None,
+    no_mp4: bool = False,
+    seed_k: int = 0,
+    min_seeds: int = 0,
+    tag_k: int = 0,
+    captions: str = "deterministic",
+    judge: bool = True,
+    preview_width: int = 0,
+    mp4_width: int = 0,
+    retrieve=None,
+) -> None:
+    """Build ONE memory from the user's own words.
+
+    A prompt memory is a PREVIEW, never an offer. It is built only when asked
+    for by name; it never enters `all_offers`, never appears in
+    `rekindle memories`, and is never eligible for `--auto`. That is a hard
+    rule rather than a default, and it is the honest response to a limit that
+    cannot be engineered away: there is no statistic that says whether these
+    photos match these words, so the only working verifier is the person
+    looking at the result.
+
+    The cooldown is bypassed for the same reason `--recipe --key` bypasses it:
+    this is a person pointing at one memory and asking for it. Dismissal still
+    applies, and `record_surfaced` still runs.
+    """
+    from rekindle.memory import prompt as prompt_mod
+    from rekindle.memory import tags as tags_mod
+    from rekindle.memory.llm import LLMUnavailable
+
+    if not prompt_mod.normalise(text):
+        console.print("[red]An empty prompt cannot build anything.[/red]")
+        raise typer.Exit(code=2)
+
+    store, index = open_index(data_dir, public_safe=public_safe)
+    try:
+        if index.count() == 0:
+            console.print("[yellow]No photos available after the guardrails.[/yellow]")
+            _render_exclusions(index)
+            return
+        _warn_unfingerprinted(index)
+
+        query = prompt_mod.parse(text, index)
+        try:
+            generator = tags_mod.generator_from_env()
+        except LLMUnavailable:
+            generator = None
+
+        if _refused_by_judge(generator, query, index, judge):
+            raise typer.Exit(code=EXIT_REFUSED)
+
+        resolution = tags_mod.resolve(
+            query,
+            data_dir=data_dir,
+            generator=generator,
+            people=list(index.people_counts()),
+        )
+        if resolution.source == tags_mod.SOURCE_MODEL:
+            written = tags_mod.write_cache_entry(data_dir, query.text, resolution.tags)
+            console.print(
+                f"[dim]Tags cached in {written}; the same prompt will give the "
+                "same memory from now on.[/dim]"
+            )
+
+        if retrieve is None:
+            retrieve = _open_retriever(data_dir)
+
+        build = prompt_mod.build_selection(
+            index,
+            query,
+            resolution.tags,
+            retrieve,
+            seed_k=seed_k or prompt_mod.SEED_K,
+            min_seeds=min_seeds or prompt_mod.MIN_SEEDS,
+            tag_k=tag_k or prompt_mod.TAG_K,
+            months=resolution.months,
+            festival=resolution.festival,
+            known_words=_festival_names(resolution, query),
+        )
+        _render_prompt_tags(resolution, build)
+
+        report = engine.BuildReport(offered=1)
+        spec = None
+        if build.selection is None:
+            report.skip(engine.SKIP_EMPTY)
+        else:
+            spec = engine.build(
+                index,
+                Offer(recipe=prompt_mod.RECIPE, key=query.text, title=query.text),
+                selection=build.selection,
+                max_shots=max_shots,
+                report=report,
+            )
+        _render_prompt_report(build, spec, index)
+        if spec is None:
+            console.print("[yellow]Nothing to build from that prompt.[/yellow]")
+            _render_build_report(report)
+            return
+
+        state = MemoryState(store)
+        if prompt_mod.memory_key(query) in state.dismissed_memory_ids():
+            console.print(
+                f"[yellow]Dismissed[/yellow]: {prompt_mod.memory_key(query)}. "
+                "Undo it with `rekindle undismiss`."
+            )
+            return
+
+        for built in _maybe_caption([spec], captions):
+            _render_one(built, index, out_dir, gif_frames, music, no_mp4, preview_width, mp4_width)
+            state.record_surfaced(memory_id(built.recipe, built.key), title=built.title)
+        _render_build_report(report)
+        console.print(f"\n[yellow]{PROMPT_CAVEAT}[/yellow]")
+    finally:
+        store.close()
+
+
+def _open_retriever(data_dir: Path):
+    from rekindle.semantic.availability import SemanticUnavailable
+
+    try:
+        retrieve, note = _retriever_for(data_dir, None)
+    except PromptUnavailable as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
+    except SemanticUnavailable as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=EXIT_UNAVAILABLE) from exc
+    console.print(f"[dim]{note}[/dim]")
+    return retrieve
+
+
+def _refused_by_judge(generator, query, index, judge: bool) -> bool:
+    """Gate one: is the QUERY coherent and consistent with this library?
+
+    Available only with an API key, and deliberately biased towards letting
+    things through - a wrong refusal leaves the user with nothing to look at,
+    which is worse than a wrong acceptance they can see and discard. It is
+    UNMEASURED on the reference library, because measuring it needs a key.
+    """
+    from rekindle.memory import tags as tags_mod
+    from rekindle.memory.llm import LLMUnavailable
+
+    if generator is None or not judge:
+        return False
+    try:
+        reason = generator.plausible(query.text, tags_mod.vocabulary_of(index))
+    except LLMUnavailable as exc:
+        console.print(f"[yellow]![/yellow] {exc}")
+        return False
+    if reason is None:
+        return False
+    console.print(f"[red]Refused[/red]: {reason}")
+    console.print("[dim]Pass --no-judge to build it anyway.[/dim]")
+    return True
+
+
+def _festival_names(resolution, query) -> tuple[str, ...]:
+    if not resolution.festival:
+        return ()
+    from rekindle.memory import festivals as festivals_mod
+
+    matched = festivals_mod.match(query.subject)
+    return matched.names if matched else ()
+
+
+def _render_prompt_tags(resolution, build) -> None:
+    """Say what was actually searched for.
+
+    The tags ARE the query. A user who cannot see them cannot tell a bad
+    memory from a bad description of what they wanted.
+    """
+    from rekindle.memory import tags as tags_mod
+
+    origin = {
+        tags_mod.SOURCE_CORPUS: f"the festival corpus ({resolution.festival})",
+        tags_mod.SOURCE_CACHE: "the tag cache",
+        tags_mod.SOURCE_MODEL: "the language model",
+        tags_mod.SOURCE_PROMPT: "your own words",
+    }[resolution.source]
+    console.print(f"Searched for {len(build.tags)} visual descriptions, from {origin}:")
+    for tag in build.tags:
+        console.print(f"  [dim]-[/dim] {tag}")
+    if resolution.source == tags_mod.SOURCE_PROMPT:
+        console.print(f"[yellow]![/yellow] {WEAK_PATH_WARNING}")
+    if resolution.months:
+        months = ", ".join(_MONTH_NAMES[m] for m in resolution.months)
+        console.print(f"[dim]Narrowed to {months}, from the corpus window.[/dim]")
+    if resolution.rejected:
+        detail = ", ".join(sorted(set(resolution.rejected)))
+        console.print(f"[dim]Some generated tags were rejected: {detail}.[/dim]")
+
+
+def _render_prompt_report(build, spec, index) -> None:
+    """The honesty surface. Everything a person needs to judge the result for
+    themselves, because nothing else can judge it for them."""
+    if build.seed_days:
+        days = ", ".join(f"{s.iso} ({s.hits} photos, {s.tags} tags)" for s in build.seed_days)
+        console.print(f"\n{len(build.seed_days)} days looked like this: {days}")
+        console.print(f"[dim]Expanded to {build.pool} candidate photos.[/dim]")
+    else:
+        console.print("\n[yellow]No capture day had enough agreement between the tags.[/yellow]")
+    if build.albums:
+        named = ", ".join(repr(a) for a in build.albums)
+        console.print(f"[dim]Your own albums {named} were added whole.[/dim]")
+    if build.unmatched:
+        words = ", ".join(repr(w) for w in build.unmatched)
+        console.print(
+            f"[yellow]![/yellow] {words} narrowed nothing: no album, person or "
+            "month in your library matches. It was searched for as a PICTURE and "
+            "nothing else - so if one of those words is a place, note that "
+            "rekindle has no gazetteer and never filtered by it."
+        )
+    console.print(
+        f"[dim]Tag agreement {build.agreement:.0%}. This number does NOT say "
+        "whether the concept is in your library: measured over 16 concepts this "
+        "library has and 16 it does not, it fails to separate them, so nothing "
+        "is refused on it.[/dim]"
+    )
+    if spec is None:
+        return
+
+    months: dict[int, int] = {}
+    years: dict[int, int] = {}
+    faces = gps = 0
+    for shot in spec.shots:
+        photo = index.get(shot.file_hash)
+        local = photo.meta.taken_at_local
+        months[local.month] = months.get(local.month, 0) + 1
+        years[local.year] = years.get(local.year, 0) + 1
+        faces += 1 if any(photo.meta.people) else 0
+        gps += 1 if photo.meta.gps is not None else 0
+    console.print(
+        f"Built {len(spec.shots)} shots across {len(years)} years: "
+        + ", ".join(f"{y} ({n})" for y, n in sorted(years.items()))
+    )
+    ordered = sorted(months.items(), key=lambda kv: (-kv[1], kv[0]))
+    console.print("  months: " + ", ".join(f"{_MONTH_NAMES[m]} {n}" for m, n in ordered))
+    console.print(f"  {faces} of {len(spec.shots)} shots have face tags, {gps} have GPS.")
+    console.print(f"[dim]{NO_VIDEO_NOTE}[/dim]")

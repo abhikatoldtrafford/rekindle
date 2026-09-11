@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+import typer
 from PIL import Image
 from typer.testing import CliRunner
 
@@ -858,3 +859,237 @@ def test_deleting_the_llm_module_leaves_a_working_product(tmp_path, monkeypatch)
     )
     assert result.exit_code == 0, result.output
     assert (next(iter(out.iterdir())) / "memory.gif").is_file()
+
+
+# --------------------------------------------------------------------------
+# Prompt memories
+#
+# `rekindle memory "some words"`. The retriever is injected in every test
+# below, so none of these needs torch, an embedding store or a network - and
+# the two that DO exercise the real semantic path assert the message, not the
+# model.
+
+
+def _festival_library(tmp_path) -> Path:
+    """Four Octobers of a made-up festival, plus an unrelated May."""
+    data = tmp_path / "data"
+    photos = []
+    for year in (2019, 2020, 2021, 2022):
+        for i in range(6):
+            path = _jpeg(tmp_path / "lib" / f"f{year}{i}.jpg", colour=(40 + i * 20, 90, 60))
+            photos.append(
+                _photo(
+                    f"f{year}{i}",
+                    path,
+                    local=datetime(year, 10, 4, 9, i * 5),
+                    people=["Abhik Maiti"],
+                )
+            )
+    for i in range(6):
+        path = _jpeg(tmp_path / "lib" / f"m{i}.jpg", colour=(200, 30 + i * 10, 30))
+        photos.append(_photo(f"m{i}", path, local=datetime(2019, 5, 1, 9, i * 5)))
+    with PhotoStore(data / "rekindle.sqlite") as store:
+        store.upsert_many(photos)
+    return data
+
+
+def _fake_retriever(hashes):
+    def retrieve(text, k):
+        return [(h, 1.0 - i * 0.01) for i, h in enumerate(hashes[:k])]
+
+    return retrieve
+
+
+def _run_prompt(data, text, tmp_path, hashes, **kw):
+    from rekindle.memory.cli import prompt_cmd
+
+    return prompt_cmd(
+        data,
+        text,
+        tmp_path / "out",
+        no_mp4=True,
+        retrieve=_fake_retriever(hashes),
+        **kw,
+    )
+
+
+def test_a_prompt_memory_writes_a_spec_keyed_on_the_normalised_prompt(tmp_path, capsys):
+    data = _festival_library(tmp_path)
+    seeds = [f"f{y}{i}" for y in (2019, 2020, 2021, 2022) for i in range(2)]
+    _run_prompt(data, "  A Made Up Festival  ", tmp_path, seeds)
+
+    folders = list((tmp_path / "out").glob("*prompt*"))
+    assert len(folders) == 1
+    spec = json.loads((folders[0] / "memory.json").read_text(encoding="utf-8"))
+    assert spec["recipe"] == "prompt"
+    assert spec["key"] == "a made up festival"
+    assert spec["title"] == "a made up festival"
+    assert spec["facts"]["title_substantiated"] is False
+    assert (folders[0] / "memory.gif").is_file()
+
+
+def test_the_same_prompt_twice_gives_a_byte_identical_spec(tmp_path):
+    data = _festival_library(tmp_path)
+    seeds = [f"f{y}{i}" for y in (2019, 2020, 2021, 2022) for i in range(2)]
+    _run_prompt(data, "a made up festival", tmp_path, seeds)
+    first = next((tmp_path / "out").glob("*prompt*")) / "memory.json"
+    text = first.read_text(encoding="utf-8")
+    _run_prompt(data, "A MADE UP FESTIVAL", tmp_path, seeds)
+    assert first.read_text(encoding="utf-8") == text
+
+
+def test_the_report_names_the_tags_the_seed_days_and_the_caveat(tmp_path, capsys):
+    from rekindle.memory.cli import PROMPT_CAVEAT
+
+    data = _festival_library(tmp_path)
+    seeds = [f"f{y}{i}" for y in (2019, 2020, 2021, 2022) for i in range(2)]
+    _run_prompt(data, "a beach", tmp_path, seeds)
+    # Rich wraps to the terminal width, so the assertions are made against the
+    # text with its line breaks collapsed rather than against the layout.
+    out = " ".join(capsys.readouterr().out.split())
+
+    # The tags ARE the query; a user who cannot see them cannot tell a bad
+    # memory from a bad description of what they asked for.
+    assert "waves breaking on wet sand" in out
+    assert "2019-10-04" in out and "2022-10-04" in out
+    # The month histogram, so the user can see a festival split themselves.
+    assert "months: October 24" in out
+    assert "shots have face tags" in out
+    for line in PROMPT_CAVEAT.splitlines():
+        assert line in out
+
+
+def test_a_word_that_narrowed_nothing_is_named(tmp_path, capsys):
+    data = _festival_library(tmp_path)
+    seeds = [f"f{y}{i}" for y in (2019, 2020, 2021, 2022) for i in range(2)]
+    _run_prompt(data, "christmas in midnapur", tmp_path, seeds)
+    out = " ".join(capsys.readouterr().out.split())
+    assert "midnapur" in out
+    assert "narrowed nothing" in out
+    assert "gazetteer" in out
+
+
+def test_the_weak_path_is_named_when_no_source_describes_the_prompt(tmp_path, capsys):
+    from rekindle.memory.cli import WEAK_PATH_WARNING
+
+    data = _festival_library(tmp_path)
+    seeds = [f"f{y}{i}" for y in (2019, 2020, 2021, 2022) for i in range(2)]
+    _run_prompt(data, "a thing nobody has ever described", tmp_path, seeds)
+    out = " ".join(capsys.readouterr().out.split())
+    assert "from your own words" in out
+    assert WEAK_PATH_WARNING.split(".")[0] in out
+
+
+def test_a_dismissed_prompt_memory_is_not_rendered(tmp_path, capsys):
+    data = _festival_library(tmp_path)
+    seeds = [f"f{y}{i}" for y in (2019, 2020, 2021, 2022) for i in range(2)]
+    with PhotoStore(data / "rekindle.sqlite") as store:
+        MemoryState(store).dismiss("memory", "prompt:a made up festival")
+    _run_prompt(data, "a made up festival", tmp_path, seeds)
+    assert "Dismissed" in capsys.readouterr().out
+    assert not list((tmp_path / "out").glob("*prompt*"))
+
+
+def test_a_prompt_that_finds_no_agreeing_day_builds_nothing(tmp_path, capsys):
+    data = _festival_library(tmp_path)
+    # One hit per day: never reaches MIN_SEEDS.
+    _run_prompt(data, "a made up festival", tmp_path, ["f20190", "f20200", "f20210"])
+    out = " ".join(capsys.readouterr().out.split())
+    assert "No capture day had enough agreement" in out
+    assert not list((tmp_path / "out").glob("*prompt*"))
+
+
+def test_a_prompt_memory_never_becomes_an_offer(tmp_path):
+    """The hard rule. `rekindle memories` and `--auto` both walk the registry,
+    so a prompt memory reaching either of them would mean it had been
+    registered - which `tests/test_engine.py` also forbids from the other
+    side."""
+    data = _festival_library(tmp_path)
+    seeds = [f"f{y}{i}" for y in (2019, 2020, 2021, 2022) for i in range(2)]
+    _run_prompt(data, "a made up festival", tmp_path, seeds)
+
+    listing = runner.invoke(app, ["memories", "--data-dir", str(data)])
+    assert listing.exit_code == 0
+    assert "made up festival" not in listing.output
+
+    auto = runner.invoke(
+        app,
+        ["memory", "--auto", "--no-mp4", "--out", str(tmp_path / "auto"), "--data-dir", str(data)],
+    )
+    assert "made up festival" not in auto.output
+
+
+def test_a_prompt_cannot_be_combined_with_recipe_key_or_auto(tmp_path):
+    data = _festival_library(tmp_path)
+    for extra in (["--recipe", "album_story"], ["--key", "X"], ["--auto"]):
+        result = runner.invoke(app, ["memory", "words", *extra, "--data-dir", str(data)])
+        assert result.exit_code == 2, result.output
+        assert "cannot be combined" in result.output
+
+
+def test_an_empty_prompt_is_refused(tmp_path):
+    data = _festival_library(tmp_path)
+    result = runner.invoke(app, ["memory", "   ", "--data-dir", str(data)])
+    assert result.exit_code == 2
+    assert "empty prompt" in result.output
+
+
+def test_an_unembedded_library_says_so_and_is_not_an_empty_query(tmp_path):
+    """Distinct from SKIP_EMPTY on purpose. "Run `rekindle semantic embed`" and
+    "that prompt found nothing" are different problems with different fixes."""
+    pytest.importorskip("numpy")
+    data = _festival_library(tmp_path)
+    result = runner.invoke(
+        app,
+        ["memory", "a beach", "--no-mp4", "--out", str(tmp_path / "o"), "--data-dir", str(data)],
+    )
+    assert result.exit_code in (2, 3), result.output
+    assert "semantic embed" in result.output or "semantic extra" in result.output
+    assert "no_candidates" not in result.output
+
+
+def test_the_judge_can_refuse_before_anything_is_built(tmp_path, monkeypatch, capsys):
+    """Gate one. The transport is injected; the assertion is on the BEHAVIOUR -
+    exit code 4 and nothing rendered - not on a mock having been called."""
+    from rekindle.memory import tags as tags_mod
+    from rekindle.memory.cli import EXIT_REFUSED, prompt_cmd
+
+    data = _festival_library(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(
+        tags_mod,
+        "generator_from_env",
+        lambda transport=None: tags_mod.TagGenerator(
+            "test-key", transport=lambda payload, key: {"output_text": "REFUSE: that is gibberish"}
+        ),
+    )
+    with pytest.raises(typer.Exit) as exit_info:
+        prompt_cmd(
+            data,
+            "qwertyuiop asdfgh",
+            tmp_path / "out",
+            no_mp4=True,
+            retrieve=_fake_retriever(["f20190"]),
+        )
+    assert exit_info.value.exit_code == EXIT_REFUSED
+    assert "that is gibberish" in capsys.readouterr().out
+    assert not list((tmp_path / "out").glob("*"))
+
+
+def test_no_judge_builds_the_memory_the_judge_refused(tmp_path, monkeypatch):
+    """Guards the test above: the refusal is the judge's doing, not the
+    library's."""
+    from rekindle.memory import tags as tags_mod
+
+    data = _festival_library(tmp_path)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    monkeypatch.setattr(
+        tags_mod,
+        "generator_from_env",
+        lambda transport=None: tags_mod.TagGenerator(
+            "test-key", transport=lambda payload, key: {"output_text": "REFUSE: that is gibberish"}
+        ),
+    )
+    seeds = [f"f{y}{i}" for y in (2019, 2020, 2021, 2022) for i in range(2)]
+    _run_prompt(data, "a beach", tmp_path, seeds, judge=False)
+    assert list((tmp_path / "out").glob("*prompt*"))

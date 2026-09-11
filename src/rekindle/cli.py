@@ -271,6 +271,16 @@ def memories(
 
 @app.command()
 def memory(
+    text: Annotated[
+        str | None,
+        typer.Argument(
+            help=(
+                "Build a memory from your own words, e.g. "
+                '`rekindle memory "durga puja over the years"`. Needs the '
+                "semantic extra and an embedded library."
+            ),
+        ),
+    ] = None,
     recipe: Annotated[str | None, typer.Option("--recipe", help="Recipe name.")] = None,
     key: Annotated[str | None, typer.Option("--key", help="Which memory, from `memories`.")] = None,
     auto: Annotated[
@@ -320,15 +330,75 @@ def memory(
             ),
         ),
     ] = "deterministic",
+    seed_k: Annotated[
+        int,
+        typer.Option(
+            "--seed-k",
+            help="Prompt only: how many consensus-ranked photos seed the days. 0 uses 100.",
+        ),
+    ] = 0,
+    min_seeds: Annotated[
+        int,
+        typer.Option("--min-seeds", help="Prompt only: seed photos a day needs. 0 uses 2."),
+    ] = 0,
+    tag_k: Annotated[
+        int,
+        typer.Option(
+            "--tag-k", help="Prompt only: how deep each visual tag is searched. 0 uses 100."
+        ),
+    ] = 0,
+    judge: Annotated[
+        bool,
+        typer.Option(
+            "--judge/--no-judge",
+            help=(
+                "Prompt only: ask the language model whether the query is "
+                "coherent before building. Needs OPENAI_API_KEY; without one "
+                "it never runs."
+            ),
+        ),
+    ] = True,
     data_dir: DataDir = Path("./data"),
 ) -> None:
-    """Build one or more memories into a folder. Renders a GIF, and an MP4 if
-    ffmpeg is on PATH."""
-    from rekindle.memory.cli import memory_cmd
+    """Build memories into a folder. Renders a GIF, and an MP4 if ffmpeg is on PATH.
+
+    With a TEXT argument this builds ONE memory from your own words. That kind
+    of memory is a PREVIEW, not an offer: it never appears in
+    `rekindle memories` and `--auto` will never show you one, because nothing
+    can check that the photos match the words. Looking at the result is a
+    required step rather than one a threshold pretends to replace.
+    """
+    from rekindle.memory.cli import memory_cmd, prompt_cmd
 
     if captions not in ("deterministic", "gpt"):
         console.print(f"[red]--captions must be 'deterministic' or 'gpt', not {captions!r}[/red]")
         raise typer.Exit(code=2)
+
+    if text is not None:
+        if recipe or key or auto:
+            console.print(
+                "[red]A prompt cannot be combined with --recipe, --key or --auto.[/red] "
+                "A prompt memory is built only when you ask for it by name."
+            )
+            raise typer.Exit(code=2)
+        prompt_cmd(
+            _resolved(data_dir),
+            text,
+            out,
+            public_safe=public_safe,
+            max_shots=max_shots,
+            gif_frames=gif_frames,
+            music=music,
+            no_mp4=no_mp4,
+            seed_k=seed_k,
+            min_seeds=min_seeds,
+            tag_k=tag_k,
+            captions=captions,
+            judge=judge,
+            preview_width=preview_width,
+            mp4_width=mp4_width,
+        )
+        return
 
     memory_cmd(
         _resolved(data_dir),
