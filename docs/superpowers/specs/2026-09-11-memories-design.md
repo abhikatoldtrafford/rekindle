@@ -51,7 +51,7 @@ only the *gate*; perceptual near-identity is the *decision* (§5).
 ## 2. Architecture
 
 ```
-        PhotoStore (SQLite, schema v3)
+        PhotoStore (SQLite, schema v4)
                   |
                   v
         +--------------------+
@@ -87,6 +87,7 @@ Module layout under `src/rekindle/memory/`:
 | `fingerprint.py` | dHash, sharpness, brightness and post-rotation size, one decode per photo |
 | `dedup.py` | burst collapse |
 | `strata.py` | stratified selection - the spread across a memory's own dimension (§6.2a) |
+| `diversity.py` | content dissimilarity, and the seam a semantic signal plugs into (§6.2b) |
 | `composition.py` | orientation cohesion, canvas, resolution/aspect/quality gates (§5A) |
 | `history.py` | dismissal and resurfacing state (§5B) |
 | `spec.py` | `MemorySpec`, `Shot`, `FactSheet` |
@@ -196,7 +197,7 @@ list is precisely the failure this whole section exists to prevent.
 
 ---
 
-## 4. Fingerprints: schema v3
+## 4. Fingerprints: schema v3 and v4
 
 Dedup needs a perceptual hash per photo. Decoding 18,363 images is the
 expensive part, so it is computed once and stored.
@@ -240,14 +241,20 @@ DCT-scaled decoding. Measured on real files: **18.6 ms/photo with `draft()` vs
 single-threaded pass over 18,201 live images. Without `draft()` it is 16
 minutes. The brief was right that it is mandatory.
 
-Schema v3 adds three nullable columns to `photos`, via the existing additive
+Schema v3 and v4 add nullable columns to `photos`, via the existing additive
 `ALTER TABLE ADD COLUMN` pattern:
 
 ```
 phash        INTEGER   -- 64-bit dHash, NULL when never computed or undecodable
 sharpness    REAL      -- relative focus measure
 phash_error  TEXT      -- why it is NULL, so a retry does not redo known failures
+brightness   REAL      -- mean luminance, for the near-black/blown-out gates
+colour       TEXT      -- v4: hex 4x4x4 RGB histogram, for diversity (§6.2b)
 ```
+
+`iter_unfingerprinted` re-offers a row that HAS a hash but lacks a later
+measurement, which is what let the v4 histogram reach an index already
+fingerprinted under v3 without a full re-index.
 
 `_migrate` becomes a **ladder** (`{1: _to_v2, 2: _to_v3}`) applied in sequence
 while the stored version is a known step. It keeps v2's property that a database
@@ -752,6 +759,140 @@ records it and the CLI names it:
 That is real output. `on_this_day:12-22` offers six years; three are emptied by
 the gates (2015 had one photo, 2018 seven, 2021 eighteen — all rejected), and
 the memory honestly shows the three that survive.
+
+### 6.2b Diversity — the same picture, twice
+
+**The defect.** Selection ranked by quality and took the top N with no
+diversity constraint at all, so three good photos of the same child on the same
+afternoon each won on their own merits and the viewer saw the same picture
+three times. Measured on the rendered output:
+
+```
+album_story-wedding_arnab_pics   24 shots over 7 days, 12 of them
+                                 from 2016-06-24 alone
+album_story-avyan                24 shots over 18 days, 3 of Avyan on
+                                 2025-09-17 and 4 on 2025-08-04
+```
+
+Burst dedup (§5) is **not** the gap. It gates on ~30 seconds and these photos
+are minutes or hours apart, correctly outside its window.
+
+#### The criterion is content, not the calendar
+
+A per-day cap was the first design here and it was wrong in both directions: it
+would have gutted a one-day album like `Diwali Kali Puja 22`, where every photo
+legitimately comes from that day, while still permitting two near-identical
+photos taken four hours apart.
+
+Measured on real same-day photos from the two days in the complaint: the
+**median pairwise dissimilarity is 0.679**. Most photos taken on the same day
+are genuinely different photos. The calendar is a bad proxy for what actually
+matters, so there is no day cap — what is measured is how different two photos
+*look*.
+
+Selection is greedy maximal-marginal-relevance:
+
+```
+value = quality
+      - 0.5 x similarity to the nearest already-picked shot
+      + a weak bonus for being far apart in time
+```
+
+Quality is the **rank position**, not the raw score: the raw score ranges over
+0–10 depending on which metadata a library happens to have, so λ would mean
+something different in every library.
+
+#### Two signals, both already in the index
+
+| Signal | Weight | Catches |
+|---|---|---|
+| **dHash** (schema v3) | 0.6 | same framing, same composition, same room from the same angle |
+| **Colour histogram** (schema v4) | 0.4 | the light, the room, what people are wearing |
+
+The perceptual hash is used here with **no time gate and a much looser radius
+(24 bits)** than dedup's threshold of 6. Dedup asks *"is this the same frame?"*
+and must almost never say yes wrongly; this asks *"does this look like one I
+already picked?"*, where a false positive costs a slightly worse photo rather
+than a deleted memory.
+
+The colour histogram is a 4x4x4 RGB distribution, **position-independent by
+design** — the hash already encodes layout, so the complementary information is
+*what* colours are present. It is computed in the fingerprint pass, which
+already decodes every image, at 0.3 ms/photo. Backfilled across 18,363 photos
+with zero failures; `iter_unfingerprinted` re-offers a row that has a hash but
+lacks a later measurement, which is what lets a new signal reach an existing
+index without a full re-index.
+
+**The histogram is diffused across adjacent bins.** Without smoothing,
+(200,40,40) and (150,30,30) — the same red under slightly different light —
+scored 1.000 dissimilarity: *identical to red against blue*, because hard
+binning puts a solid-colour image's whole mass into disjoint bins.
+
+#### The seam for semantic similarity
+
+`DissimilaritySignal` is a deliberate interface, not an implementation detail:
+
+```python
+class DissimilaritySignal(Protocol):
+    name: str
+    weight: float
+    def between(self, a: Photo, b: Photo) -> float | None: ...
+```
+
+`0.0` is indistinguishable, `1.0` unrelated, and **`None` means the signal
+cannot judge** — a missing fingerprint, a missing embedding. None is neither 0
+nor 1: the signal abstains and the others decide, which is what stops one
+un-fingerprinted photo suppressing its neighbours.
+
+A semantic embedding distance is strictly better at this than pixel statistics
+and is being built in another milestone. Adding it should be an *addition* to
+`CompositeSignal`, not a rewrite of selection, and a test substitutes a custom
+signal to prove the seam holds.
+
+#### What this cannot do
+
+Stated plainly rather than implied. "Different dress or location" is only
+partly resolvable from pixel statistics — the same outfit in two rooms under
+similar light will fool a colour histogram, and a perceptual hash will call two
+framings of one scene different when a viewer would call them the same photo.
+
+**Semantic redundancy is entirely invisible to it:** six restaurant-table
+photos from six different days in six different places are different pixels and
+the same idea. That needs embeddings and is deliberately left to the milestone
+building them.
+
+#### Stratification stays binding
+
+Diversity and stratification operate at different levels and must not cancel
+out:
+
+> **Stratification decides the shape of the memory; diversity decides which
+> photo fills each slot.**
+
+The allocation from §6.2a is binding — diversity never moves a slot from one
+bucket to another because a bucket's photos happen to look alike. And the
+relaxation above ("one day is fine") applies only to recipes whose subject
+genuinely *is* a single event. For recipes whose premise is spanning time,
+temporal spread is a **hard requirement**: `on_this_day`, `on_this_month`,
+`person_years`, `pair_years` and `year_in_review` declare `min_strata = 2`, and
+when the gates leave fewer periods than that the memory is **refused and
+counted** rather than quietly filled from whichever period is photo-rich.
+
+A four-shot `on_this_day` that genuinely spans four years is a real memory. A
+24-shot one that is secretly a single afternoon in 2019 is not — and it is
+worse, because it looks fine.
+
+#### Measured result
+
+On the real library, after the fix:
+
+- **Minimum pairwise dissimilarity within a memory: 0.33.** No near-identical
+  pairs at all, in any memory.
+- `album_story-avyan`: 18 → **20 distinct days**, worst day 4 → **3 shots**.
+- `album_story-wedding_arnab_pics` still spends 12 shots on the wedding day —
+  and those twelve have a **minimum pairwise dissimilarity of 0.61**. They are
+  twelve genuinely different moments of a wedding, which under the content
+  criterion is the correct outcome, not a residual bug.
 
 ### 6.3 Why `place_cluster` yields three memories, not thirty
 

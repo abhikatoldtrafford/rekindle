@@ -115,8 +115,18 @@ never from the set of photos in it. A key derived from contents means one new
 photo produces a "new" memory and a user's dismissal silently stops working.
 
 **Be generous in `select`.** The engine applies composition guardrails, burst
-dedup, ranking and the cap afterwards. Returning 400 photos is normal; the
-engine will keep the best 24 distinct ones.
+dedup, stratification, content diversity, ranking and the cap afterwards.
+Returning 400 photos is normal; the engine keeps the best 24 distinct ones.
+
+**Declare what your memory is ABOUT.** `Selection.stratify` names the dimension
+across which shots are spread — `BY_YEAR` for anything whose premise is
+spanning time, `BY_MONTH` for a single year, `BY_SPAN` (adaptive) for an album
+or a trip, or `None` for a recipe that wants the extremes rather than a spread.
+Without it, selection collapses onto whichever period happens to photograph
+best: before this existed, 16 of 37 rendered memories were confined to a single
+year. If spanning time is your recipe's whole point, also set `min_strata=2` so
+it is refused rather than silently narrowed when the gates leave one period
+standing.
 
 **Order deliberately.** `CHRONOLOGICAL` is the safe default and the engine
 restores it after the cap. Use `AS_GIVEN` only when the sequence *is* the
@@ -163,6 +173,38 @@ both passed while protecting nothing.
 convention and pinning it with a test is the most expensive mistake available
 in this codebase; it has happened three times. If you have a Takeout export,
 run the conformance suite (see [CONTRIBUTING.md](../CONTRIBUTING.md)).
+
+## Adding a similarity signal
+
+Selection avoids showing the same picture twice by penalising candidates that
+look like something already chosen. Today that judgement comes from pixel
+statistics — a perceptual hash and a colour histogram — and those cannot see
+*semantic* redundancy: six restaurant-table photos from six different days are
+different pixels and the same idea.
+
+That is the highest-value contribution available here, and it needs no changes
+to selection. Implement the protocol in `rekindle.memory.diversity`:
+
+```python
+class DissimilaritySignal(Protocol):
+    name: str
+    weight: float
+
+    def between(self, a: Photo, b: Photo) -> float | None:
+        """0.0 indistinguishable, 1.0 unrelated, None when you cannot judge."""
+```
+
+Three rules, all load-bearing:
+
+- **Return `None`, never a guess,** when the data you need is missing. None is
+  neither 0 nor 1: your signal abstains and the others decide. Returning 0
+  would let one photo without an embedding suppress its neighbours.
+- **Be deterministic.** The same library must produce the same memory, byte for
+  byte, and there is a test that asserts it.
+- **Never raise.** A signal that throws takes down a render.
+
+Then add it to `CompositeSignal.signals` with a weight. `test_diversity.py`
+substitutes a custom signal to prove the seam works; copy that test.
 
 ## Ideas nobody has built
 
