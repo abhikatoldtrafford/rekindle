@@ -95,9 +95,19 @@ Those tests skip without the variable, so CI never needs your photos. Never
 commit an export, or any file from one.
 
 Every genuine bug in the Takeout enrichment milestone was found this way and
-none by reading. If you want to know what that means in practice before writing
-a patch, [docs/decision-log-takeout-enrichment.md](docs/decision-log-takeout-enrichment.md)
-records the defects, the judgement calls and the testing discipline they led to.
+none by reading. The memory engine repeated the pattern: two of its bugs were
+invisible to 700 passing tests and obvious within one run against real data.
+
+If you have an index, the memory engine has its own conformance suite:
+
+```bash
+REKINDLE_MEMORY_DB=data/rekindle.sqlite uv run pytest     tests/test_memory_conformance.py -v
+```
+
+Both decision logs record the defects, the judgement calls and the testing
+discipline they led to:
+[Takeout enrichment](docs/decision-log-takeout-enrichment.md) ·
+[the memory engine](docs/decision-log-memory-engine.md).
 
 ## Pull requests
 

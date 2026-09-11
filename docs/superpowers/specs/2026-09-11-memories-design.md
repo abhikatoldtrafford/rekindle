@@ -753,8 +753,13 @@ whether this layer is really additive.
 The design is only as good as what it produced against the real library. The
 measured results of the verification run — memories per recipe, dedup rates,
 public-safe counts, render sizes, timings — live in
-`docs/decision-log-memory-engine.md`, not in this document, so that this file
-does not become the fifth place a number is propagated without being remeasured.
+[the decision log](../../decision-log-memory-engine.md), not in this document,
+so that this file does not become the fifth place a number is propagated
+without being remeasured.
+
+Headline: **53 memories across all eight recipes, 37 specs rebuilt with 0 byte
+mismatches, 148 public-safe shots audited against the database with 0
+violations, and 0 archived photos in 789 rendered shots.**
 
 **Mutation discipline.** Per the M1 decision log: every test that guards an
 invariant had the line it protects broken, was watched to fail, and was
