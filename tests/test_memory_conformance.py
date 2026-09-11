@@ -274,3 +274,77 @@ def test_a_public_safe_memory_has_only_public_safe_shots(store):
             spec = engine.build(index, offer)
             if spec is not None and spec.public_safe:
                 assert all(s.public_safe for s in spec.shots)
+
+
+# --------------------------------------------------------------------------
+# stratified spread
+#
+# The conformance suite did not catch the clustering defect: every assertion
+# here was about correctness (no blocked photo, no duplicate, byte-identical)
+# and none about whether the result was a good memory. These are the ones that
+# would have caught it, added after the fact.
+
+
+def test_a_multi_year_recipe_produces_a_multi_year_memory(index):
+    """`on_this_day` and the over-the-years recipes are ABOUT a span. Before
+    stratification, 16 of 37 rendered memories were confined to a single
+    year - including an `on_this_day` showing only 2019."""
+    from rekindle.memory.strata import bucket_key
+
+    offenders = []
+    for name in ("on_this_day", "on_this_month", "person_years", "pair_years"):
+        recipe = next(r for r in registered() if r.name == name)
+        for offer in recipe.offers(index)[:5]:
+            spec = engine.build(index, offer)
+            if spec is None:
+                continue
+            photos = [index.get(s.file_hash) for s in spec.shots]
+            years = {p.meta.taken_at_local.year for p in photos if p}
+            # A memory can legitimately have one year only if the gates left
+            # one year standing. Ask the recipe what it had to work with.
+            available = {bucket_key(p, "year") for p in recipe.select(index, offer).photos}
+            if len(years) == 1 and len(available) > 1:
+                offenders.append((offer.memory_id, sorted(years), len(available)))
+    assert offenders == [], f"single-year memories from multi-year material: {offenders[:5]}"
+
+
+def test_year_in_review_is_not_a_month_in_review(index):
+    """Three of them were exactly that."""
+    recipe = next(r for r in registered() if r.name == "year_in_review")
+    offenders = []
+    for offer in recipe.offers(index)[:6]:
+        spec = engine.build(index, offer)
+        if spec is None:
+            continue
+        photos = [index.get(s.file_hash) for s in spec.shots]
+        months = {(p.meta.taken_at_local.year, p.meta.taken_at_local.month) for p in photos if p}
+        available = {
+            (p.meta.taken_at_local.year, p.meta.taken_at_local.month)
+            for p in recipe.select(index, offer).photos
+        }
+        if len(months) == 1 and len(available) > 1:
+            offenders.append((offer.key, len(available)))
+    assert offenders == [], f"single-month years in review: {offenders}"
+
+
+def test_every_period_that_survives_the_gates_gets_a_slot_when_there_is_room(index):
+    """The floor, against real data: no period should be silently absent while
+    slots remain unused."""
+    from rekindle.memory.engine import BuildReport
+
+    for recipe in registered():
+        for offer in recipe.offers(index)[:3]:
+            report = BuildReport(offered=1)
+            spec = engine.build(index, offer, report=report)
+            if spec is None or not report.strata:
+                continue
+            stratum = report.strata[0]
+            if stratum.dimension is None:
+                continue
+            # Buckets are only left unslotted when there are more of them than
+            # shots - never while the memory is under its cap.
+            if len(spec.shots) < 24:
+                assert stratum.unslotted == 0, (
+                    f"{offer.memory_id}: {stratum.unslotted} periods unrepresented "
+                    f"with only {len(spec.shots)} shots used"
+                )
