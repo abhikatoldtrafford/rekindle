@@ -3,8 +3,9 @@
 **Turn your photo library into memories.**
 
 rekindle finds the photos that belong together — a trip, an anniversary, a
-season in one place — and stitches them into a short narrated montage set to
-music. Ask for one in plain language, or let it surface them on its own.
+person over the years — and stitches them into a short montage. Everything it
+picks is chosen by rules over your own metadata, so the same library always
+produces the same memories.
 
 ```bash
 uv run rekindle doctor ~/Pictures    # what metadata do you actually have?
@@ -15,20 +16,31 @@ uv run rekindle doctor ~/Pictures --from-index   # report on the stored index
 
 Point it at a folder. That's the whole setup.
 
-Those four commands work today. The montage itself is what's being built next:
+Then build memories from it:
 
 ```bash
-rekindle memory "our trip to the coast, 2014"   # planned
-rekindle memory --auto                          # planned
+uv run rekindle fingerprint                  # one-time pass, enables dedup
+uv run rekindle memories                     # what could this library produce?
+uv run rekindle memory --recipe album_story --key "Kashmir"
+uv run rekindle memory --auto                # today's anniversary, if any
+uv run rekindle watch ~/Pictures             # foreground; prints, never renders
 ```
+
+A memory is a GIF (always) plus an MP4 (when ffmpeg is on PATH), written to
+`memories/` with the `MemorySpec` that produced it.
+
+**Freeform prompts** (`rekindle memory "our trip to the coast"`) need
+embeddings and are not built yet - v1 selection is deterministic and
+structured. `rekindle memories` lists everything available.
 
 Runs entirely on your machine — the default configuration makes no network
 calls at all, and needs no API key.
 
-> **Status: early development.** The design is settled and written up in
-> [the design spec](docs/superpowers/specs/2026-09-10-rekindle-design.md), which
-> has been through an [independent adversarial review](docs/superpowers/specs/audit-v1-resolutions.md).
-> Implementation is in progress. Issues and PRs welcome.
+> **Status: early development.** The memory engine is designed in
+> [the M2 spec](docs/superpowers/specs/2026-09-11-memories-design.md); the
+> wider architecture is in [the v1 spec](docs/superpowers/specs/2026-09-10-rekindle-design.md),
+> which went through an [independent adversarial review](docs/superpowers/specs/audit-v1-resolutions.md).
+> Issues and PRs welcome.
 
 ---
 
@@ -46,7 +58,8 @@ Metadata comes from the files themselves:
 | **EXIF** | Date taken and UTC offset, GPS, camera make and model, dimensions |
 | **Filesystem** | Folder names as albums, mtime as a fallback date |
 
-Not read yet: IPTC, orientation, and ratings.
+Orientation is applied, so a portrait photo is indexed as portrait.
+Not read yet: IPTC and ratings.
 
 `rekindle doctor` tells you the coverage you actually have — not what these
 formats could in principle hold — before you index.
@@ -97,37 +110,41 @@ a folder of photos
         ↓
   read metadata          XMP → EXIF → filesystem
         ↓
-  local embeddings       SigLIP on your GPU, or CPU
+  fingerprints           dHash + sharpness, one decode per photo
         ↓
-  SQLite + vectors       relational truth, brute-force similarity
+  SQLite                 relational truth
         ↓
-  recipes                deterministic selection: trips, anniversaries, ...
+  MemoryIndex            THE chokepoint: every guardrail applied once, here
         ↓
-  narration              template by default, LLM optional and verified
+  recipes                deterministic selection: albums, anniversaries, ...
         ↓
-  MemorySpec (JSON)  →  web player  |  MP4 export
+  engine                 dedup → rank → cap → order
+        ↓
+  MemorySpec (JSON)  →  GIF (always)  |  MP4 (when ffmpeg is present)
 ```
 
-For the built-in recipes, photo selection is **deterministic Python** — an LLM
-never picks your photos. The exception is freeform mode, used when your prompt
-matches no recipe: there a model curates, but only from a pool that has already
-had every guardrail applied, and its choices are validated against that pool.
+Photo selection is **deterministic Python** — an LLM never picks your photos,
+and the whole v1 engine runs with no model, no network and no randomness. The
+same library produces the same memories, byte for byte.
 
 ## Guardrails
 
 Memories touch a nerve. rekindle tries hard not to hurt you, and is honest about
 where it can't guarantee that:
 
-- **Exclusion list** — blocklist date ranges, folders or people. Applied before
-  anything else runs.
-- **Sensitive contexts** — likely-painful material is held back for your
-  confirmation, and every memory has a "not this period / never again" action
-  that feeds back into the exclusion list.
-- **Verified narration** — an independent verifier checks each claim against
-  your metadata. Claims it can't substantiate are rejected, not published.
-- **Junk filtering** — screenshots and receipts stay out of your memories.
-- **Auto-memories are off by default.** Unprompted memories are where the real
-  risk lives; you opt in.
+- **Dismissal** — `rekindle dismiss <recipe> <key>` and that memory never
+  returns. Permanent, and it survives the library growing: memories are
+  identified by what they are *about*, not by which photos happen to be in
+  them today. `rekindle undismiss` reverses it.
+- **Exclusion list** — `rekindle exclude --person NAME`, `--album`, or
+  `--from`/`--to` for a date range. Enforced at one chokepoint that every
+  recipe passes through, so no memory type can bypass it.
+- **Archived photos never surface.** Not configurable.
+- **Junk filtering** — screenshots, wallpapers, thumbnails, panoramas,
+  near-black and blown-out frames are excluded, each with a visible count and
+  a reason. Nothing is dropped silently.
+- **No memory renders itself.** `rekindle watch` prints the command; you run
+  it. Unprompted memories are where the real risk lives.
 
 ### Known limits
 
@@ -137,22 +154,31 @@ We'd rather tell you than let you find out:
   regions); `rekindle enrich` recovers it from a Google Takeout export too
   (names only, no regions). Without either, rekindle doesn't know who is in a
   photo, so person-based memories and person exclusions are unavailable.
-  **Date-range and folder exclusions always work** — prefer them. The
-  exclusion list that is meant to govern person data doesn't exist yet (see
-  `docs/known-limitations.md`) — today nothing surfaces a person unprompted,
-  but that must land before anything does.
-- **GPS is sparse** in most libraries, so trip detection falls back to clustering
-  by time alone.
-- **Sensitive-context detection is weak on the cases that hurt most.** It can
-  see a hospital; it cannot know someone has died, or that a trip ended a
-  relationship. That's what the exclusion list and feedback action are for.
+  **Date-range and folder exclusions always work** — prefer them.
+- **Face tags are incomplete, and that limits what can be published.** On a
+  Google Takeout export they cover only part of the library. A photo with *no*
+  tags is therefore never treated as safe to publish: it may still contain
+  people nobody labelled. `--public-safe` admits a photo only when its tags are
+  non-empty *and* every name is on your allow-list.
+- **GPS is sparse** in most libraries — around 12% on the reference export —
+  so place memories are thin and never name the place. There is no offline
+  gazetteer, so rekindle reports coordinates rather than inventing a city.
+- **Sensitive-context detection does not exist.** rekindle cannot know someone
+  has died, or that a trip ended a relationship. Dismissal and the exclusion
+  list are the honest mechanism, and they are what ships.
+- **A photographed document still gets through.** Screenshots are detectable
+  from metadata; a photo *of* a receipt or a whiteboard is not, without a model
+  v1 deliberately does not have.
+- **Videos do not appear in memories.** They carry no stored dimensions and no
+  perceptual hash, and rendering one needs ffmpeg, which stays optional.
 
 ## Privacy
 
 Everything runs locally by default — no API key needed, no network calls made,
-and your original files are never modified. If you enable the OpenAI providers,
-only photos that reach a memory are sent for captioning, never your whole
-library. See [SECURITY.md](SECURITY.md).
+no audio downloaded, and your original files are never modified. If you enable
+the optional LLM captions, **only a fact sheet is sent** — dates, counts, names,
+albums and coordinates drawn from your index. Never the pixels, never a file
+path, never your library. See [SECURITY.md](SECURITY.md).
 
 ## Contributing
 

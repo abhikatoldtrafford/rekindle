@@ -3,98 +3,166 @@
 A **recipe** decides which photos belong in a memory and what order they go in.
 It is the main way to extend rekindle, and it needs no changes to core code.
 
+> **This document was rewritten in M2 to describe the protocol that actually
+> exists.** The previous version specified `candidates()`/`order()`/
+> `fact_sheet()` over an `index.search(text=...)` with `pydantic` parameter
+> models. None of that shipped: pydantic is not a dependency, and text search
+> needs embeddings that land in M3. A contributor guide describing a fiction is
+> a bug this project has shipped once already.
+
 ## What a recipe is not
 
-A recipe does **not** decide timing, transitions, music or prose. The `Timeline`
-stage owns timing (so beat-synced music doesn't break every recipe), and the
-narrator owns words. A recipe answers exactly two questions: *which photos*, and
-*in what order*.
+A recipe does **not** decide timing, transitions, music, the cap, dedup, or the
+guardrails. The engine owns all of those and every recipe passes through it, so
+a recipe *cannot* forget to dedup, *cannot* exceed the shot cap, and *cannot*
+surface a photo the user excluded.
+
+A recipe answers exactly two questions: *which memories could this library
+produce*, and *which photos go in one of them*.
 
 ## The protocol
 
 ```python
-from rekindle.memory.recipes import Recipe, register
-from pydantic import BaseModel
-
-
-class SunsetParams(BaseModel):
-    year: int | None = None
-    place: str | None = None
+from rekindle.memory.recipes import Offer, Selection, register
+from rekindle.memory.recipes.base import CHRONOLOGICAL, chronological
+from rekindle.memory.spec import build_fact_sheet
 
 
 @register
-class EverySunset(Recipe):
-    name = "every_sunset"
-    params_model = SunsetParams
+class EverySunset:
+    name = "every_sunset"      # stable: it is half of every memory id
+    title = "Every sunset"     # human label for `rekindle memories`
 
-    def candidates(self, params: SunsetParams, index) -> list[Photo]:
-        """Everything that could plausibly belong. Be generous."""
-        return index.search(
-            text="a sunset over the horizon",
-            year=params.year,
-            limit=400,
+    def offers(self, index) -> list[Offer]:
+        """Every memory this recipe could build from this library.
+
+        Cheap and total: metadata only, no pixels. `rekindle memories` and
+        `--auto` both call this, so it must be fast and it must be
+        deterministically ordered.
+        """
+        out = []
+        for year in index.years():
+            photos = index.by_year(year)
+            if len(photos) < 20:
+                continue
+            out.append(
+                Offer(
+                    recipe=self.name,
+                    key=str(year),          # STABLE - see "Memory identity"
+                    title=f"Sunsets of {year}",
+                    subtitle=f"{len(photos)} photos",
+                    size=len(photos),
+                )
+            )
+        return sorted(out, key=lambda o: (-o.size, o.key))
+
+    def select(self, index, offer) -> Selection | None:
+        """The photos for ONE offer. Generous and ordered.
+
+        Return None when the offer no longer yields enough - it may have been
+        built against a larger library.
+        """
+        photos = index.by_year(int(offer.key))
+        if len(photos) < 3:
+            return None
+        ordered = chronological(photos)
+        return Selection(
+            photos=ordered,
+            facts=build_fact_sheet(ordered, title=offer.title, recipe=self.name),
+            ordering=CHRONOLOGICAL,
+            captions={p.file_hash: str(p.meta.taken_at_local.year) for p in ordered},
         )
-
-    def order(self, photos: list[Photo], params: SunsetParams) -> list[PhotoRef]:
-        """Pick and sequence. Return only what should appear."""
-        best = sorted(photos, key=lambda p: p.quality_score, reverse=True)[:30]
-        return [PhotoRef(p.file_hash) for p in sorted(best, key=lambda p: p.taken_at_utc)]
-
-    def fact_sheet(self, ordered, params) -> FactSheet:
-        """Facts the narrator may use. Nothing else reaches it."""
-        return FactSheet.from_photos(ordered, title_hint="Every sunset")
 ```
 
-Register via entry points to ship a recipe in your own package:
+Ship a recipe in your own package with an entry point:
 
 ```toml
 [project.entry-points."rekindle.recipes"]
 every_sunset = "my_package:EverySunset"
 ```
 
+## What the index gives you
+
+`MemoryIndex` is the **only** way to obtain a photo, and everything it returns
+has already passed every guardrail. It has no `search(text=...)`: selection in
+v1 is structured queries over real metadata.
+
+| Method | Returns |
+|---|---|
+| `all()`, `images()`, `count()` | every allowed photo |
+| `by_year(y)`, `by_month(m)`, `by_month_day(m, d)` | temporal slices |
+| `by_person(name)`, `by_pair(a, b)` | face tags (order-independent pairs) |
+| `by_album(title)` | album membership, after any configured aliases |
+| `by_gps_cell(cell)` | a 0.25° GPS cell |
+| `years()`, `months()`, `month_days()` | what exists, for building offers |
+| `people_counts()`, `pair_counts()`, `album_counts()`, `gps_cells()` | counts |
+| `earliest(photos)`, `latest(photos)` | chronological ends, tie-broken stably |
+| `resolve_path(photo)` | the first path that exists on disk, or None |
+| `is_public_safe(photo)` | the publish rule |
+
 ## Rules
 
-**Never bypass the index for filtering.** Exclusions and sensitive gating are
-applied by `index.search()`. If you read photos some other way, you lose them,
-and your recipe can surface material the user explicitly blocked.
+**Never reach past the index.** It is handed to you already filtered:
+archived and trashed photos, excluded people, excluded date ranges, albums and
+paths, and (in public-safe mode) anything not publishable are all gone before
+you see them. Importing `PhotoStore` yourself bypasses every one of those, and
+it is the one thing a recipe must not do.
 
-**Return fewer photos than you think.** Thirty is a lot for a montage. Sixty is
-unwatchable. Quality beats completeness.
+**Make `key` stable.** It becomes half of the memory id (`recipe:key`), which
+is what dismissal and the resurfacing cooldown are keyed on. Derive it from the
+memory's *defining facts* - an album title, a person's name, a month-day - and
+never from the set of photos in it. A key derived from contents means one new
+photo produces a "new" memory and a user's dismissal silently stops working.
 
-**Order deliberately.** Chronological is the safe default, but not always right —
-`BeforeAndNow` deliberately juxtaposes across years. Say why in a comment.
+**Be generous in `select`.** The engine applies composition guardrails, burst
+dedup, ranking and the cap afterwards. Returning 400 photos is normal; the
+engine will keep the best 24 distinct ones.
 
-**Put only substantiable facts in the `FactSheet`.** The narrator can assert
-nothing that isn't there, and an independent verifier rejects claims it can't
-check. Adding a speculative field doesn't produce better prose; it produces
-rejected prose.
+**Order deliberately.** `CHRONOLOGICAL` is the safe default and the engine
+restores it after the cap. Use `AS_GIVEN` only when the sequence *is* the
+content - `then_and_now` juxtaposes two photos and would be destroyed by a
+re-sort. A recipe whose form is a fixed, smaller number of shots sets
+`Selection.min_shots`.
 
-**Respect match tiers.** `Photo.sidecar_match` records how confidently a photo
-was paired with its metadata. If your recipe depends on place or date, prefer
-high-tier photos — narration is forbidden from asserting place or date derived
-from a heuristic match.
+**Put only substantiable facts in the `FactSheet`.** It is the complete input
+to the optional GPT caption layer, so a speculative field is a licence to
+hallucinate. It carries no filesystem paths, and it carries coordinates rather
+than place names - there is no offline gazetteer in this project, so a city
+name would be invented.
+
+**Never invent a title.** Every string must be copied from metadata or computed
+arithmetically from it. If a photo has no GPS, the memory says nothing about
+where it was.
+
+**Return None rather than raising.** `rekindle memory --recipe X --key Y`
+builds an `Offer` by hand from the command line, so `select` can be called with
+a key that no longer exists.
 
 ## Testing
 
 ```bash
-uv run pytest tests/recipes/test_every_sunset.py
+uv run pytest tests/test_recipes.py -k every_sunset
 ```
 
-Write two kinds of test:
+Write these, at minimum - they are the ones `tests/test_recipes.py` applies to
+every built-in recipe automatically:
 
-**Plumbing** — against synthetic fixtures. Does it return a well-formed
-`MemorySpec`? Does it handle an empty candidate set, a single photo, photos with
-no GPS, photos with no people tags?
+- An **empty index** yields no offers.
+- Offers are **deterministically ordered** across two calls.
+- `select` on a **stale offer** returns None rather than raising.
+- Every offer has a **non-empty title** and a stable `memory_id`.
+- Your thresholds are respected **at the boundary**: n-1 excluded, n included.
 
-**Selection quality** — against the CC0 corpus (`tests/corpus/`, fetched on
-demand). Does it actually find sunsets? Declare expectations as
-`"prompt X should return at least 8 of these 12 IDs"`.
+Then mutation-test them: break the line each test protects, watch it fail,
+restore it. A test you have not seen fail is not a test. Two real examples from
+M2 - a fixture whose "distinct" hashes were 2 bits apart, and an assertion on
+the word `fingerprint` that was satisfied by pytest's own temp directory name -
+both passed while protecting nothing.
 
-Synthetic images have no semantics, so plumbing tests alone will pass while your
-recipe returns nonsense. Both kinds matter.
-
-> **Note:** the CC0 corpus and eval harness land in M3. Until then, selection
-> quality is reviewed by hand — say in your PR what you tested against.
+**Fixtures must reproduce shapes you have actually observed.** Inventing a
+convention and pinning it with a test is the most expensive mistake available
+in this codebase; it has happened three times. If you have a Takeout export,
+run the conformance suite (see [CONTRIBUTING.md](../CONTRIBUTING.md)).
 
 ## Ideas nobody has built
 

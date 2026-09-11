@@ -144,3 +144,140 @@ def enrich(
             f"\n[yellow]![/yellow] The index was built from {indexed_root}, not {root}. "
             "Photo paths are absolute, so matches will be few."
         )
+
+
+# --------------------------------------------------------------------------
+# M2: memories
+#
+# The implementations live in rekindle.memory.cli so this module stays a thin
+# argument-parsing layer. Imported lazily inside each command: typer builds
+# every signature at import time, and pulling the whole memory engine (and
+# Pillow's image plugins) in for `rekindle --version` is a measurable startup
+# cost on a cold Windows filesystem.
+
+
+@app.command()
+def fingerprint(data_dir: DataDir = Path("./data")) -> None:
+    """Compute perceptual fingerprints. One-time pass; needed for dedup."""
+    from rekindle.memory.cli import fingerprint_cmd
+
+    fingerprint_cmd(_resolved(data_dir))
+
+
+@app.command()
+def memories(
+    recipe: Annotated[
+        str | None, typer.Option("--recipe", help="Only show this recipe's memories.")
+    ] = None,
+    limit: Annotated[int, typer.Option("--limit", help="Rows per recipe.")] = 10,
+    data_dir: DataDir = Path("./data"),
+) -> None:
+    """List every memory this library could produce. Builds nothing."""
+    from rekindle.memory.cli import memories_cmd
+
+    memories_cmd(_resolved(data_dir), recipe, limit)
+
+
+@app.command()
+def memory(
+    recipe: Annotated[str | None, typer.Option("--recipe", help="Recipe name.")] = None,
+    key: Annotated[str | None, typer.Option("--key", help="Which memory, from `memories`.")] = None,
+    auto: Annotated[
+        bool, typer.Option("--auto", help="Today's anniversary, if there is one.")
+    ] = False,
+    out: Annotated[Path, typer.Option("--out", help="Where to write memories.")] = Path("memories"),
+    public_safe: Annotated[
+        bool,
+        typer.Option(
+            "--public-safe",
+            help="Only use photos whose face tags are a subset of the allow-list.",
+        ),
+    ] = False,
+    max_shots: Annotated[int, typer.Option("--max-shots")] = 24,
+    gif_frames: Annotated[int, typer.Option("--gif-frames")] = 12,
+    music: Annotated[Path | None, typer.Option("--music", help="Audio bed for the MP4.")] = None,
+    no_mp4: Annotated[
+        bool, typer.Option("--no-mp4", help="Skip the MP4 even if ffmpeg is here.")
+    ] = False,
+    limit: Annotated[int, typer.Option("--limit", help="Maximum memories to build.")] = 1,
+    data_dir: DataDir = Path("./data"),
+) -> None:
+    """Build one or more memories into a folder. Renders a GIF, and an MP4 if
+    ffmpeg is on PATH."""
+    from rekindle.memory.cli import memory_cmd
+
+    memory_cmd(
+        _resolved(data_dir),
+        recipe,
+        key,
+        auto,
+        out,
+        public_safe,
+        max_shots,
+        gif_frames,
+        music,
+        no_mp4,
+        limit,
+    )
+
+
+@app.command()
+def dismiss(
+    recipe: Annotated[str, typer.Argument(help="Recipe name.")],
+    key: Annotated[str, typer.Argument(help="Memory key.")],
+    data_dir: DataDir = Path("./data"),
+) -> None:
+    """Never show this memory again. Permanent, and undoable with `undismiss`."""
+    from rekindle.memory.cli import dismiss_cmd
+
+    dismiss_cmd(_resolved(data_dir), recipe, key)
+
+
+@app.command()
+def undismiss(
+    recipe: Annotated[str, typer.Argument(help="Recipe name.")],
+    key: Annotated[str, typer.Argument(help="Memory key.")],
+    data_dir: DataDir = Path("./data"),
+) -> None:
+    """Undo a dismissal."""
+    from rekindle.memory.cli import undismiss_cmd
+
+    undismiss_cmd(_resolved(data_dir), recipe, key)
+
+
+@app.command()
+def exclude(
+    person: Annotated[str | None, typer.Option("--person")] = None,
+    album: Annotated[str | None, typer.Option("--album")] = None,
+    from_: Annotated[str | None, typer.Option("--from", help="YYYY-MM-DD")] = None,
+    to: Annotated[str | None, typer.Option("--to", help="YYYY-MM-DD")] = None,
+    data_dir: DataDir = Path("./data"),
+) -> None:
+    """Exclude a person, an album or a date range from every memory."""
+    from rekindle.memory.cli import exclude_cmd
+
+    exclude_cmd(_resolved(data_dir), person, album, from_, to)
+
+
+@app.command()
+def dismissals(data_dir: DataDir = Path("./data")) -> None:
+    """Show everything that has been dismissed or excluded."""
+    from rekindle.memory.cli import dismissals_cmd
+
+    dismissals_cmd(_resolved(data_dir))
+
+
+@app.command()
+def watch(
+    root: Annotated[Path, typer.Argument(help="Folder to watch.")],
+    interval: Annotated[float, typer.Option("--interval", help="Seconds between polls.")] = 300.0,
+    once: Annotated[bool, typer.Option("--once", help="Run a single cycle and exit.")] = False,
+    data_dir: DataDir = Path("./data"),
+) -> None:
+    """Watch a library in the FOREGROUND. Re-indexes on change and prints
+    today's anniversary. Never renders anything on its own."""
+    from rekindle.memory.cli import watch_cmd
+
+    root = _resolved(root)
+    _check_root(root)
+    watch_cmd(root, _resolved(data_dir), interval, once)
