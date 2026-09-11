@@ -22,6 +22,7 @@ what was measured on the 19,480-photo reference index.
 
 from __future__ import annotations
 
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -94,6 +95,55 @@ class ToyEncoder:
                 mean = (128.0, 128.0, 128.0)
             out.append(_normalise(list(mean) * (GRID * GRID)))
         return out
+
+
+class PreparingToyEncoder(ToyEncoder):
+    """`ToyEncoder` split into the CPU half and the device half.
+
+    The same arithmetic as `ToyEncoder`, cut where `TorchEncoder` is cut, so
+    the pipelined path in `embed_photos` can be exercised with no model, no
+    GPU and no network. It also records WHICH THREAD prepared each batch,
+    which is the only way a test can tell that the pool is really being used
+    rather than the main thread doing the work and the suite passing anyway.
+    """
+
+    def __init__(self, *, prepare_raises: bool = False) -> None:
+        super().__init__()
+        self.prepare_calls = 0
+        self.prepared_calls = 0
+        self.prepare_threads: set[int] = set()
+        self._prepare_raises = prepare_raises
+
+    def prepare_images(self, images) -> object:
+        self.prepare_calls += 1
+        self.prepare_threads.add(threading.get_ident())
+        if self._prepare_raises:
+            raise RuntimeError("prepare_images is broken on purpose")
+        if not images:
+            return None
+        return [_grid_of(im) for im in images]
+
+    def encode_prepared(self, prepared) -> list[list[float]]:
+        self.prepared_calls += 1
+        if prepared is None:
+            return []
+        return [_normalise(grid) for grid in prepared]
+
+
+class HalfPreparedEncoder(ToyEncoder):
+    """Only `prepare_images`, no `encode_prepared`. A half-finished migration.
+
+    `embed_photos` must ignore it entirely: preparing without a matching
+    finisher would hand raw grids to `encode_images`.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.prepare_calls = 0
+
+    def prepare_images(self, images) -> object:
+        self.prepare_calls += 1
+        return [_grid_of(im) for im in images]
 
 
 def solid_image(colour: str | tuple[int, int, int], size: int = 64):
