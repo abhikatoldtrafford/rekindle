@@ -479,3 +479,50 @@ def test_get_returns_none_for_an_unknown_recipe():
 
     assert get("no_such_recipe") is None
     assert get("album_story") is not None
+
+
+def test_then_and_now_skips_a_subject_whose_ends_cannot_be_SHOWN(tmp_path):
+    """The bug the conformance suite found on the real library.
+
+    This recipe picks exactly two photos, so if composition then drops either
+    one the memory dies - and it died silently: `offers()` advertised a memory
+    `select()` could not build. On the reference index the earliest photo of
+    `Abhik Maiti` is a 6928x2309 panorama, which the aspect gate rejects.
+
+    The fix is that the recipe narrows to showable photos BEFORE choosing its
+    ends, so its offer and its selection agree.
+    """
+
+    photos = [_p(f"a{i}", local=datetime(2015 + i, 5, 1), people=["Avyan"]) for i in range(9)]
+    # The earliest photo is a real panorama shape, which composition rejects.
+    photos[0].meta.width, photos[0].meta.height = 6928, 2309
+
+    store, index = _index(tmp_path, photos)
+    try:
+        recipe = REGISTRY["then_and_now"]
+        offer = next(o for o in recipe.offers(index) if o.key == "person:Avyan")
+        selection = recipe.select(index, offer)
+
+        assert selection is not None, "offered a memory it cannot build"
+        assert len(selection.photos) == 2
+        # The panorama is not one of them; the SECOND-earliest is "then".
+        assert selection.photos[0].file_hash == "a1"
+        assert "a0" not in {p.file_hash for p in selection.photos}
+        # ...and the offer's subtitle reports the year it will actually show.
+        assert offer.subtitle.startswith("2016")
+    finally:
+        store.close()
+
+
+def test_then_and_now_offers_nothing_when_too_few_photos_are_showable(tmp_path):
+    """Eight photos, but seven are thumbnails. The offer must not appear."""
+    photos = [_p(f"a{i}", local=datetime(2015 + i, 5, 1), people=["Avyan"]) for i in range(9)]
+    for photo in photos[1:8]:
+        photo.meta.width, photo.meta.height = 100, 80
+
+    store, index = _index(tmp_path, photos)
+    try:
+        keys = {o.key for o in REGISTRY["then_and_now"].offers(index)}
+        assert "person:Avyan" not in keys
+    finally:
+        store.close()

@@ -104,3 +104,9 @@ Thumbs.db
 
 # SDD scratch workspace
 .superpowers/
+
+# Agent harness scratch. `.claude/worktrees/` holds git worktrees, which git
+# records as GITLINKS - a `git add .` commits a reference to a commit that
+# does not exist for anyone who clones the repo, producing a broken empty
+# directory and submodule warnings. Ignored so it cannot happen again.
+.claude/

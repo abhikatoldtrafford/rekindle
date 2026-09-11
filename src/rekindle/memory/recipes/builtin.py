@@ -16,6 +16,7 @@ import re
 from datetime import timedelta
 
 from rekindle.memory import captions
+from rekindle.memory.composition import compose
 from rekindle.memory.index import MemoryIndex
 from rekindle.memory.recipes.base import (
     AS_GIVEN,
@@ -300,9 +301,29 @@ class ThenAndNow:
     # nothing. A year is the smallest gap at which "then and now" is true.
     min_gap = timedelta(days=365)
 
+    @staticmethod
+    def _showable(photos: list[Photo]) -> list[Photo]:
+        """Narrow to photos that will survive the composition guardrails.
+
+        Every other recipe hands the engine a generous pool and lets it drop
+        what cannot be shown. This one picks exactly TWO photos, so if either
+        is then dropped the memory dies - and it died silently: on the
+        reference library the earliest photo of `Abhik Maiti` is a 6928x2309
+        panorama, which the aspect gate rejects, so `offers()` advertised a
+        memory `select()` could not build. Found by running the conformance
+        suite against the real index, not by reading.
+
+        `compose` is idempotent - the engine runs it again on the pair and
+        drops nothing further - so calling it here costs a pass over one
+        subject's photos and nothing else.
+        """
+        showable, _ = compose(photos)
+        return showable
+
     def offers(self, index: MemoryIndex) -> list[Offer]:
         out = []
-        for subject, photos in self._subjects(index):
+        for subject, all_photos in self._subjects(index):
+            photos = self._showable(all_photos)
             if len(photos) < self.min_photos:
                 continue
             first, last = index.earliest(photos), index.latest(photos)
@@ -336,7 +357,8 @@ class ThenAndNow:
 
     def select(self, index: MemoryIndex, offer: Offer) -> Selection | None:
         kind, _, subject = offer.key.partition(":")
-        photos = index.by_person(subject) if kind == "person" else index.by_album(subject)
+        raw = index.by_person(subject) if kind == "person" else index.by_album(subject)
+        photos = self._showable(raw)
         first, last = index.earliest(photos), index.latest(photos)
         if first is None or last is None or first.file_hash == last.file_hash:
             return None
