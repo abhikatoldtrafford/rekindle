@@ -28,6 +28,11 @@ _GPS_IFD = 0x8825
 _MAKE, _MODEL = 0x010F, 0x0110
 _DATETIME_ORIGINAL, _OFFSET_ORIGINAL = 0x9003, 0x9011
 _DATETIME_DIGITIZED, _OFFSET_DIGITIZED = 0x9004, 0x9012
+_ORIENTATION = 0x0112
+# EXIF orientation values that exchange the two axes: 90 or 270 degrees, with
+# or without a mirror. 1/2 are upright, 3/4 are 180 degrees - none of those
+# swap width and height.
+_SWAPS_AXES = frozenset({5, 6, 7, 8})
 
 
 @dataclass(frozen=True)
@@ -103,6 +108,23 @@ def read_exif(path: Path) -> ExifData:
             with Image.open(path) as im:
                 width, height = im.size
                 exif = im.getexif()
+                # A camera stores a portrait photo as LANDSCAPE pixels plus an
+                # orientation tag, and `Image.size` is the raw STORED size -
+                # Pillow does not apply the tag. Recording it unrotated makes a
+                # portrait photo look like a landscape one to everything
+                # downstream: orientation classification, canvas sizing, and
+                # any caller that asks "is this taller than it is wide?".
+                #
+                # Measured on the reference library: 13.6% of a 456-file sample
+                # carry a 90/270-degree tag, so roughly 2,475 of 18,201 live
+                # images were stored with width and height swapped. Found in M2
+                # while building orientation-cohesion guardrails. It was latent
+                # through M0 and M1 because nothing had ever compared the
+                # stored dimensions against the pixels a viewer actually sees -
+                # w*h is invariant under the swap, so even the dedup tiebreak
+                # that reads them could not notice.
+                if exif.get(_ORIENTATION) in _SWAPS_AXES:
+                    width, height = height, width
                 sub = exif.get_ifd(_EXIF_IFD)
                 gps_ifd = exif.get_ifd(_GPS_IFD)
     except Image.DecompressionBombError as exc:

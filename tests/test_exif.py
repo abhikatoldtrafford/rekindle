@@ -111,3 +111,60 @@ def test_gps_with_a_damaged_rational_yields_no_gps_at_all(tmp_path):
     d = read_exif(p)
     assert d.decode_ok is True  # the FILE is fine; only the coordinate is not
     assert d.gps is None
+
+
+# --------------------------------------------------------------------------
+# EXIF orientation (M2: a latent M0 defect, see read_exif)
+
+
+def _oriented_jpeg(path, size, orientation):
+    """A landscape-pixel JPEG carrying an orientation tag, exactly as a phone
+    writes a portrait photo."""
+    from PIL import Image as _Image
+
+    im = _Image.new("RGB", size, (90, 120, 150))
+    exif = im.getexif()
+    exif[0x0112] = orientation
+    im.save(path, "JPEG", exif=exif)
+    return path
+
+
+@pytest.mark.parametrize("orientation", [5, 6, 7, 8])
+def test_a_rotated_portrait_reports_portrait_dimensions(tmp_path, orientation):
+    """The bug this fixes: a phone stores a portrait photo as LANDSCAPE pixels
+    plus a 90/270-degree tag, and Image.size is the raw stored size. Roughly
+    2,475 of the reference library's 18,201 live images are this shape."""
+    path = _oriented_jpeg(tmp_path / f"o{orientation}.jpg", (400, 300), orientation)
+    data = read_exif(path)
+    assert (data.width, data.height) == (300, 400)
+
+
+@pytest.mark.parametrize("orientation", [1, 2, 3, 4])
+def test_an_upright_or_flipped_photo_keeps_its_dimensions(tmp_path, orientation):
+    """1 and 2 are upright, 3 and 4 are 180 degrees. None of them exchange the
+    axes, so treating "orientation != 1" as "swap" would corrupt these."""
+    path = _oriented_jpeg(tmp_path / f"o{orientation}.jpg", (400, 300), orientation)
+    data = read_exif(path)
+    assert (data.width, data.height) == (400, 300)
+
+
+def test_a_photo_with_no_orientation_tag_keeps_its_dimensions(tmp_path):
+    from PIL import Image as _Image
+
+    path = tmp_path / "plain.jpg"
+    _Image.new("RGB", (400, 300), (10, 20, 30)).save(path, "JPEG")
+    data = read_exif(path)
+    assert (data.width, data.height) == (400, 300)
+
+
+def test_stored_dimensions_match_what_exif_transpose_produces(tmp_path):
+    """The definition of correct: whatever a viewer sees after the standard
+    ImageOps.exif_transpose is what the index must record."""
+    from PIL import Image as _Image
+    from PIL import ImageOps
+
+    path = _oriented_jpeg(tmp_path / "o6.jpg", (640, 480), 6)
+    data = read_exif(path)
+    with _Image.open(path) as im:
+        expected = ImageOps.exif_transpose(im).size
+    assert (data.width, data.height) == expected
