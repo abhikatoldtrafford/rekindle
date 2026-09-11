@@ -202,6 +202,7 @@ function draw() {
 
   drawChosen();
   drawCut();
+  if (results.length) drawResults();
   drawGuardrails();
   drawPace();
   drawReproduce();
@@ -236,6 +237,7 @@ function drawCut() {
   cut.forEach((c) => counts.set(c.reason, (counts.get(c.reason) || 0) + 1));
   const chips = $("cut-filter");
   chips.replaceChildren();
+  $("cut").parentElement.querySelectorAll("p.muted.truncated").forEach((n) => n.remove());
   const all = element("button", "chip" + (cutFilter ? "" : " on"), `all (${cut.length})`);
   all.type = "button";
   all.addEventListener("click", () => { cutFilter = ""; drawCut(); });
@@ -250,9 +252,15 @@ function drawCut() {
 
   const grid = $("cut");
   grid.replaceChildren();
-  cut.filter((c) => !cutFilter || c.reason === cutFilter)
-     .slice(0, 400)
-     .forEach((info) => {
+  const shown = cut.filter((c) => !cutFilter || c.reason === cutFilter);
+  const LIMIT = 400;
+  if (shown.length > LIMIT) {
+    const note = element("p", "muted truncated",
+      `Showing the first ${LIMIT} of ${shown.length}. Filter by a reason above, ` +
+      "or search for what you are looking for.");
+    grid.parentElement.insertBefore(note, grid);
+  }
+  shown.slice(0, LIMIT).forEach((info) => {
        const card = photoCard(info, {});
        const actions = element("div", "actions");
        actions.appendChild(action("Put it in", () => edit({ op: "add", file_hash: info.file_hash })));
@@ -437,7 +445,10 @@ $("music").addEventListener("change", () => edit({ op: "pace", music: $("music")
 
 $("render").addEventListener("click", async () => {
   $("render").disabled = true;
-  say($("render-note"), "rendering…");
+  say($("render-note"), $("no-mp4").checked
+    ? "rendering the WebP and GIF…"
+    : "rendering… the MP4 pass decodes every shot at full size and can take a minute. " +
+      "Tick “skip the MP4” for a quick look.");
   try {
     adopt(await post("/api/render", { session_id: state.session_id, no_mp4: $("no-mp4").checked }));
     const result = state.last_render;
