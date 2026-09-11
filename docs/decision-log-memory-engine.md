@@ -157,7 +157,7 @@ flag exists rather than being a post-filter.
 it.** The specific mechanisms were mutation testing and a conformance run
 against the real index.
 
-### Four tests that could not fail
+### Six tests that could not fail (and four more later - see below)
 
 1. **`assert "fingerprint" in result.output`.** pytest names its temp directory
    after the test — `test_an_unfingerprinted_index_warns_...` — and that path
@@ -177,7 +177,8 @@ against the real index.
 
 Also: a 4000x200 fixture that the *aspect* rule rejected while the test claimed
 to be testing the *resolution floor*, and a music-ordering test that could not
-fail because NTFS happens to return sorted directory entries.
+fail because NTFS happens to return sorted directory entries. Six in all, and
+four more turned up later; the running total is at the end of this section.
 
 ### Two bugs only real data could find
 
@@ -228,6 +229,114 @@ One guard was **removed rather than tested**: `_under`'s
 Windows". Measured on 3.12, `Path.is_relative_to` returns False rather than
 raising, so the handler was unreachable on every supported Python and no
 mutation of it could fail. An untestable guard is a line nobody can maintain.
+
+---
+
+## Three defects found by looking at the output
+
+The milestone passed its own tests, its conformance suite and its verification
+run, and then three separate defects were found by *looking at the rendered
+memories*. All three are worth recording because none was a coding error — each
+was a rule that was locally reasonable and wrong in combination with the
+library it ran against.
+
+### 1. Selection collapsed onto one period
+
+Measured across 37 rendered memories: **16 were confined to a single year** and
+**10 to a single month**. `on_this_day-12-22` showed 24 shots all from 2019
+while 2020 and 2022 had photos available and unused; three `year_in_review`
+memories showed one month each.
+
+An "on this day" confined to one year does not under-perform — it *defeats the
+concept of the recipe*, which is the same calendar date across years.
+
+The cause was structural, not a threshold to tune. `FactSheet.per_year` existed
+but only as a field *computed from* the chosen shots for reporting; nothing fed
+the temporal spread back as a constraint on the choice. Selection took top-N by
+quality and the strongest-scoring run swept every slot.
+
+Each recipe now declares the dimension its memory is *about*, and slots are
+allocated across it before quality ranking chooses within each bucket.
+Allocation is **proportional with a floor** — every non-empty bucket gets one
+slot before any gets a second. Both extremes fail on the real data: the
+surviving buckets for `on_this_day:12-22` are 2019 with 126 photos, 2020 with 2
+and 2022 with 1, so pure proportional is what the broken code already did
+(23/1/0) while an equal split wastes eight slots on a year with one photo.
+Floor-then-proportional gives 22/1/1.
+
+### 2. One weak photo set the resolution for the whole memory
+
+The canvas was the **minimum** width and height of the selected set. Measured
+across 45 memories: **11 rendered at 640x480** and one at 1105x510.
+
+In `person_years-paramita`, a single 640x480 photo from 2014 pinned the memory
+to 640x480 — rendering two 7008x4672 photos at **a 120th of their pixel
+count**. The intent behind the minimum (never blow a small photo up into mush)
+was right; the lever was wrong, because on a library spanning 2000–2026 the
+oldest phone photo in any set dictates everything.
+
+The canvas is now the **median**, and photos below it are **padded at native
+size**, not excluded.
+
+Excluding them was the obvious fix and would have been a silent regression:
+**on this library, small means old**, so it would have deleted the early years
+of exactly the memories — "person over the years" — whose subject *is* the
+span, quietly undoing fix (1). Two individually reasonable rules combining into
+a failure neither announces.
+
+### 3. The same picture, several times, in one memory
+
+`album_story-wedding_arnab_pics` spent **12 of 24 shots on one day**;
+`album_story-avyan` had 3 shots of the same child on 2025-09-17.
+
+Not a dedup bug — dedup gates on ~30 seconds and these are minutes or hours
+apart, correctly outside it. Selection simply had no diversity constraint, so
+three good photos of one afternoon each won on their own merits.
+
+The first design was a per-day cap. It was wrong in both directions and the
+measurement says why: **the median pairwise dissimilarity between two photos
+taken on the same day is 0.679** — most same-day photos are genuinely
+different. A day cap would have gutted a one-day album like `Diwali Kali Puja
+22` while still permitting two near-identical photos four hours apart.
+
+So the criterion is content. Selection is maximal-marginal-relevance over a
+perceptual hash (already stored) plus a new colour histogram, with no time
+gate. After the fix the **minimum pairwise dissimilarity within a memory is
+0.33** and there are no near-identical pairs anywhere. The wedding album still
+spends 12 shots on the wedding day — and those twelve have a minimum pairwise
+dissimilarity of 0.61, so they are twelve different moments, which is correct.
+
+### What these three have in common
+
+None was found by a test, a review or a conformance run. All three were found
+by **rendering the output and looking at it** — the same lesson as M1's "every
+genuine bug was found by running against a real export", one level up: a
+memory can be correct in every assertion the suite makes and still be a bad
+memory.
+
+Two of them also show rules combining badly. The canvas minimum and the
+"exclude small photos" fix would each have looked right in review; together
+they would have deleted a library's early years. The conformance suite has been
+extended with assertions about the *result* rather than its correctness —
+does a span recipe span, are any two shots near-identical, does the canvas hold
+up — because those are the questions the original suite never asked.
+
+### Tests that could not fail, found while fixing these
+
+Four more, bringing the milestone's total to **ten**:
+
+- **Two vacuous diversity assertions of my own**: `min(by_year.values()) >= 1`
+  and `by_year["2020"] >= 1` both pass when the year is *absent*, because an
+  absent key is not in the Counter at all. Both were rewritten to assert
+  presence explicitly, and only then did all six stratification tests fail
+  against the unfixed code.
+- **A time-tiebreak test that was mathematically incapable of failing**: with
+  two candidates the quality gap is 0.5 and the tiebreak is at most 0.05, so
+  the top rank always wins. The tiebreak can only decide anything with more
+  than 20 candidates; the test now uses 24.
+- **A "similar" fixture that was not similar** — composite dissimilarity 0.65,
+  so the graded penalty could never act on it and the test was silently
+  exercising the hard floor instead.
 
 ---
 

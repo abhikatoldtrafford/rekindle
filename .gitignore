@@ -110,3 +110,7 @@ Thumbs.db
 # does not exist for anyone who clones the repo, producing a broken empty
 # directory and submodule warnings. Ignored so it cannot happen again.
 .claude/
+
+# Music beds for memory soundtracks. Bring-your-own or fetched;
+# never committed - this is a public repo.
+[Mm]usic/
