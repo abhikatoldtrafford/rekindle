@@ -5,6 +5,8 @@ message and exit 0, never a crash. Everything else is about not lying - a
 missing file is counted, not rendered as a black slot.
 """
 
+import os
+import re
 import shutil
 import subprocess
 import sys
@@ -19,7 +21,7 @@ from rekindle.memory.render import frames as fr
 from rekindle.memory.render import mp4 as mp4mod
 from rekindle.memory.render.gif import preview_canvas, write_gif, write_webp
 from rekindle.memory.render.mp4 import mp4_canvas, write_mp4
-from rekindle.memory.render.music import NO_MUSIC_HINT, resolve_music
+from rekindle.memory.render.music import DEFAULT_DIR, NO_MUSIC_HINT, resolve_music
 from rekindle.memory.spec import FactSheet, MemorySpec, Shot
 from rekindle.models import MediaType, Photo, PhotoMeta
 
@@ -464,6 +466,140 @@ def test_a_real_mp4_is_produced_and_playable(tmp_path):
     assert "320,240" in probe.stdout.replace(" ", "")
 
 
+def _probe(path, entries, stream=None):
+    cmd = [shutil.which("ffprobe"), "-v", "error"]
+    if stream:
+        cmd += ["-select_streams", stream]
+    cmd += ["-show_entries", entries, "-of", "csv=p=0", str(path)]
+    return subprocess.run(cmd, capture_output=True, text=True).stdout.strip()
+
+
+def test_the_audio_input_is_both_looped_and_bounded(tmp_path, monkeypatch):
+    """The two flags are a PAIR and neither is optional.
+
+    The end-to-end pair below proves each one, but only with ffmpeg installed
+    and - for `-shortest` - by waiting out a 600-second timeout, because
+    `-stream_loop -1` without `-shortest` produces an encode that never ends.
+    A test whose failure mode is "ten minutes" is a test nobody runs. This one
+    reads the command line, fails in milliseconds, and runs in CI where there
+    is no ffmpeg.
+    """
+    seen = {}
+
+    class _Done:
+        returncode = 0
+        stderr = ""
+
+    def spy(cmd, **kwargs):
+        seen["cmd"] = cmd
+        Path(cmd[-1]).write_bytes(b"fake mp4")
+        return _Done()
+
+    monkeypatch.setattr(mp4mod.subprocess, "run", spy)
+    monkeypatch.setattr(mp4mod, "ffmpeg_path", lambda: "ffmpeg")
+    bed = tmp_path / "bed.mp3"
+    bed.write_bytes(b"fake")
+    write_mp4([Image.new("RGB", (64, 48))], tmp_path / "m.mp4", music=bed)
+
+    cmd = seen["cmd"]
+    assert "-stream_loop" in cmd, "a bed shorter than the memory would cut out"
+    assert "-shortest" in cmd, "a looped bed would never terminate"
+    # -stream_loop applies to the NEXT input, so it has to sit immediately
+    # before the audio -i and not before the concat one.
+    assert cmd[cmd.index("-stream_loop") + 1] == "-1"
+    assert cmd[cmd.index("-stream_loop") + 2] == "-i"
+    assert cmd[cmd.index("-stream_loop") + 3] == str(bed)
+
+
+def test_no_audio_flags_are_passed_when_there_is_no_bed(tmp_path, monkeypatch):
+    """Silence is the default. `-stream_loop` with no audio input would apply
+    to whatever input came next, which is the still frames."""
+    seen = {}
+
+    class _Done:
+        returncode = 0
+        stderr = ""
+
+    def spy(cmd, **kwargs):
+        seen["cmd"] = cmd
+        Path(cmd[-1]).write_bytes(b"fake mp4")
+        return _Done()
+
+    monkeypatch.setattr(mp4mod.subprocess, "run", spy)
+    monkeypatch.setattr(mp4mod, "ffmpeg_path", lambda: "ffmpeg")
+    write_mp4([Image.new("RGB", (64, 48))], tmp_path / "m.mp4")
+
+    assert "-stream_loop" not in seen["cmd"]
+    assert "-shortest" not in seen["cmd"]
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not on PATH")
+def test_a_short_bed_loops_instead_of_cutting_out_mid_memory(tmp_path):
+    """40 CC0 piano tracks are mostly one to three minutes and a memory can be
+    longer. Without `-stream_loop -1` the audio simply stops and the rest of
+    the memory plays in silence.
+
+    Measured rather than asserted on the command line: a one-second bed under
+    a ~3-second video, probed. The audio stream runs the length of the video,
+    not the length of the bed.
+    """
+    bed = tmp_path / "bed.wav"
+    subprocess.run(
+        [
+            shutil.which("ffmpeg"),
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=1",
+            str(bed),
+        ],
+        check=True,
+    )
+    frames = [Image.new("RGB", (320, 240), (i * 30, 60, 90)) for i in range(6)]
+    result = write_mp4(
+        frames, tmp_path / "m.mp4", seconds=0.5, title_seconds=0.5, has_title=False, music=bed
+    )
+    assert result.ok, result.error
+
+    audio = float(_probe(result.path, "stream=duration", stream="a:0"))
+    # The bed is 1.0s and the video is ~3.0s. Anything at or near 1.0 means
+    # the bed played once and stopped.
+    assert audio > 2.0, f"audio stream is {audio}s - the bed did not loop"
+
+
+@pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not on PATH")
+def test_a_long_bed_is_still_cut_at_the_end_of_the_memory(tmp_path):
+    """The other half of the pair. `-stream_loop -1` alone never terminates;
+    `-shortest` is what stops it, and dropping `-shortest` while keeping the
+    loop would produce a file that encodes until something gives up."""
+    bed = tmp_path / "bed.wav"
+    subprocess.run(
+        [
+            shutil.which("ffmpeg"),
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=30",
+            str(bed),
+        ],
+        check=True,
+    )
+    frames = [Image.new("RGB", (320, 240), (i * 30, 60, 90)) for i in range(4)]
+    result = write_mp4(
+        frames, tmp_path / "m.mp4", seconds=0.5, title_seconds=0.5, has_title=False, music=bed
+    )
+    assert result.ok, result.error
+    assert float(_probe(result.path, "format=duration")) < 5.0
+
+
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="ffmpeg not on PATH")
 def test_the_last_frame_is_held_not_flashed(tmp_path):
     """The concat demuxer applies a duration to the transition INTO the next
@@ -565,6 +701,146 @@ def test_music_resolution_makes_no_network_call(monkeypatch, tmp_path):
 def test_the_no_music_hint_says_silence_is_fine():
     assert "Silence is the default" in NO_MUSIC_HINT
     assert "never downloads" in NO_MUSIC_HINT
+
+
+def test_the_folder_the_hint_calls_gitignored_really_is_ignored():
+    """The project's signature defect is user-facing text asserting something
+    untrue, and this hint asserted it for a whole milestone: `music/` was NOT
+    in .gitignore until the folder already held 54 MB of audio in a public
+    repository. Stating it in prose is what let the two drift apart, so the
+    claim is now checked against git itself rather than against a copy of the
+    rule in a test.
+
+    The folder name is read OUT OF THE HINT, not hardcoded: renaming the
+    directory in one place and not the other is the same defect wearing a
+    different hat.
+    """
+    match = re.search(r"`([^`]+)/`", NO_MUSIC_HINT)
+    assert match, "the hint no longer names a folder"
+    folder = match.group(1)
+    assert "gitignored" in NO_MUSIC_HINT, "the hint no longer claims the folder is ignored"
+
+    root = Path(__file__).resolve().parent.parent
+    if not (root / ".git").exists():
+        pytest.skip("not a git checkout - there is no ignore rule to check")
+    if shutil.which("git") is None:
+        pytest.skip("git is not on PATH")
+
+    probe = f"{folder}/track.mp3"
+    result = subprocess.run(
+        ["git", "check-ignore", "-q", "--no-index", probe],
+        cwd=root,
+        capture_output=True,
+    )
+    # 0 = ignored, 1 = not ignored, 128 = error.
+    assert result.returncode != 128, result.stderr.decode(errors="replace")
+    assert result.returncode == 0, (
+        f"NO_MUSIC_HINT calls {folder}/ gitignored, but git would commit {probe}. "
+        "This is a public repository."
+    )
+
+
+def test_the_hint_names_the_folder_the_code_actually_reads():
+    """The other direction of the same drift: the hint could name a folder
+    nothing looks in."""
+    match = re.search(r"`([^`]+)/`", NO_MUSIC_HINT)
+    assert match and Path(match.group(1)) == DEFAULT_DIR
+
+
+# --------------------------------------------------------------------------
+# music: one track per memory, not one track for everything
+
+
+def _tracks(folder, count=40):
+    folder.mkdir(parents=True, exist_ok=True)
+    for i in range(count):
+        (folder / f"{i:02d}-piece.mp3").write_bytes(b"fake")
+    return folder
+
+
+def test_two_different_memories_get_two_different_tracks(tmp_path):
+    """`candidates[0]` was right for one file and a bug for 40: every one of
+    53 memories opened with the same piece."""
+    folder = _tracks(tmp_path / "music")
+    chosen = {
+        resolve_music(folder=folder, memory_id=mid).name
+        for mid in (
+            "on_this_day:12-22",
+            "year_in_review:2019",
+            "person_years:Abhik Maiti",
+            "album_story:wedding_arnab_pics",
+            "then_and_now:Abhik Maiti",
+        )
+    }
+    assert len(chosen) > 1
+
+
+def test_the_same_memory_always_gets_the_same_track(tmp_path):
+    """The determinism promise: re-rendering a memory must be byte-identical,
+    so the track cannot come from a counter, a shuffle, or `hash()` - which is
+    randomised per process for strings."""
+    folder = _tracks(tmp_path / "music")
+    first = resolve_music(folder=folder, memory_id="album_story:avyan")
+    for _ in range(5):
+        assert resolve_music(folder=folder, memory_id="album_story:avyan") == first
+
+
+def test_the_track_for_a_memory_is_the_same_in_a_fresh_process(tmp_path):
+    """`hash()` on a str is salted per interpreter, so a selection built on it
+    passes every in-process repetition above and still gives a different
+    soundtrack on the next run. Only a separate process can see that."""
+    folder = _tracks(tmp_path / "music")
+    mine = resolve_music(folder=folder, memory_id="year_in_review:2021").name
+    code = (
+        "import sys;"
+        "from pathlib import Path;"
+        "sys.path.insert(0, r'" + str(Path(__file__).resolve().parent.parent / "src") + "');"
+        "from rekindle.memory.render.music import resolve_music;"
+        "print(resolve_music(folder=Path(r'" + str(folder) + "'),"
+        " memory_id='year_in_review:2021').name)"
+    )
+    out = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, env={**os.environ}
+    )
+    assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == mine
+
+
+def test_the_whole_set_of_memories_spreads_across_the_folder(tmp_path):
+    """A selection that differs between two memories can still pile 53
+    memories onto three tracks. Measured against the real recipe/key shapes:
+    40 tracks, 53 memories."""
+    folder = _tracks(tmp_path / "music")
+    ids = [f"year_in_review:{2000 + i}" for i in range(27)] + [
+        f"album_story:album_{i}" for i in range(26)
+    ]
+    used = {resolve_music(folder=folder, memory_id=i).name for i in ids}
+    # 53 draws from 40 boxes leaves ~11 empty by chance alone; anything near
+    # 40 distinct is a healthy spread and anything tiny is a broken one.
+    assert len(used) >= 25
+
+
+def test_an_explicit_path_still_wins_over_the_per_memory_choice(tmp_path):
+    folder = _tracks(tmp_path / "music")
+    chosen = tmp_path / "chosen.mp3"
+    assert resolve_music(chosen, folder=folder, memory_id="year_in_review:2019") == chosen
+
+
+def test_a_memory_with_no_id_falls_back_to_the_first_track(tmp_path):
+    folder = _tracks(tmp_path / "music")
+    assert resolve_music(folder=folder).name == "00-piece.mp3"
+
+
+def test_the_per_memory_choice_does_not_depend_on_filesystem_order(tmp_path, monkeypatch):
+    """Same hazard as the sorted-listing test above, one level up: the index
+    is taken into a LIST, so an unsorted listing gives a different track for
+    the same memory on a different filesystem."""
+    folder = _tracks(tmp_path / "music")
+    before = resolve_music(folder=folder, memory_id="on_this_day:12-22").name
+
+    real_iterdir = Path.iterdir
+    monkeypatch.setattr(Path, "iterdir", lambda self: reversed(sorted(real_iterdir(self))))
+    assert resolve_music(folder=folder, memory_id="on_this_day:12-22").name == before
 
 
 def test_the_render_package_exposes_no_url():

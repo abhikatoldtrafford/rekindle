@@ -359,7 +359,7 @@ def _render_one(
         mp4_frames, mp4_report = build_frames(
             spec, video_size, resolve=index.get, locate=index.resolve_path
         )
-        bed = resolve_music(music)
+        bed = resolve_music(music, memory_id=memory_id(spec.recipe, spec.key))
         result = write_mp4(mp4_frames, folder / "memory.mp4", music=bed)
         if result.ok:
             line += f", MP4 {video_size[0]}x{video_size[1]} {result.size // 1024} KB"

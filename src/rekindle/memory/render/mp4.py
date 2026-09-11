@@ -115,10 +115,21 @@ def write_mp4(
         cmd = [binary, "-y", "-hide_banner", "-loglevel", "error"]
         cmd += ["-f", "concat", "-safe", "0", "-i", str(manifest)]
         if music is not None:
-            # -shortest so a 3-minute track does not pad a 40-second memory
-            # with silence, and the audio is re-encoded to AAC because an
-            # arbitrary user-supplied file may be anything.
-            cmd += ["-i", str(music), "-c:a", "aac", "-b:a", "160k", "-shortest"]
+            # -stream_loop -1 so a 40-second track does not leave the last
+            # half of a 90-second memory in silence. Looping rather than
+            # picking a long enough track on purpose: reading a duration needs
+            # ffprobe, which would make WHICH track a memory gets depend on
+            # whether ffmpeg is installed - and the same library must produce
+            # the same output on every machine. -shortest then cuts the loop
+            # at the end of the video. Both flags are needed: -stream_loop
+            # alone never terminates.
+            #
+            # -stream_loop must precede its own -i; after it, it would apply
+            # to the next input instead.
+            cmd += ["-stream_loop", "-1"]
+            # The audio is re-encoded to AAC because an arbitrary
+            # user-supplied file may be anything.
+            cmd += ["-i", str(music), "-c:a", "aac", "-b:a", "160k"]
         cmd += [
             "-vf",
             # fps must be set explicitly: a concat of stills has no inherent

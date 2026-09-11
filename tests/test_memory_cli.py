@@ -182,6 +182,53 @@ def test_memory_writes_a_spec_and_a_gif(tmp_path):
     assert not (folders[0] / "memory.mp4").exists()
 
 
+def test_the_cli_tells_the_music_layer_which_memory_it_is_rendering(tmp_path, monkeypatch):
+    """`resolve_music` picks a track from the memory's stable id, and it falls
+    back to the first track when it is not given one. So the whole per-memory
+    feature can be correct in `music.py` and dead in the product, with every
+    unit test green, if the CLI simply does not pass the id. That is the shape
+    of defect this project keeps finding, so the wiring gets its own test.
+
+    Renders through the MP4 branch with ffmpeg stubbed out, because that is
+    the only branch that resolves music at all.
+    """
+    from rekindle.memory import cli as memory_cli
+    from rekindle.memory.render.mp4 import Mp4Result
+
+    seen = []
+
+    def spy(explicit=None, folder=None, memory_id=None):
+        seen.append(memory_id)
+        return None
+
+    monkeypatch.setattr(memory_cli, "resolve_music", spy)
+    monkeypatch.setattr(
+        memory_cli, "write_mp4", lambda *a, **k: Mp4Result(path=None, skipped="stubbed")
+    )
+
+    data = _library(tmp_path)
+    result = runner.invoke(
+        app,
+        [
+            "memory",
+            "--recipe",
+            "album_story",
+            "--key",
+            "Kashmir",
+            "--out",
+            str(tmp_path / "out"),
+            "--data-dir",
+            str(data),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert seen == ["album_story:Kashmir"], (
+        "the CLI did not hand the music layer the memory's id, so every "
+        "memory would get the same track"
+    )
+
+
 def test_memory_with_an_unknown_key_exits_2(tmp_path):
     data = _library(tmp_path)
     result = runner.invoke(
