@@ -169,12 +169,35 @@ def test_doctor_from_index_without_an_index_creates_nothing(tmp_path):
     assert not any(tmp_path.rglob("*.sqlite"))
 
 
-def test_enrich_against_a_foreign_root_warns(tmp_path):
+def _unwrapped(text: str) -> str:
+    """Strip ALL whitespace so a wrapped path can be matched.
+
+    Rich soft-wraps at spaces, and HARD-breaks any single token longer than
+    the terminal width CliRunner reports (~80 cols). A tmp_path is both: the
+    username on the author's machine ("MY PC") contains a space, and CI's
+    macOS runner produces a 96-character `/private/var/folders/...` path with
+    no space in it at all, which Rich broke mid-segment ("pytest" / "-0").
+    Collapsing whitespace runs to single spaces survives the first and fails
+    the second - it turns the break into a space the expected string does not
+    have. Removing whitespace entirely is the only normalisation robust to
+    both, and it still requires every character of the path, in order.
+    """
+    return "".join(text.split())
+
+
+def test_enrich_against_a_foreign_root_warns(tmp_path, monkeypatch):
     """Every other CLI test indexes and enriches the SAME root string, so the
     `indexed_root != str(root)` branch in `cli.enrich` never fires without
     this test - confirmed by deleting the block and re-running the full
     suite unchanged (see task-12 review)."""
     from tests.fixtures.takeout import build_takeout
+
+    # Force the wrap rather than hoping for it. This test passed on Windows
+    # and Linux and failed on CI's macOS runner purely because that runner's
+    # tmp_path is long enough for Rich to break it - platform luck deciding
+    # whether an assertion is exercised is the same defect as a test that
+    # cannot fail. At 40 columns every platform wraps.
+    monkeypatch.setenv("COLUMNS", "40")
 
     root_a = build_takeout(tmp_path / "A")
     root_b = tmp_path / "B"
@@ -183,22 +206,18 @@ def test_enrich_against_a_foreign_root_warns(tmp_path):
     assert runner.invoke(app, ["index", str(root_a), "--data-dir", data]).exit_code == 0
     result = runner.invoke(app, ["enrich", str(root_b), "--data-dir", data])
     assert result.exit_code == 0
-    # Rich soft-wraps long lines at whitespace to the terminal width CliRunner
-    # reports (~80 cols); the tmp_path fixture's username ("MY PC") itself
-    # contains a space, so a literal `str(root_a) in result.stdout` check is
-    # one wrap away from a false negative. Collapse whitespace runs first, as
-    # `test_render_shows_unreadable_filenames_and_reasons` sidesteps the same
-    # hazard by only ever asserting whitespace-free fragments.
-    flat = " ".join(result.stdout.split())
-    assert "index was built from" in flat
-    assert " ".join(str(root_a).split()) in flat
+    flat = _unwrapped(result.stdout)
+    assert _unwrapped("index was built from") in flat
+    assert _unwrapped(str(root_a)) in flat
 
 
-def test_doctor_from_index_against_a_foreign_root_warns(tmp_path):
+def test_doctor_from_index_against_a_foreign_root_warns(tmp_path, monkeypatch):
     """Mirror of the above for `doctor --from-index`: the CLI-argument-vs-
     stored-index_root comparison, not the store-vs-store one already covered
     by test_diagnose_index_warns_about_a_foreign_enrich_root."""
     from tests.fixtures.takeout import build_takeout
+
+    monkeypatch.setenv("COLUMNS", "40")  # see the sibling test above
 
     root_a = build_takeout(tmp_path / "A")
     root_b = tmp_path / "B"
@@ -207,11 +226,9 @@ def test_doctor_from_index_against_a_foreign_root_warns(tmp_path):
     assert runner.invoke(app, ["index", str(root_a), "--data-dir", data]).exit_code == 0
     result = runner.invoke(app, ["doctor", str(root_b), "--from-index", "--data-dir", data])
     assert result.exit_code == 0
-    # See the comment in test_enrich_against_a_foreign_root_warns: normalise
-    # away Rich's soft-wrapping before matching a long path.
-    flat = " ".join(result.stdout.split())
-    assert "This index was built from" in flat
-    assert " ".join(str(root_a).split()) in flat
+    flat = _unwrapped(result.stdout)
+    assert _unwrapped("This index was built from") in flat
+    assert _unwrapped(str(root_a)) in flat
 
 
 def test_enrich_before_index_creates_no_stray_database(tmp_path):
