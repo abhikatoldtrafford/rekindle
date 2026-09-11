@@ -519,13 +519,13 @@ per-year folders are on every photo — which is also why that rule moved out of
 
 ### Mutation tally
 
-58 mutations across the six tasks, each seen failing and restored.
-**Thirteen survived the first pass and all thirteen were real gaps**, not
-redundancies: two in the sharpness work (a horizontal-only gradient, and the
-grayscale draft), one in the music work (the CLI never passing the memory its
-id, so the whole feature was correct in its module and dead in the product),
-two in `music fetch`, and eight in `recurring_event`. Every one is now
-covered.
+72 mutations, each seen failing and restored. **Fourteen survived the first
+pass and all fourteen were real gaps**, not redundancies: two in the sharpness
+work (a horizontal-only gradient, and the grayscale draft), one in the music
+work (the CLI never passing the memory its id, so the whole feature was
+correct in its module and dead in the product), two in `music fetch`, eight in
+`recurring_event`, and one in album merging (nothing checked that a merge was
+reported to the user at all). Every one is now covered.
 
 Two of the thirteen are worth naming because the tests that missed them looked
 right. `test_only_checksummed_mp3s_are_offered` proved the format filter with
