@@ -24,7 +24,7 @@ from rekindle.memory.dedup import collapse
 from rekindle.memory.diversity import DiversityReport
 from rekindle.memory.history import DEFAULT_MAX_OVERLAP, overlap
 from rekindle.memory.index import MemoryIndex
-from rekindle.memory.recipes import MIN_SHOTS, Offer, registered
+from rekindle.memory.recipes import MIN_SHOTS, Offer, Selection, registered
 from rekindle.memory.recipes.base import AS_GIVEN, chronological
 from rekindle.memory.spec import MemorySpec, Shot, build_fact_sheet
 from rekindle.memory.strata import StratumReport, stratify
@@ -45,6 +45,10 @@ SKIP_EMPTY = "no_candidates"
 # A recipe whose premise is spanning time could not span it: the quality or
 # composition gates left too few distinct periods standing.
 SKIP_TOO_NARROW = "too_few_periods"
+# The library has no embeddings, so a prompt memory could not even be
+# attempted. Counted separately from SKIP_EMPTY on purpose: an un-embedded
+# library must not look like a query that found nothing.
+SKIP_NO_EMBEDDINGS = "no_embeddings"
 
 
 @dataclass
@@ -135,18 +139,29 @@ def build(
     index: MemoryIndex,
     offer: Offer,
     *,
+    selection: Selection | None = None,
     max_shots: int = DEFAULT_MAX_SHOTS,
     min_shots: int = MIN_SHOTS,
     report: BuildReport | None = None,
 ) -> MemorySpec | None:
-    """One offer to one spec, or None with a counted reason."""
-    report = report if report is not None else BuildReport()
-    recipe = _recipe_for(offer)
-    if recipe is None:
-        report.skip(SKIP_EMPTY)
-        return None
+    """One offer to one spec, or None with a counted reason.
 
-    selection = recipe.select(index, offer)
+    `selection` lets a caller that is not a registered recipe - the prompt
+    path - hand the engine its own photos. It is safe because the pipeline's
+    guarantee is about PHOTOS, not about who assembled them: everything from
+    `compose` onward runs below this branch and cannot be skipped. The hole it
+    opens is that `test_engine.py` sweeps the registry, so a Selection that
+    never enters the registry is not swept - `test_engine.py` therefore pushes
+    a synthetic, non-registry Selection through this function and asserts the
+    same guarantees.
+    """
+    report = report if report is not None else BuildReport()
+    if selection is None:
+        recipe = _recipe_for(offer)
+        if recipe is None:
+            report.skip(SKIP_EMPTY)
+            return None
+        selection = recipe.select(index, offer)
     if selection is None or not selection.photos:
         report.skip(SKIP_EMPTY)
         return None

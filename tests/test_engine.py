@@ -73,13 +73,15 @@ def _rich_library():
     return photos
 
 
-def _on_one_date(prefix, *, years, per_year=4, month=10, day=20, **kw):
+def _on_one_date(prefix, *, years, per_year=4, month=10, day=20, spacing=7, **kw):
     """Photos on one calendar date across several years - the shape
     `on_this_day` is about."""
     out = []
     for year in years:
         for i in range(per_year):
-            out.append(_p(f"{prefix}{year}{i}", local=datetime(year, month, day, 9, i * 7), **kw))
+            out.append(
+                _p(f"{prefix}{year}{i}", local=datetime(year, month, day, 9, i * spacing), **kw)
+            )
     return out
 
 
@@ -966,3 +968,147 @@ def test_an_album_story_is_NOT_subject_to_the_span_floor(tmp_path):
         assert len({s.taken_at_local[:10] for s in spec.shots}) == 1
     finally:
         store.close()
+
+
+# --------------------------------------------------------------------------
+# A Selection that never entered the registry
+#
+# `build(selection=...)` is the seam the prompt path comes in through. The
+# sweeps above are parametrised over `registered()`, so a Selection assembled
+# outside the registry is NOT covered by any of them - which is a hole in the
+# conformance suite, not just an untested feature. These tests close it by
+# asserting the SAME guarantees against a hand-built Selection.
+
+PROMPT_OFFER = Offer(recipe="prompt", key="a test prompt", title="a test prompt")
+
+
+def _selection(photos, **kw):
+    return Selection(
+        photos=photos,
+        facts=build_fact_sheet(photos, title="a test prompt", recipe="prompt"),
+        **kw,
+    )
+
+
+def test_an_injected_selection_cannot_surface_a_blocked_photo(tmp_path):
+    """The Selection is built from `resolve_many`, the same seam the prompt
+    path uses, so the guardrail has to do the work with no filtering here."""
+    photos = _on_one_date("b", years=(2018, 2020, 2022), people=["Paramita"])
+    store, index = _index(tmp_path, photos, ExclusionPolicy(people=frozenset({"Paramita"})))
+    try:
+        pool = index.resolve_many([p.file_hash for p in photos])
+        assert pool == []
+        spec = engine.build(index, PROMPT_OFFER, selection=_selection(pool))
+        assert spec is None
+    finally:
+        store.close()
+
+
+def test_an_injected_selection_still_has_its_near_duplicates_collapsed(tmp_path):
+    photos = [
+        _p(f"d{i}", local=datetime(2020, 5, 1, 12, 0, i), phash=1234, people=["Abhik Maiti"])
+        for i in range(40)
+    ]
+    store, index = _index(tmp_path, photos)
+    try:
+        report = engine.BuildReport(offered=1)
+        engine.build(index, PROMPT_OFFER, selection=_selection(index.all()), report=report)
+        assert report.deduped > 0
+    finally:
+        store.close()
+
+
+def test_an_injected_selection_cannot_exceed_the_cap(tmp_path):
+    photos = _on_one_date("c", years=range(2010, 2030), per_year=10, spacing=5)
+    store, index = _index(tmp_path, photos)
+    try:
+        assert len(index.all()) == 200
+        spec = engine.build(index, PROMPT_OFFER, selection=_selection(index.all()), max_shots=24)
+        assert len(spec.shots) == 24
+        assert len({s.file_hash for s in spec.shots}) == 24
+    finally:
+        store.close()
+
+
+def test_an_injected_selection_is_refused_when_it_cannot_span(tmp_path):
+    """`min_strata` is what makes "over the years" mean years. A prompt
+    Selection claiming it must be held to it exactly like a recipe."""
+    from rekindle.memory import strata
+
+    photos = _on_one_date("s", years=(2019, 2020), per_year=12, spacing=4, people=["Abhik Maiti"])
+    store, index = _index(tmp_path, photos)
+    try:
+        report = engine.BuildReport(offered=1)
+        spec = engine.build(
+            index,
+            PROMPT_OFFER,
+            selection=_selection(index.all(), stratify=strata.BY_YEAR, min_strata=3),
+            report=report,
+        )
+        assert spec is None
+        assert report.skipped.get(engine.SKIP_TOO_NARROW) == 1
+    finally:
+        store.close()
+
+
+def test_an_injected_selection_spanning_three_years_is_accepted(tmp_path):
+    """Guards the test above against passing for the wrong reason."""
+    from rekindle.memory import strata
+
+    photos = _on_one_date(
+        "s", years=(2019, 2020, 2021), per_year=12, spacing=4, people=["Abhik Maiti"]
+    )
+    store, index = _index(tmp_path, photos)
+    try:
+        spec = engine.build(
+            index,
+            PROMPT_OFFER,
+            selection=_selection(index.all(), stratify=strata.BY_YEAR, min_strata=3),
+        )
+        assert spec is not None
+        assert len({s.taken_at_local[:4] for s in spec.shots}) == 3
+    finally:
+        store.close()
+
+
+def test_an_injected_selection_is_public_safe_only_when_every_shot_is(tmp_path):
+    photos = _on_one_date("p", years=(2018, 2020, 2022), people=["Abhik Maiti"])
+    photos.append(_p("stranger", local=datetime(2021, 10, 20, 9, 0), people=["Somebody Else"]))
+    store, index = _index(tmp_path, photos, ExclusionPolicy(public_safe_allow=ALLOW))
+    try:
+        spec = engine.build(index, PROMPT_OFFER, selection=_selection(index.all()))
+        assert spec.public_safe == all(s.public_safe for s in spec.shots)
+        assert spec.public_safe is False
+    finally:
+        store.close()
+
+
+def test_an_injected_selection_keeps_the_report_accounting_honest(tmp_path):
+    store, index = _index(tmp_path, _rich_library())
+    try:
+        report = engine.BuildReport(offered=1)
+        engine.build(index, PROMPT_OFFER, selection=_selection(index.all()), report=report)
+        assert report.accounted
+    finally:
+        store.close()
+
+
+def test_an_empty_injected_selection_is_counted_not_crashed(tmp_path):
+    store, index = _index(tmp_path, _rich_library())
+    try:
+        report = engine.BuildReport(offered=1)
+        assert engine.build(index, PROMPT_OFFER, selection=_selection([]), report=report) is None
+        assert report.skipped.get(engine.SKIP_EMPTY) == 1
+    finally:
+        store.close()
+
+
+def test_no_registered_recipe_is_named_prompt():
+    """A prompt memory must never be offerable.
+
+    `all_offers`, `rekindle memories` and `--auto` all walk the registry, so
+    the way a prompt memory could accidentally become an offer is a recipe
+    registering itself under that name. There is no such recipe, on purpose:
+    the prompt path calls `build(selection=...)` directly.
+    """
+    assert "prompt" not in {r.name for r in registered()}

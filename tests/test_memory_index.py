@@ -94,6 +94,8 @@ def test_no_query_method_can_return_a_blocked_photo(tmp_path):
             "by_album": ("Kashmir",),
             "by_gps_cell": (gps_cell(22.5, 87.25),),
             "get": (BLOCKED,),
+            "resolve_many": ([BLOCKED, OK],),
+            "by_date": (2020, 5, 1),
             "resolve_path": (index.all()[0],),
             "is_public_safe": (index.all()[0],),
             "years_present": (index.all(),),
@@ -123,7 +125,13 @@ def test_no_query_method_can_return_a_blocked_photo(tmp_path):
             _touch(getattr(index, name)(*call_args), checked, name)
 
         assert "by_year" in checked, "the enumeration itself must have run"
-        assert len(checked) >= 18, f"only {len(checked)} methods checked: {checked}"
+        # The three methods the semantic layer comes in through are swept like
+        # every other one. Named explicitly as well as counted, because a
+        # rename that dropped one from the sweep would still leave the count
+        # satisfied by the methods that remain.
+        for name in ("resolve_many", "by_date", "dates"):
+            assert name in checked, f"{name} was not swept"
+        assert len(checked) >= 21, f"only {len(checked)} methods checked: {checked}"
     finally:
         store.close()
 
@@ -441,5 +449,87 @@ def test_the_internal_photo_collection_is_immutable(tmp_path):
     try:
         index = MemoryIndex.open(store)
         assert isinstance(index._photos, tuple)
+    finally:
+        store.close()
+
+
+# ---------------------------------------------------------------- resolve_many
+
+
+def test_resolve_many_preserves_order_and_drops_an_unknown_hash(tmp_path):
+    store, index = _mixed(tmp_path)
+    try:
+        photos = index.resolve_many([OK, "never-indexed", OK])
+        assert [p.file_hash for p in photos] == [OK, OK]
+    finally:
+        store.close()
+
+
+def test_resolve_many_drops_a_blocked_photo_without_leaving_a_none(tmp_path):
+    """The guardrail is inherited, not re-implemented.
+
+    A caller doing `[index.get(h) for h in hits]` would get a `None` in the
+    list and would have to remember to filter it. This returns photos only,
+    so forgetting is not possible.
+    """
+    store, index = _mixed(tmp_path)
+    try:
+        photos = index.resolve_many([BLOCKED, OK])
+        assert all(p is not None for p in photos)
+        assert [p.file_hash for p in photos] == [OK]
+    finally:
+        store.close()
+
+
+# -------------------------------------------------------------------- by_date
+
+
+def test_by_date_buckets_on_the_local_day_not_the_utc_instant(tmp_path):
+    """A photo taken at 00:30 local belongs to the day the user lived."""
+    late = _p(
+        "late",
+        local=datetime(2019, 10, 5, 0, 30),
+        utc=datetime(2019, 10, 4, 19, 0, tzinfo=UTC),
+    )
+    same_day = _p("same", local=datetime(2019, 10, 5, 14, 0))
+    other = _p("other", local=datetime(2019, 10, 4, 14, 0))
+    store = _store(tmp_path, [late, same_day, other])
+    try:
+        index = MemoryIndex.open(store)
+        assert {p.file_hash for p in index.by_date(2019, 10, 5)} == {"late", "same"}
+        assert {p.file_hash for p in index.by_date(2019, 10, 4)} == {"other"}
+    finally:
+        store.close()
+
+
+def test_by_date_is_not_by_month_day(tmp_path):
+    """The anniversary index folds years together; this one must not."""
+    store = _store(
+        tmp_path,
+        [
+            _p("a", local=datetime(2019, 10, 5, 12, 0)),
+            _p("b", local=datetime(2020, 10, 5, 12, 0)),
+        ],
+    )
+    try:
+        index = MemoryIndex.open(store)
+        assert len(index.by_month_day(10, 5)) == 2
+        assert [p.file_hash for p in index.by_date(2019, 10, 5)] == ["a"]
+    finally:
+        store.close()
+
+
+def test_dates_lists_every_local_day_in_order(tmp_path):
+    store = _store(
+        tmp_path,
+        [
+            _p("b", local=datetime(2020, 10, 5, 12, 0)),
+            _p("a", local=datetime(2019, 10, 5, 12, 0)),
+            _p("c", local=datetime(2020, 10, 5, 18, 0)),
+        ],
+    )
+    try:
+        index = MemoryIndex.open(store)
+        assert index.dates() == [(2019, 10, 5), (2020, 10, 5)]
     finally:
         store.close()

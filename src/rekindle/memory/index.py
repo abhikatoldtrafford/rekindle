@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import itertools
 from collections import Counter, defaultdict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -109,6 +110,7 @@ class MemoryIndex:
         self._by_year: dict[int, list[Photo]] = defaultdict(list)
         self._by_month: dict[int, list[Photo]] = defaultdict(list)
         self._by_month_day: dict[tuple[int, int], list[Photo]] = defaultdict(list)
+        self._by_ymd: dict[tuple[int, int, int], list[Photo]] = defaultdict(list)
         self._by_person: dict[str, list[Photo]] = defaultdict(list)
         self._by_pair: dict[tuple[str, str], list[Photo]] = defaultdict(list)
         self._by_album: dict[str, list[Photo]] = defaultdict(list)
@@ -132,6 +134,7 @@ class MemoryIndex:
             self._by_year[local.year].append(photo)
             self._by_month[local.month].append(photo)
             self._by_month_day[(local.month, local.day)].append(photo)
+            self._by_ymd[(local.year, local.month, local.day)].append(photo)
 
             people = sorted({p for p in photo.meta.people if p})
             for person in people:
@@ -193,6 +196,34 @@ class MemoryIndex:
 
     def get(self, file_hash: str) -> Photo | None:
         return self._by_hash.get(file_hash)
+
+    def resolve_many(self, hashes: Iterable[str]) -> list[Photo]:
+        """Hashes -> photos, in the order given.
+
+        This is the seam the semantic layer comes in through. A hash the
+        policy refused, or one that is not in the library at all, is silently
+        ABSENT from the result - which is the guardrail doing its job, not a
+        lookup failure. Measured on the reference library: all 162
+        archived/trashed rows resolve to nothing here, and excluding one
+        person drops 60 of 600 `durga puja` hits, with no filtering code
+        anywhere in the caller.
+        """
+        return [p for p in (self._by_hash.get(h) for h in hashes) if p is not None]
+
+    def by_date(self, year: int, month: int, day: int) -> list[Photo]:
+        """Every photo taken on one LOCAL calendar day.
+
+        Local, not UTC, for the reason `strata.bucket_key` already documents:
+        13,116 rows in the reference library have a non-UTC local zone, and a
+        photo taken at 00:30 would otherwise land in the previous day. Note
+        that this is a different index from `by_month_day`, which folds every
+        year together for anniversaries.
+        """
+        return list(self._by_ymd.get((year, month, day), ()))
+
+    def dates(self) -> list[tuple[int, int, int]]:
+        """Every local calendar day the library has a photo on, in order."""
+        return sorted(self._by_ymd)
 
     def by_year(self, year: int) -> list[Photo]:
         return list(self._by_year.get(year, ()))
