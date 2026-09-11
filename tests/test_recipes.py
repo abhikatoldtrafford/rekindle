@@ -453,3 +453,29 @@ def test_then_and_now_select_refuses_a_single_photo_subject(tmp_path):
         assert REGISTRY["then_and_now"].select(index, offer) is None
     finally:
         store.close()
+
+
+def test_registering_two_recipes_with_one_name_is_refused():
+    """Recipe names are half of every memory id, so a collision would make two
+    different memories share a dismissal."""
+    from rekindle.memory.recipes.registry import register
+
+    with pytest.raises(ValueError, match="duplicate recipe name"):
+
+        @register
+        class Clash:
+            name = "album_story"
+            title = "Clash"
+
+            def offers(self, index):
+                return []
+
+            def select(self, index, offer):
+                return None
+
+
+def test_get_returns_none_for_an_unknown_recipe():
+    from rekindle.memory.recipes.registry import get
+
+    assert get("no_such_recipe") is None
+    assert get("album_story") is not None

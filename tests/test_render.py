@@ -444,3 +444,14 @@ def test_mp4_module_has_no_hardcoded_ffmpeg_path():
     assert "/usr/bin/ffmpeg" not in source
     assert "C:\\\\ffmpeg" not in source
     assert "shutil.which" in source
+
+
+def test_an_unreadable_music_folder_means_silence(tmp_path, monkeypatch):
+    """A permission error or an unplugged drive must not take a render down."""
+
+    def boom(self):
+        raise OSError("permission denied")
+
+    monkeypatch.setattr(Path, "iterdir", boom)
+    (tmp_path / "music").mkdir()
+    assert resolve_music(folder=tmp_path / "music") is None

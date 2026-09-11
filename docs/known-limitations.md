@@ -180,3 +180,81 @@ carry their own `metadata.json`; if one part lost its metadata file (or hasn't
 been extracted yet), the split is silently invisible to `album_renames`. Not
 observed live on the reference export — recorded so it is not rediscovered by
 a future contributor staring at an unrenamed pair of album folders.
+
+## Settled by M2 (the memory engine)
+
+These entries were carried into M2 as open questions. Each is now closed.
+
+- **`photo_paths` is now READ in production.** `MemoryIndex.resolve_path`
+  answers "which copy of this photo actually exists on disk?" at render time -
+  a real question, because a photo is routinely the same bytes in two folders
+  and a library can be partially mounted. The entry said M2 must "either wire
+  `resolve()` to it or drop it"; it is wired, not dropped.
+- **The person exclusion list exists.** `rekindle exclude --person NAME` and
+  `rekindle dismiss` both write to one persisted store, merged into the
+  `ExclusionPolicy` at `MemoryIndex.open` - the single chokepoint every recipe
+  passes through. The entry's requirement ("must land before anything
+  auto-triggers") is met: nothing auto-triggers at all, and the exclusion list
+  landed first regardless.
+
+## Fixed during M2, recorded so they are not reintroduced
+
+- **Stored `width`/`height` ignored the EXIF orientation tag.** A camera writes
+  a portrait photo as landscape pixels plus a tag, and `Image.size` is the raw
+  stored size. Roughly 2,475 of 18,201 live images (13.6% of a 456-file sample)
+  were indexed with the two swapped. Latent through M0 and M1 because `w*h` is
+  invariant under the swap, so even the dedup tiebreak that reads those columns
+  could not notice; only a rule asking "is this taller than it is wide?" exposes
+  it. Fixed in `meta.exif.read_exif`; existing indexes are repaired in place by
+  the fingerprint pass, which decodes every image anyway. **Only orientations
+  5-8 exchange the axes** - the tempting `!= 1` test corrupts the 180-degree and
+  mirrored cases.
+- **A 64-bit perceptual hash overflows SQLite's signed INTEGER.** Roughly half
+  of all dHashes set the top bit, so this was the ordinary case, not an exotic
+  one. The value is unsigned in memory (a negative int makes
+  `bin(a ^ b).count("1")` silently wrong) and reinterpreted as signed at the
+  storage boundary only.
+- **A `CREATE INDEX` on a new column cannot live in `_SCHEMA`.** That script
+  runs before `_migrate`, and on an old database `CREATE TABLE IF NOT EXISTS` is
+  a no-op that leaves the old column set - so indexing `photos(phash)` raised
+  "no such column" and made every v1 database unopenable. Late indexes are
+  created after migration instead.
+- **`collapse()` emitted a photo once per appearance in its input.** A recipe
+  handing it a list containing duplicates got a memory showing the same photo
+  twice, with dedup having "run".
+
+## Carried into M3
+
+- **A photographed document is undetectable.** Screenshots are excluded from
+  metadata evidence (filename convention, or a screen-size match with no camera
+  metadata and no face tags), but a *photo of* a receipt, a whiteboard or a
+  form carries ordinary camera metadata and ordinary dimensions. Telling them
+  apart needs a model v1 deliberately does not have. Roughly 93 WhatsApp images
+  are also caught by the size branch, which is the false-positive cost of the
+  rule.
+- **Videos never appear in memories.** All 1,117 rows have no stored
+  dimensions, no perceptual hash, and rendering one needs ffmpeg - and
+  including them only when ffmpeg happens to be installed would make the
+  `MemorySpec` depend on the machine. 5.8% of the library is therefore
+  unreachable by any memory.
+- **`place_cluster` keys embed a visit's start date**, so adding a photo
+  *earlier than the first photo of an existing visit* changes that visit's key
+  and a dismissal of it stops applying. Every other recipe's key is derived
+  from a subject that library growth cannot move. Not observed live; recorded
+  so it is not rediscovered.
+- **`metadata_conflict` is still one boolean for two causes.** The M1 entry
+  asked M2 to split it. It is deliberately NOT split: nothing in the memory
+  engine reads that flag, so splitting it would be a schema change in service
+  of no consumer - exactly the pattern the `photo_paths` entry warns against.
+  Carried forward explicitly rather than silently.
+- **Sharpness is measured at 128x128**, which discards the fine detail where
+  mild blur lives. It is adequate for ranking frames of one burst from one
+  camera, which is all dedup asks of it, and it is documented as relative at
+  its definition. A full-resolution variance-of-Laplacian would be better and
+  far slower.
+- **Album merging is manual.** `Leh Ladakh` / `ladakh` and the three Kashmir
+  albums are each one trip, but no metadata says so, and `Diwali 25` /
+  `Diwali Kali Puja 22` are different years under an equally similar pair of
+  names. An `album_aliases` config table lets the user say so; the default
+  merges nothing. The overlap cap catches the resulting redundancy at build
+  time.

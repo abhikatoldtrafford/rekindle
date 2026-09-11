@@ -141,15 +141,17 @@ def _under(path: Path, roots: tuple[Path, ...]) -> bool:
 
     `Path.is_relative_to`, not a string prefix compare: `/a/photos2/x.jpg`
     starts with the string `/a/photos` and is NOT inside it.
+
+    No try/except. An earlier version wrapped this in
+    `except (OSError, ValueError)` for "mismatched drives on Windows", which
+    is what `Path.relative_to` does - but `is_relative_to` is total on every
+    Python this project supports: measured on 3.12,
+    `Path("D:/photos/a.jpg").is_relative_to(Path("C:/private"))` returns
+    False rather than raising. The handler was therefore unreachable, and a
+    mutation that deleted it could not fail. An untestable guard is a line
+    nobody can maintain, so it is gone rather than left as decoration.
     """
-    for root in roots:
-        try:
-            if path == root or path.is_relative_to(root):
-                return True
-        except (OSError, ValueError):
-            # Mismatched drives on Windows raise rather than returning False.
-            continue
-    return False
+    return any(path == root or path.is_relative_to(root) for root in roots)
 
 
 def is_public_safe(photo: Photo, allow: frozenset[str]) -> bool:

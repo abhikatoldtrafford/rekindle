@@ -351,3 +351,15 @@ def test_a_name_with_a_quote_survives_the_round_trip(tmp_path):
     path = tmp_path / "e.toml"
     append_exclusion(path, person='Someone "Nickname" Else')
     assert load_policy(path).people == frozenset({'Someone "Nickname" Else'})
+
+
+def test_a_path_on_another_drive_is_simply_not_inside_the_excluded_one():
+    """A library on D: and an exclusion on C: is ordinary on Windows.
+
+    `Path.is_relative_to` is total on the supported Pythons - it returns False
+    here rather than raising, which is why `_under` needs no exception
+    handler. Pinning the behaviour means a future Python that DOES raise
+    fails this test rather than crashing a user's render.
+    """
+    policy = ExclusionPolicy(paths=(Path("C:/private"),))
+    assert policy.deny_reason(_p(paths=[Path("D:/photos/a.jpg")])) is None

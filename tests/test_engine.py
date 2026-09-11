@@ -631,3 +631,45 @@ def test_ranked_breaks_a_total_tie_on_file_hash(tmp_path):
     same = datetime(2020, 5, 1, 12, 0)
     photos = [_p("zzz", local=same), _p("aaa", local=same), _p("mmm", local=same)]
     assert [p.file_hash for p in engine._ranked(photos)] == ["aaa", "mmm", "zzz"]
+
+
+def test_every_score_term_is_reachable_and_weighted_as_documented():
+    """The score is a fixed, documented sum so that the reason a photo did or
+    did not appear can be reconstructed by hand. Each term is asserted
+    separately - a coverage report showed three of them had no test at all,
+    which means three lines anyone could delete with the suite green."""
+    favourite = _p("f")
+    favourite.meta.favorite = True
+    assert engine.score(favourite, 0.0) == 3.0
+
+    described = _p("d")
+    described.meta.description = "a caption"
+    assert engine.score(described, 0.0) == 2.0
+
+    exact = _p("x")
+    exact.sidecar_match = "exact"
+    assert engine.score(exact, 0.0) == 1.0
+
+    # ...and they add up rather than overriding one another.
+    everything = _p("e", people=["Amy"], gps=(1.0, 2.0))
+    everything.meta.favorite = True
+    everything.meta.description = "c"
+    everything.sidecar_match = "exact"
+    assert engine.score(everything, 0.5) == 3.0 + 2.0 + 2.0 + 1.0 + 1.0 + 0.5
+
+
+def test_an_unmeasured_photo_ranks_mid_pack_not_last():
+    """Penalising an unfingerprinted photo would make an unfingerprinted
+    library rank by metadata alone, which is a different product."""
+    measured = [_p(f"m{i}", sharp=float(i)) for i in range(10)]
+    unmeasured = _p("u", sharp=None)
+    ranked = engine._ranked([*measured, unmeasured])
+    position = [p.file_hash for p in ranked].index("u")
+    assert 0 < position < len(ranked) - 1
+
+
+def test_a_registry_with_no_sharpness_at_all_still_ranks():
+    """Every photo unfingerprinted: the percentile has no sample to draw on
+    and must not divide by zero."""
+    photos = [_p(f"a{i}", sharp=None) for i in range(3)]
+    assert len(engine._ranked(photos)) == 3
