@@ -6,9 +6,9 @@ render`, the command that rebuilds by hand what you just made.
 
 This is the record of how it was actually built: the architecture and the rule
 that shapes it, the numbers, the controls that were cut and why, the two
-defects running it against the real library turned up, the forty-nine
-mutations run against its own tests, and the places where the brief this work
-came from turned out to be wrong.
+defects running it against the real library turned up, the fifty mutations run
+against its own tests, and the places where the brief this work came from
+turned out to be wrong.
 
 Every measurement below was taken against the live library — 19,480 indexed
 rows, 19,318 after the guardrails, 18,201 CLIP ViT-L/14 vectors — on the
@@ -464,8 +464,8 @@ Every genuine bug in this project was found by running against real data, and
 the recurring defect is a test that cannot fail. So each test here was checked
 by breaking the line it protects, watching it fail, and restoring it.
 
-**Forty-nine mutations run against 119 tests. Forty-eight killed; one turned
-out not to be a mutation at all** — and six of the forty-eight only after the
+**Fifty mutations run against 120 tests. Forty-nine killed; one turned out
+not to be a mutation at all** — and six of the forty-nine only after the
 test was rewritten, which is the part worth reading.
 
 The invalid one was `prompt-resolves-hits-outside-the-index`: it replaced
@@ -476,7 +476,7 @@ fail. It was replaced by one that genuinely removes the guardrail —
 one-line regression — and that kills three tests.
 
 <details>
-<summary>The forty-nine</summary>
+<summary>The fifty</summary>
 
 | Mutation | Killed by |
 |---|---|
@@ -525,6 +525,7 @@ one-line regression — and that kills three tests.
 | the printed URL omits the token | ui serve test |
 | no semantic hint when the extra is missing | degradation test |
 | `serve_forever=False` returns a socket nobody is serving | ui serve test |
+| a search hit does not say WHICH name matched | namesake test |
 
 </details>
 
@@ -577,7 +578,7 @@ fixture substitutes only where the store and the encoder come from. A
 companion test proves `EmbeddingStore`'s connection really is thread-bound, so
 the regression test cannot pass vacuously either.
 
-That is six tests of 119 — **5%** — that could not fail, found in my own work
+That is six tests of 120 — **5%** — that could not fail, found in my own work
 before anyone else looked at it. The previous milestones found seven, fourteen
 and three.
 

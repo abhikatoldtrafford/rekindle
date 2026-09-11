@@ -250,6 +250,55 @@ def test_music_is_chosen_by_name_from_the_music_folder_only(workshop, tmp_path):
             api.edit(shop, session_id, {"op": "pace", "music": hostile})
 
 
+def test_excluding_one_person_does_not_hide_a_different_one_with_a_similar_name(tmp_path):
+    """Measured on the real library and then pinned here.
+
+    Excluding `Paramita` left 500 hits for a search on "paramita" - which looks
+    exactly like a guardrail that failed. It is not: `policy.deny_reason` tests
+    `p in self.people`, an EXACT name match, and the remaining hits were
+    `Paramita Dadabhai` and `Paramita Dadu`, two different people nobody
+    excluded. Zero of the 500 carried the excluded tag.
+
+    Metadata search matches substrings, so the two behaviours will keep meeting.
+    What makes it honest is that every hit says WHICH field and WHICH value
+    matched, so the page shows "person Paramita Dadabhai" rather than an
+    unexplained result.
+    """
+    from datetime import datetime
+
+    from rekindle.db import PhotoStore
+    from tests.fixtures.web import EXCLUDED_PERSON, exclude_person, jpeg, open_library, photo
+
+    data_dir, _ = make_library(tmp_path)
+    namesake = f"{EXCLUDED_PERSON} Junior"
+    with PhotoStore(data_dir / "rekindle.sqlite") as store:
+        store.upsert_many(
+            [
+                photo(
+                    "namesake",
+                    jpeg(tmp_path / "lib" / "namesake.jpg", colour=(10, 10, 90)),
+                    local=datetime(2020, 5, 28, 9, 0),
+                    people=(namesake,),
+                )
+            ]
+        )
+
+    before = open_library(data_dir)
+    hits = before.search_metadata(EXCLUDED_PERSON, limit=50)
+    assert {h.file_hash for h in hits} >= {"excluded", "excluded1", "namesake"}
+
+    exclude_person(data_dir, EXCLUDED_PERSON)
+    after = open_library(data_dir)
+
+    remaining = after.search_metadata(EXCLUDED_PERSON, limit=50)
+    found = {h.file_hash for h in remaining}
+    assert "namesake" in found, "a different person must not be hidden by someone else's name"
+    assert not ({"excluded", "excluded1"} & found), "the excluded person must be gone"
+    # And the page can explain the difference, because the hit names the value
+    # that matched rather than just saying "person".
+    assert next(h.why for h in remaining if h.file_hash == "namesake") == f"person {namesake}"
+
+
 def test_an_unknown_edit_is_refused(workshop):
     shop, _data_dir = workshop
     session_id = recipe_session(shop)
