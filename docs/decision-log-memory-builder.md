@@ -5,9 +5,10 @@ arrive, edit the selection by hand, and render a memory — and `rekindle
 render`, the command that rebuilds by hand what you just made.
 
 This is the record of how it was actually built: the architecture and the rule
-that shapes it, the numbers, the three interaction controls that were cut and
-why, the twenty-nine mutations run against its own tests, and the places where
-the brief this work came from turned out to be wrong.
+that shapes it, the numbers, the controls that were cut and why, the two
+defects running it against the real library turned up, the forty-nine
+mutations run against its own tests, and the places where the brief this work
+came from turned out to be wrong.
 
 Every measurement below was taken against the live library — 19,480 indexed
 rows, 19,318 after the guardrails, 18,201 CLIP ViT-L/14 vectors — on the
@@ -95,30 +96,38 @@ those into `text/event-stream` frames. That shape was chosen because it is the
 shape the streaming requirement actually has, and because a generator is
 consumed identically by an SSE writer and by a test's `list()`.
 
-Measured on the real library, the prompt path is worth streaming:
+Measured over the wire on the real library, reading the response with
+`read1` — `HTTPResponse.read(n)` blocks until *n* bytes exist and collapses a
+stream into one blob, which is how a "first event" timing becomes a lie:
 
-| Stage | `durga puja over the years` |
+| Stage of `durga puja over the years` | Arrives at |
 |---|---|
-| parse the prompt | 0.00 s |
-| resolve to visual tags (corpus hit, no network) | 0.00 s |
-| encode + search, per tag | 0.6 s each, 6 tags |
-| seed days -> pool -> engine | 0.3 s |
-| **total to a first-stage event** | **0.04 s** |
-| **total to `ready`** | **4.4 s** |
+| parse the prompt | 0.03 s |
+| four visual descriptions, from the festival corpus | 0.03 s |
+| load the CLIP text encoder — once per process | 3.82 s |
+| the four searches, reported one at a time | 3.97 s |
+| 16 capture days agreed, expanded to 799 candidates | 3.97 s |
+| the 24 chosen shots | 4.46 s |
 
-Without streaming that is four and a half seconds of blank page. With it, the
-first event lands in 40 ms and each of the six tag searches reports as it
-finishes. The injected-retriever design in `memory/prompt.py` is what makes
-the per-tag progress possible at all: `build_selection` takes retrieval as a
-callable, so the UI passes a wrapper that records each search. The consensus
-arithmetic never sees the wrapper.
+Without streaming that is four and a half seconds of blank page, and **3.8 s
+of it is loading a model** — a stage a user cannot be told about at all if the
+answer only arrives at the end. With the encoder already warm the whole build
+is **0.67 s**, so the streaming matters most on exactly the request where a
+progress bar is worth having.
+
+The injected-retriever design in `memory/prompt.py` is what makes per-tag
+progress possible: `build_selection` takes retrieval as a callable, so the UI
+passes a wrapper that records each search. The consensus arithmetic never sees
+the wrapper.
 
 ### Why the index loads once, in a thread
 
-`MemoryIndex.open` over 19,480 rows takes **4.2 s** on this machine. Per
-request that is unusable; at startup it is invisible, because the page itself
-is static and is served while the load is still running. `/api/status` returns
-`{"state": "loading"}` and the page polls until it is ready.
+`MemoryIndex.open` over 19,480 rows takes **1.86 s** (median of three; min
+1.58 s). Per request that is unusable; at startup it is invisible, because the
+page itself is static and is served while the load is still running.
+`/api/status` returns `{"state": "loading"}` and the page polls until it is
+ready — the first HTTP request in the measured run came back `loading` and the
+index was ready 1.8 s later.
 
 SQLite connections belong to the thread that made them, so nothing holds one
 open: the index is built in the loader thread and the store closed
@@ -145,7 +154,7 @@ own resolver on 2026-09-11:
 | **`http.server`** | **0** |
 
 `rekindle` ships four runtime dependencies. What this page needs is routing,
-JSON, static files, byte ranges and server-sent events — about eighty lines of
+JSON, static files, byte ranges and server-sent events — 188 lines of
 `server.py` — and none of what a framework is for: there is no deployment
 story, no untrusted input from the internet, no templating (the page is one
 static HTML file), and the concurrency model is "a thread per connection,
@@ -162,7 +171,7 @@ position, about numpy:
 The guardrail tests in `tests/test_web_server.py` are exactly that kind of
 code. They run on a plain `uv sync`, on all six CI legs, with no extra.
 
-The frontend is the same decision: 470 lines of ES2020 in one file, no build
+The frontend is the same decision: 560 lines of ES2020 in one file, no build
 step, no bundler, no framework, no CDN. A page whose whole promise is that it
 makes no network request cannot load a font from Google, and a project whose
 install is four packages should not acquire a `node_modules`.
@@ -238,13 +247,20 @@ order kills two tests.
 The rejected pile is every photo the recipe considered that something removed,
 grouped by reason. On the real `album_story:Kashmir` (510 candidates):
 
-| Reason | Photos |
-|---|---|
-| `minority_orientation` | 71 |
-| `video` | 11 |
-| `near_duplicate` (collapsed bursts) | 161 |
-| `not_enough_slots` (survived everything, lost the 24-shot cap) | 243 |
-| `too_small`, `extreme_aspect`, `screenshot`, … | 0 |
+| Reason | Photos | Example the page shows |
+|---|---|---|
+| `not_enough_slots` — survived everything, lost the 24-shot cap | 475 | |
+| `out_of_focus` | 4 | `Jammu and Kashmir 21st May 2015 052.JPG` |
+| `near_duplicate` — collapsed into another frame of the same burst | 3 | |
+| `video` — never in a memory in v1 | 2 | `…21st May 2015 224.MOV` |
+| `too_dark` | 1 | `Jammu and Kashmir 21st May 2015 068.JPG` |
+| `minority_orientation` | 1 | `Jammu and Kashmir 21st May 2015 335.JPG` |
+
+The shape of that is worth reading rather than skipping: **the guardrails
+reject almost nothing here — 8 photos of 510 — and the cap rejects 475.** The
+panel a user spends their time in is therefore the one full of perfectly good
+photographs that simply did not fit, not the one full of rejects. Six of the
+510 are members of a burst with alternates to swap between.
 
 The per-photo reason is a problem the engine does not solve: `compose` reports
 counts, not verdicts. Rather than copy its rule ladder — which would drift the
@@ -306,11 +322,14 @@ the guardrail in `add`.
 the obvious implementation does not exist:
 
 * **`rekindle semantic cluster` does not persist anything.** It runs spherical
-  k-means and prints; there is no cluster id in the store to look up. Running
-  k-means over 18,201 vectors on a click is not a UI interaction.
-* **"More like this"** (`SemanticSearch.similar_to`) answers the same question
-  for the photo in front of the user, at the cost of one cosine pass instead
-  of twenty k-means iterations over the whole library. Measured: 0.12 s.
+  k-means and prints; there is no cluster id in the store to look up. Measured
+  on this library: `spherical_kmeans(18,201 vectors, k=95)` takes **4.3 s** and
+  41 iterations to converge. That is not a click.
+* **"More like this"** — a nearest-neighbour query over the same vectors —
+  answers the same question for the photo in front of the user in **2 ms**,
+  two thousand times cheaper, and needs nothing stored. It is one cosine pass
+  through `SemanticSearch.search_vector`; `similar_to` is deliberately not
+  used, for the thread-safety reason written up below.
 * **"The whole capture day"** (`MemoryIndex.by_date`) needs no model and no
   extra at all, and is what actually matters after a burst — "give me the rest
   of that afternoon". It is the same call the prompt path uses to expand a
@@ -361,9 +380,10 @@ files, across the UI render and the CLI render.
 
 ## Thumbnails
 
-61 GB of originals is not a page load. The reference library's median indexed
-image is 2,976 px on its short edge; a 200-thumbnail grid decoded from
-originals on every visit is tens of seconds of CPU and gigabytes of reads.
+46 GB of originals is not a page load. Measured over the 18,201 indexed
+images: median short edge 2,976 px, mean file 2.53 MB, median 1.29 MB, 46.1 GB
+in total. A 200-thumbnail grid decoded from originals on every visit is half a
+gigabyte of reads and, at the rate below, twenty seconds of CPU.
 
 The cache is keyed by `file_hash` and width — **not by path**, because the same
 bytes appear under several paths in a Takeout export and a path-keyed cache
@@ -372,15 +392,16 @@ only (320 for the grid, 900 for the detail sheet), so a hostile or buggy query
 string cannot fill the disk with four thousand sizes of one photo; the route
 clamps and the cache refuses independently.
 
-Measured on 24 real shots from `album_story:Kashmir`:
+Measured over HTTP, 24 real shots from `album_story:Kashmir`, cache emptied
+first:
 
-| | Time | Per thumbnail |
+| | Total | Per thumbnail |
 |---|---|---|
-| cold (decode + encode + write) | 2.48 s | 103 ms |
-| warm (read from disk) | 0.05 s | 2 ms |
+| cold (decode + encode + write) | 1.58 s | 66 ms |
+| warm (read from disk, over the socket) | 0.32 s | 13 ms |
 
-Mean cached thumbnail: 17 KB. A 200-photo grid is therefore about 3.4 MB warm,
-against roughly 660 MB of originals.
+Mean cached thumbnail: **21 KB**. A 200-photo grid is therefore about 4.2 MB
+warm, against roughly 507 MB of the originals it stands for — a factor of 120.
 
 Decoding goes through `meta.exif.open_upright`, which is the one place in this
 project that turns pixels the right way up. That is not defensive
@@ -395,24 +416,45 @@ the eight tag values at all.
 
 ## What was measured
 
-Against the live library, 19,480 indexed rows, on the reference machine
-(RTX A4000, but ONNX on CPU for the text encoder).
+Against the live library — 19,480 indexed rows, 19,318 after the guardrails,
+18,201 CLIP ViT-L/14 vectors — on the reference machine. The text encoder ran
+on **ONNX CPU**, not the RTX A4000: the `semantic` extra rather than
+`semantic-gpu`, which is the cheaper install and the honest floor for these
+numbers. Medians of three or five runs; the script is in the branch history.
 
 | | |
 |---|---|
 | Photos after the guardrails | 19,318 |
 | Withheld | 162, all `archived` |
-| `MemoryIndex.open` | 4.2 s |
-| `/api/offers` (every recipe, every offer) | 0.9 s, 375 offers |
-| `album_story:Kashmir` build, first SSE event | 12 ms |
-| `album_story:Kashmir` build, total | 1.1 s, 510 candidates -> 24 shots |
-| Prompt build, first SSE event | 40 ms |
-| `durga puja over the years`, total | 4.4 s |
-| Semantic search, one query over 18,201 vectors | 0.60 s |
-| Metadata search, `kashmir`, over 19,318 rows | 0.09 s |
-| "More like this", 12 neighbours | 0.12 s |
-| 24 thumbnails, cold / warm | 2.48 s / 0.05 s |
-| Render, 24 shots, WebP + GIF + MP4 | 21 s |
+| `MemoryIndex.open`, 19,480 rows | 1.86 s (min 1.58) |
+| `/api/offers`, every recipe | 1.68 s, **490 offers** |
+| `album_story:Kashmir`, offer to editable draft | 1.79 s (min 1.18) |
+| …of which candidates / shots | 510 -> 24 |
+| One edit, including the whole session payload back | **4 ms** |
+| First SSE event, recipe build | < 1 ms |
+| First SSE event, prompt build | 16 ms |
+| Load the CLIP text encoder and the matrix, once per process | 2.78 s |
+| One text query over 18,201 vectors | 23 ms |
+| Nearest neighbours of one photo | 2 ms |
+| Metadata search `kashmir` over 19,318 rows | 42 ms |
+| `durga puja over the years`, cold (includes the encoder load) | 4.5 s |
+| `durga puja over the years`, encoder warm | 0.67 s |
+| …of which seed days / candidate pool / shots | 16 / 799 / 24 across 10 years |
+| 24 thumbnails, cold / warm | 1.58 s / 0.32 s |
+| Mean cached thumbnail | 21 KB |
+| Render, 23 shots, WebP + GIF + MP4 at 2560 px | 56 s |
+| `spherical_kmeans(18,201, k=95)`, for comparison | 4.3 s, 41 iterations |
+
+Two of these are worth a sentence.
+
+**490 offers, not a handful.** `on_this_day` alone makes 192 and `pair_years`
+137, so the offers panel needed a filter box rather than a list — a scrolling
+wall of 490 rows is not a chooser.
+
+**An edit costs 4 ms.** That is what makes "the browser never computes what
+the memory contains; it asks" affordable: every edit round-trips to the server
+and gets the complete recomputed state back, including the 510-row catalogue,
+and it is still imperceptible.
 
 ---
 
@@ -421,11 +463,20 @@ Against the live library, 19,480 indexed rows, on the reference machine
 Every genuine bug in this project was found by running against real data, and
 the recurring defect is a test that cannot fail. So each test here was checked
 by breaking the line it protects, watching it fail, and restoring it.
-**Twenty-nine mutations; twenty-nine killed** — but four of them only after
-the test was rewritten, and those four are the interesting part.
+
+**Forty-nine mutations run against 119 tests. Forty-eight killed; one turned
+out not to be a mutation at all** — and six of the forty-eight only after the
+test was rewritten, which is the part worth reading.
+
+The invalid one was `prompt-resolves-hits-outside-the-index`: it replaced
+`MemoryIndex.resolve_many` with a lookup that still went through
+`MemoryIndex.get`, so nothing was bypassed and the test correctly did not
+fail. It was replaced by one that genuinely removes the guardrail —
+`Library.load` forgetting `MemoryState.apply_to(policy)`, which is a plausible
+one-line regression — and that kills three tests.
 
 <details>
-<summary>The twenty-nine</summary>
+<summary>The forty-nine</summary>
 
 | Mutation | Killed by |
 |---|---|
@@ -461,10 +512,23 @@ the test was rewritten, and those four are the interesting part.
 | session state hands back the engine order, not the user's | 2 tests |
 | `public_safe` asserted rather than computed | 2 tests |
 | SSE frames lose their event name | stream test |
+| neighbours go back to `SemanticSearch.similar_to` (the real bug) | threading test |
+| a photo becomes its own nearest neighbour | 2 tests |
+| the matrix row lookup is off by one | ranking test |
+| an unembedded photo raises instead of returning nothing | no-embedding test |
+| the page loads a font from a CDN | 3 tests |
+| an element id is renamed in the markup | id cross-reference test |
+| the EventSource is never closed | stream-close test |
+| the script stops sending the token | token test |
+| `render` registered as a bare `def render`, shadowing `doctor.render` | shadowing test + the whole doctor suite |
+| `ui` does not check for an index | missing-index test |
+| the printed URL omits the token | ui serve test |
+| no semantic hint when the extra is missing | degradation test |
+| `serve_forever=False` returns a socket nobody is serving | ui serve test |
 
 </details>
 
-### The four tests that could not fail, and what was wrong with them
+### The six tests that could not fail, and what was wrong with them
 
 **1. The output allow-list test aimed at files that do not exist.** It asked
 for `../../rekindle.sqlite` from a memory folder — which resolves to a path
@@ -496,9 +560,61 @@ applied — plus a mirror test showing those same two photos do build a memory
 when nothing excludes them. The paired mutation
 (`Library.load` forgetting `MemoryState.apply_to`) now kills three tests.
 
-That is a 14% rate of tests that could not fail, found in my own work, before
-anyone else looked at it. The previous milestones found seven, fourteen and
-three.
+**5. The stream-close test read past the end of the handler it was checking.**
+It looked for `stream.close()` within 200 characters of each terminal
+handler — and the `error` handler sits within 200 characters of the `ready`
+one, so removing `close()` from `ready` was satisfied by its neighbour's.
+Rewritten to slice each handler's body up to the next
+`stream.addEventListener(` instead of a fixed window.
+
+**6. The thread-safety test asserted against its own copy of the code.** The
+fixture built `retrieve` and `neighbours` by hand, because
+`Library._load_semantic` needs a model registry and an ONNX runtime CI does
+not install — so the regression it exists for could have come back in
+`library.py` with every test still green. The pair is now built by
+`library.semantic_callables`, a free function the loader itself calls, and the
+fixture substitutes only where the store and the encoder come from. A
+companion test proves `EmbeddingStore`'s connection really is thread-bound, so
+the regression test cannot pass vacuously either.
+
+That is six tests of 119 — **5%** — that could not fail, found in my own work
+before anyone else looked at it. The previous milestones found seven, fourteen
+and three.
+
+---
+
+## What running it found
+
+Both defects below were found by pointing the real UI at the real library.
+Neither was visible by reading, and neither would have been caught by the test
+suite as it stood.
+
+### "More like this" worked once, then killed the connection
+
+`SemanticSearch.similar_to` begins with `store.get(file_hash)`, which reads the
+manifest over `EmbeddingStore`'s own `sqlite3` connection — and a `sqlite3`
+connection belongs to the thread that created it. The semantic layer is loaded
+lazily by whichever request thread asks first, so the *second* request for a
+photo's neighbours landed on a different thread of the pool, raised
+`sqlite3.ProgrammingError`, and the socket closed with no response at all:
+`RemoteDisconnected` in the client, a traceback nowhere the user could see.
+
+Text search hid it completely. `search_vector` reads only the in-memory
+matrix, so the whole prompt path — the headline feature — worked perfectly
+while the neighbour lookup beside it was broken.
+
+The fix takes the vector from that same in-memory matrix, whose rows are the
+store's rows by construction. It is also two thousand times faster than the
+k-means it replaced conceptually: **2 ms**.
+
+### A 24-shot memory reported itself as "16 of 16 shots"
+
+The render result carried the *preview's* frame count as the memory's. The
+WebP and GIF stop at `--preview-frames` (16 by default); the MP4 carries every
+shot. So a perfectly correct 24-shot memory printed a number that was wrong
+twice over — wrong denominator, wrong numerator — and a user checking whether
+their edit took would have read it as eight shots lost. `RenderResult` now
+carries `shots`, `preview_rendered` and `video_rendered` separately.
 
 ---
 
@@ -541,3 +657,21 @@ format is the constraint, and the reproduce promise outranks the control.
   keyboard equivalent. That is a real gap, not a deferred nicety.
 * **One user.** There is no locking between two browser tabs editing the same
   session; the last edit wins.
+* **Rendering the MP4 takes a minute and the page only says "rendering…".**
+  56 s for 23 shots at 2,560 px, and `write_mp4` reports nothing until ffmpeg
+  exits, so there is no honest progress to show. Untick *skip the MP4* and
+  the WebP is back in a few seconds.
+* **The preview is the first 16 shots, not all of them.** That is
+  `--preview-frames`, inherited from `rekindle memory`. The MP4 carries every
+  shot and the page now says which is which, but the animation you look at
+  while editing is not the whole memory.
+* **What the page shows is not verified by a browser.** There is no headless
+  browser in the test suite and none is going to be added for this. What is
+  checked without one: the JavaScript parses, every element id it addresses
+  exists in the markup, no asset reaches the network, the token is sent, and
+  both terminal stream handlers close the EventSource — and every endpoint the
+  page calls is driven end to end over a real socket against the real library.
+  **What is NOT verified is the rendering itself**: layout at any width, the
+  drag-and-drop reorder, whether a thumbnail grid of 500 stays responsive.
+  Nobody has looked at this page in a browser. Say so rather than let the test
+  count imply otherwise.

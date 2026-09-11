@@ -12,11 +12,11 @@ Measured against this project's own resolver on 2026-09-11:
 
 `rekindle` ships four runtime dependencies. This is a single-user page served
 on 127.0.0.1 that needs routing, JSON, static files, byte ranges and
-server-sent events - about eighty lines of the plumbing below - and none of
+server-sent events - 188 lines of the plumbing below, counted - and none of
 the things a framework is actually for: no concurrency model to choose, no
 WSGI/ASGI deployment, no request validation of untrusted input from the
 internet, no templating (the page is one static HTML file). Buying twelve
-packages for eighty lines would be the expensive choice, and it would put a
+packages for 188 lines would be the expensive choice, and it would put a
 web framework in the dependency graph of `rekindle index`.
 
 It also buys something concrete: **CI runs these tests.** A framework behind an
