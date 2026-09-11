@@ -235,3 +235,52 @@ def test_stratify_never_returns_a_duplicate(level):
     photos = [_p(f"a{i:02d}", datetime(2019 + i % 3, (i % 12) + 1, 1)) for i in range(30)]
     chosen, _ = stratify(photos, level=level, slots=12, rank=_rank)
     assert len({p.file_hash for p in chosen}) == len(chosen)
+
+
+# --------------------------------------------------------------------------
+# diversity applies across buckets, not only within one
+
+
+def test_diversity_reaches_ACROSS_buckets(tmp_path):
+    """Otherwise filling a year's slot could hand back a near-identical shot
+    from a day already represented in another year's slot.
+
+    Bucket 2019 holds one distinctive photo. Bucket 2020's best candidate is
+    its near-identical twin; its second choice is different. The twin must
+    lose, which can only happen if the 2020 pick can see what 2019 chose.
+    """
+    photos = [
+        _p("a2019", datetime(2019, 6, 1), sharp=9.0),
+        _p("twin2020", datetime(2020, 6, 1), sharp=9.0),
+        _p("fresh2020", datetime(2020, 6, 2), sharp=1.0),
+    ]
+    photos[0].meta.phash = 0
+    photos[0].meta.colour = "ff" + "00" * 63
+    photos[1].meta.phash = 0
+    photos[1].meta.colour = "ff" + "00" * 63
+    photos[2].meta.phash = (1 << 40) - 1
+    photos[2].meta.colour = "00" * 40 + "ff" + "00" * 23
+
+    chosen, _ = stratify(photos, level=strata.BY_YEAR, slots=2, rank=_rank)
+
+    assert {p.file_hash for p in chosen} == {"a2019", "fresh2020"}
+
+
+def test_the_allocation_is_BINDING_diversity_never_reallocates(tmp_path):
+    """Stratification decides the SHAPE of the memory; diversity decides what
+    fills each slot. A bucket never loses its slot to another because its
+    photos happen to look alike."""
+    photos = [_p(f"a{i}", datetime(2019, 6, 1, 9, i), sharp=9.0) for i in range(6)]
+    photos += [_p("lonely", datetime(2022, 6, 1), sharp=1.0)]
+    for photo in photos[:6]:
+        photo.meta.phash = 0
+        photo.meta.colour = "ff" + "00" * 63
+    photos[-1].meta.phash = (1 << 40) - 1
+    photos[-1].meta.colour = "00" * 40 + "ff" + "00" * 23
+
+    chosen, report = stratify(photos, level=strata.BY_YEAR, slots=4, rank=_rank)
+
+    years = {p.meta.taken_at_local.year for p in chosen}
+    assert 2022 in years, "the thin bucket lost its slot to the rich one"
+    assert len(chosen) == 4, "diversity left the memory short"
+    assert report.diversity.restored >= 1

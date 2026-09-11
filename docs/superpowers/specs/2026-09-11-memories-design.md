@@ -358,17 +358,85 @@ fewer photos than you think" rule the engine follows elsewhere.
   rejected portrait thumbnails outvotes the real landscape photos and empties
   the memory.
 
-### 5A.3 Canvas: derived from the set, never upscaled
+### 5A.3 Canvas: the median of the set, and padding below it
 
-The canvas is **the smallest width and the smallest height present among the
-kept photos**, minimised *independently*. Taking the dimensions of the single
-smallest photo would let one unusually narrow photo dictate a canvas that is
-also too tall; the independent minimum is the largest box every photo can fill
-in at least one axis.
+**The first rule here was the minimum, and it was catastrophic.** Measured
+across 45 rendered memories:
 
-`fit_within` clamps the scale at `1.0`, so **nothing is ever upscaled**.
-Upscaling a 640px photo to sit beside a 4000px one produces visible mush, which
-is the whole reason the canvas comes from the set rather than from a constant.
+```
+11 of 45 memories rendered at 640x480
+ 1 rendered at 1105x510
+25 distinct canvases, most of them tiny
+
+person_years-paramita   canvas 640x480
+  source photos         min 640x480 (ONE photo, from 2014)
+                        median 3984 wide
+                        max 7008x4672 (two photos, from 2024)
+```
+
+One 640x480 photo from 2014 pinned the entire memory to 640x480, rendering two
+7008x4672 photos at **a 120th of their pixel count**. `album_story-kashmir`
+landed on 1280x960 and `person_years-paramita` on 640x480 purely because of
+which single weakest photo happened to be selected.
+
+The intent — never blow a small photo up into mush — was right. The lever was
+wrong: on a library spanning 2000-2026, the oldest phone photo in the set
+dictated the resolution of everything.
+
+**The rule now:**
+
+| Photo vs canvas | What happens |
+|---|---|
+| larger | downscale to fit, preserving aspect |
+| within **1.25x** below | upscale to fit — imperceptible |
+| further below | **rendered at NATIVE size and padded** |
+| — | **nothing is ever excluded for being small** |
+
+The canvas is the **median** width and the **median** height of the selected
+set, taken independently so a set mixing 4:3 and 16:9 gets a box both can sit
+in. The *lower* median, so it is always a real size at least half the set can
+meet or exceed.
+
+The 1.25x tolerance exists because without it a photo 3% below the canvas would
+be padded, which reads as an inconsistency rather than as a deliberate signal.
+A 25% linear stretch is about 1.6x the pixel count and is imperceptible at
+viewing size.
+
+#### Why sub-canvas photos are padded, not excluded
+
+Excluding them is the obvious answer and it is wrong here. **On this library,
+small means old.** Excluding everything below the median would:
+
+- throw away half the memory *by construction* — the median is the midpoint;
+- pull the same distribution back in when backfilling from the pool, so the
+  process either churns or converges on only the newest photos;
+- and, worst, quietly delete the early years of exactly the memories whose
+  subject *is* the span. "Paramita over the years" would lose 2014 and keep
+  2024.
+
+That last point is the decisive one: it would have silently defeated the
+stratification fix in §6.2a. Two individually reasonable rules combining into a
+regression neither of them announces.
+
+#### The padding is a blurred enlargement, not a matte
+
+A 640x480 photo centred in a 3984x2988 canvas occupies **2.5% of the area**. On
+black it reads as broken. On a blurred, cover-cropped enlargement of itself it
+reads as a small old photo — which is exactly what it is — and it is the
+familiar convention every slideshow tool uses for a mixed-era library.
+
+The backdrop *is* an upscale of the photo, but a deliberately blurred one, so
+the never-upscale-into-mush rule is not violated: nothing is presented as detail
+the photo does not have.
+
+The renderer counts how each shot met the canvas and the CLI prints it:
+
+```
+1 of 16 shots were below the 3968x2976 canvas and are shown at native size.
+```
+
+A memory that is mostly padded is not a fault — it is telling the user
+something real about the photos of that period.
 
 ### 5A.4 The per-photo gates, each with its measurement
 
@@ -762,14 +830,14 @@ black slot. A title card is generated with `ImageFont.load_default(size=...)`
 system font is assumed.
 
 **GIF** (`render/gif.py`) — Pillow only, always produced. It is a *teaser*:
-default **480px wide, ≤12 frames, 1.4 s/frame**, adaptive palette, looping.
+default **1280px wide, ≤16 frames, 1.4 s/frame** (see §8A), adaptive palette, looping.
 Frames are capped independently of `max_shots` so a 24-shot MP4 and its GIF come
 from one spec. The target is a README-embeddable file; the render reports the
 size it actually produced rather than promising one.
 
 **MP4** (`render/mp4.py`) — only when `shutil.which("ffmpeg")` finds it. Frames
 are written to a temp directory and fed to the **concat demuxer** with per-image
-durations, `libx264`, `yuv420p`, `-movflags +faststart`. 1280px wide, 2.5
+durations, `libx264`, `yuv420p`, `-movflags +faststart`. 2560px wide, 2.5
 s/shot. Transitions are hard cuts with a fade in/out at the ends; an `xfade`
 chain across 24 inputs is fragile and its absence is documented rather than
 half-built.
@@ -788,6 +856,37 @@ deliberately not built. Music is **bring-your-own**: any audio file in `music/`
 (gitignored) is used, chosen deterministically by sorted filename, and **silence
 is the default**. `--music PATH` overrides. No audio is ever committed, and **no
 test touches the network** — the music resolver is pure filesystem.
+
+---
+
+## 8A. Output formats
+
+**GIF is no longer the preview of record.** Its ceiling is structural rather
+than a matter of resolution: the format allows **256 colours per frame**, so
+photographic content bands visibly however large the image is, and a photo
+animation at 1080p runs to tens of megabytes. Raising the resolution alone does
+not fix how a GIF looks.
+
+| Format | Role | Default |
+|---|---|---|
+| **WebP** | the preview worth looking at — true colour, several times smaller | 1280px wide, 16 frames |
+| **GIF** | written alongside, because it embeds absolutely everywhere | same canvas |
+| **MP4** | the full memory, when ffmpeg is present | **2560px wide** (1440p class) |
+
+The original 480px GIF cap existed to keep a file small enough to drop into a
+README without thinking. That constraint has been lifted: 480px is a thumbnail,
+not a preview of a 4000px photo. `--preview-width` exposes it, because the right
+answer genuinely differs between a README and someone reviewing their own
+memories.
+
+The MP4 default moved from 1280 to 2560 for the same reason — this library's
+median photo is ~3984px wide, and 1280 discarded 90% of its pixel count.
+`--mp4-width` raises the bound up to the native resolution the photos support.
+Native is not the default because a 7008x4672 video is useful to nobody and
+takes minutes to encode.
+
+Both canvases are still **bounds, never targets**: a memory whose photos only
+support 900px renders at 900px rather than being upscaled to 2560.
 
 ---
 

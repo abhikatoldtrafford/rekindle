@@ -98,6 +98,8 @@ class PhotoMeta:
     # Mean luminance 0-255 of the decoded image. Drives the near-black and
     # blown-out quality gates in memory.composition.
     brightness: float | None = None
+    # Hex-encoded 4x4x4 RGB histogram; see memory.diversity.ColourSignal.
+    colour: str | None = None
 
     @classmethod
     def empty(cls) -> PhotoMeta:
@@ -239,6 +241,7 @@ def merge_meta(old: PhotoMeta, new: PhotoMeta) -> tuple[PhotoMeta, bool]:
         sharpness=old.sharpness if old.sharpness is not None else new.sharpness,
         phash_error=old.phash_error or new.phash_error,
         brightness=old.brightness if old.brightness is not None else new.brightness,
+        colour=old.colour or new.colour,
     )
     return merged, conflict
 

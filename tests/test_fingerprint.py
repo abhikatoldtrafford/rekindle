@@ -366,3 +366,50 @@ def test_a_failed_decode_does_not_null_stored_dimensions(tmp_path):
         got = store.get("a")
     assert (got.meta.width, got.meta.height) == (800, 600)
     assert got.meta.phash_error == fp.ERR_MISSING
+
+
+def test_the_colour_histogram_is_smoothed_across_adjacent_bins():
+    """Hard binning makes the signature brittle exactly where it matters.
+
+    (200,40,40) and (150,30,30) - the same red under slightly different light
+    - fall in different bins with four bins per channel. For an image
+    dominated by one colour that puts ALL the mass in disjoint bins, and
+    measured before smoothing those two scored 1.000 dissimilarity: the same
+    as red against blue. Diffusing each bin into its neighbours keeps a small
+    exposure shift a small change.
+    """
+    from rekindle.memory.diversity import ColourSignal
+    from rekindle.models import MediaType, Photo
+
+    def photo(colour):
+        return Photo("h", [Path("/a.jpg")], MediaType.IMAGE, PhotoMeta(colour=colour), T0, T0)
+
+    red = fp.colour_signature(Image.new("RGB", (64, 64), (200, 40, 40)))
+    dark_red = fp.colour_signature(Image.new("RGB", (64, 64), (150, 30, 30)))
+    blue = fp.colour_signature(Image.new("RGB", (64, 64), (40, 40, 200)))
+
+    signal = ColourSignal()
+    near = signal.between(photo(red), photo(dark_red))
+    far = signal.between(photo(red), photo(blue))
+
+    assert near < far, "a lighting shift is as different as a different colour"
+    assert near < 0.9
+
+
+def test_the_colour_signature_is_a_fixed_width_hex_string():
+    signature = fp.colour_signature(Image.new("RGB", (64, 64), (10, 20, 30)))
+    assert len(signature) == 128
+    int(signature, 16)
+
+
+def test_the_colour_signature_is_deterministic():
+    image = _gradient((128, 128))
+    assert fp.colour_signature(image) == fp.colour_signature(image)
+
+
+def test_the_colour_signature_is_stored_by_the_pass(tmp_path):
+    path = _jpeg(tmp_path / "a.jpg", _gradient((120, 90)))
+    with PhotoStore(tmp_path / "db.sqlite") as store:
+        store.upsert_many([_photo("a", path)])
+        fp.run_fingerprints(store)
+        assert store.get("a").meta.colour is not None

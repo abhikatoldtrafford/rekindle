@@ -1,4 +1,4 @@
-"""Schema v3: the fingerprint columns and the migration ladder.
+"""Schema v3 and v4: the fingerprint columns and the migration ladder.
 
 The v1 -> v3 path is covered in test_db.py (that file already owns the v1
 fixture). What is here is everything v3 adds: the v2 rung, the ladder's
@@ -74,15 +74,15 @@ def _photo(h="abc", **kw) -> Photo:
     )
 
 
-def test_v2_database_migrates_to_v3_keeping_every_prior_value(tmp_path):
-    """The additive promise: a v2 row keeps everything it had, and gains
-    three NULLs. If ALTER TABLE were ever swapped for a table rebuild, this
-    is the test that would notice the data loss."""
+def test_v2_database_migrates_to_v4_keeping_every_prior_value(tmp_path):
+    """The additive promise: a v2 row keeps everything it had and gains the
+    new columns as NULLs. If ALTER TABLE were ever swapped for a table
+    rebuild, this is the test that would notice the data loss."""
     db = tmp_path / "db.sqlite"
     _write_v2_database(db)
 
     with PhotoStore(db) as store:
-        assert store.schema_version() == SCHEMA_VERSION == 3
+        assert store.schema_version() == SCHEMA_VERSION == 4
         photo = store.get("v2row")
 
     assert photo is not None
@@ -99,20 +99,31 @@ def test_v2_database_migrates_to_v3_keeping_every_prior_value(tmp_path):
     assert photo.meta.phash is None
     assert photo.meta.sharpness is None
     assert photo.meta.phash_error is None
+    assert photo.meta.colour is None
 
 
-def test_v3_database_opens_without_migrating(tmp_path):
+def test_a_current_database_opens_without_migrating(tmp_path):
     db = tmp_path / "db.sqlite"
     with PhotoStore(db) as store:
         store.upsert_many([_photo()])
     with PhotoStore(db) as store:
-        assert store.schema_version() == 3
+        assert store.schema_version() == SCHEMA_VERSION
         assert store.count() == 1
+
+
+def test_a_v3_database_gains_the_colour_column(tmp_path):
+    """The rung added for the diversity signal. A v3 index already holds
+    hashes; it must gain the histogram without a full re-index."""
+    db = tmp_path / "db.sqlite"
+    _write_v2_database(db)
+    with PhotoStore(db) as store:  # v2 -> v4
+        store.set_fingerprints([FingerprintRow("v2row", phash=7, colour="ab" * 64)])
+        assert store.get("v2row").meta.colour == "ab" * 64
 
 
 def test_a_newer_schema_is_refused_rather_than_downgraded(tmp_path):
     db = tmp_path / "db.sqlite"
-    _write_v2_database(db, version="4")
+    _write_v2_database(db, version="9")
     with pytest.raises(RuntimeError, match="Upgrade rekindle"):
         PhotoStore(db)
 
@@ -206,13 +217,31 @@ def test_iter_unfingerprinted_skips_done_and_failed_rows(tmp_path):
     with PhotoStore(tmp_path / "db.sqlite") as store:
         store.upsert_many(
             [
-                _photo("done", meta=PhotoMeta(phash=1)),
+                _photo("done", meta=PhotoMeta(phash=1, colour="ff" * 64)),
                 _photo("failed", meta=PhotoMeta(phash_error="undecodable")),
                 _photo("video", meta=PhotoMeta(phash_error="video")),
                 _photo("todo"),
             ]
         )
         assert {p.file_hash for p in store.iter_unfingerprinted()} == {"todo"}
+
+
+def test_a_row_missing_only_a_LATER_measurement_is_re_offered(tmp_path):
+    """What lets a new signal reach an index that already has hashes.
+
+    The v4 colour histogram was added after this library was fingerprinted.
+    Without this, `rekindle fingerprint` would report "nothing to do" and the
+    diversity signal would be permanently half-blind on every existing index.
+    """
+    with PhotoStore(tmp_path / "db.sqlite") as store:
+        store.upsert_many(
+            [
+                _photo("hashed_no_colour", meta=PhotoMeta(phash=1)),
+                _photo("complete", meta=PhotoMeta(phash=2, colour="ab" * 64)),
+                _photo("video", meta=PhotoMeta(phash_error="video")),
+            ]
+        )
+        assert {p.file_hash for p in store.iter_unfingerprinted()} == {"hashed_no_colour"}
 
 
 def test_set_fingerprints_writes_only_the_three_columns(tmp_path):

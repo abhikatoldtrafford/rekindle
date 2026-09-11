@@ -228,11 +228,12 @@ def test_v1_database_migrates_without_losing_rows(tmp_path):
     _write_v1_database(db_path)
 
     with PhotoStore(db_path) as store:
-        # v1 -> v2 -> v3 in ONE open. This is the ladder's whole reason to
-        # exist: the single-step `!= 1` guard it replaced would have run the
+        # v1 -> v2 -> v3 -> v4 in ONE open. This is the ladder's whole reason
+        # to exist: the single-step `!= 1` guard it replaced would have run the
         # v2 step, left the database at v2, and then had __init__ reject it as
         # unmigratable - turning every M0 database into "delete and re-index".
-        assert store.schema_version() == SCHEMA_VERSION == 3
+        # Each new rung makes that failure mode wider, and this test cheaper.
+        assert store.schema_version() == SCHEMA_VERSION == 4
         assert store.count() == 2
         photo = store.get("abc")
         assert photo is not None

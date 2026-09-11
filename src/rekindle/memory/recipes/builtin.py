@@ -153,6 +153,8 @@ class OnThisDay:
             # calendar date ACROSS YEARS; a memory confined to one year is not
             # a weaker version of it, it is a different thing.
             stratify=strata.BY_YEAR,
+            # Spanning time is this recipe's premise, not a preference.
+            min_strata=2,
             captions={p.file_hash: captions.anniversary_caption(p, years[-1]) for p in ordered},
         )
 
@@ -201,6 +203,8 @@ class OnThisMonth:
             # By year: this is the same MONTH across years, so the years are
             # what must be represented.
             stratify=strata.BY_YEAR,
+            # Spanning time is this recipe's premise, not a preference.
+            min_strata=2,
             captions={p.file_hash: captions.year_caption(p) for p in ordered},
         )
 
@@ -247,6 +251,8 @@ class PersonYears:
             # "over the years" is a promise about the SPAN. One year of a
             # person's life is not it.
             stratify=strata.BY_YEAR,
+            # Spanning time is this recipe's premise, not a preference.
+            min_strata=2,
             captions={p.file_hash: captions.year_caption(p) for p in ordered},
         )
 
@@ -295,6 +301,8 @@ class PairYears:
             facts=_facts(ordered, title=offer.title, recipe=self.name),
             ordering=CHRONOLOGICAL,
             stratify=strata.BY_YEAR,
+            # Spanning time is this recipe's premise, not a preference.
+            min_strata=2,
             captions={p.file_hash: captions.year_caption(p) for p in ordered},
         )
 
@@ -439,6 +447,8 @@ class YearInReview:
             # year, so year-stratification would be a single bucket - and
             # three of these showed one month each before it was fixed.
             stratify=strata.BY_MONTH,
+            # Spanning time is this recipe's premise, not a preference.
+            min_strata=2,
             captions={p.file_hash: captions.month_year(p.meta.taken_at_local) for p in ordered},
         )
 

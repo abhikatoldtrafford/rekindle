@@ -27,6 +27,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from rekindle.memory.diversity import DiversityReport, pick
 from rekindle.models import Photo
 
 # The dimension a recipe stratifies over.
@@ -101,6 +102,9 @@ class StratumReport:
     used: int = 0
     keys_lost_to_gates: list[str] = field(default_factory=list)
     keys_without_slots: list[str] = field(default_factory=list)
+    # What the diversity caps and the perceptual penalty refused while filling
+    # these buckets. Reported like every other guardrail.
+    diversity: DiversityReport = field(default_factory=DiversityReport)
 
     @property
     def lost_to_gates(self) -> int:
@@ -196,8 +200,12 @@ def stratify(
     report.dimension = resolved
 
     if resolved is None:
-        # Unstratified: the recipe wants its own choice, ranked and capped.
-        chosen = rank(photos)[:slots]
+        # Unstratified: the recipe wants its own choice. `then_and_now` is the
+        # only such recipe and asks for exactly two shots, so diversity is a
+        # no-op there - but it is applied rather than skipped, so a future
+        # unstratified recipe does not silently opt out of it.
+        chosen, div = pick(photos, slots, rank=rank)
+        report.diversity.merge(div)
         report.offered = report.surviving = report.used = 1
         return chosen, report
 
@@ -219,7 +227,14 @@ def stratify(
 
     chosen: list[Photo] = []
     for key in sorted(allocation):
-        chosen.extend(rank(buckets[key])[: allocation[key]])
+        # `already=chosen` is what makes diversity apply ACROSS the memory
+        # rather than only within one bucket. The ALLOCATION is binding
+        # though: diversity chooses which photo fills a bucket's slot, never
+        # whether that bucket gets one. Stratification decides the shape of
+        # the memory; diversity decides what goes in each slot.
+        taken, div = pick(buckets[key], allocation[key], rank=rank, already=chosen)
+        report.diversity.merge(div)
+        chosen.extend(taken)
     return chosen, report
 
 

@@ -24,7 +24,7 @@ from rekindle.models import (
     merge_meta,
 )
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -65,7 +65,8 @@ CREATE TABLE IF NOT EXISTS photos (
     phash         INTEGER,
     sharpness     REAL,
     phash_error   TEXT,
-    brightness    REAL
+    brightness    REAL,
+    colour        TEXT
 );
 
 -- `paths` is a JSON blob and therefore unqueryable, so this table exists to
@@ -157,6 +158,11 @@ _V3_COLUMNS = (
     ("brightness", "REAL"),
 )
 
+# v4: a coarse 4x4x4 RGB histogram per image, hex-encoded. Feeds the colour
+# half of the diversity signal - see memory.diversity.ColourSignal. 128 bytes
+# a row, about 2.5 MB across this library.
+_V4_COLUMNS = (("colour", "TEXT"),)
+
 
 _SIGN_BIT = 1 << 63
 _U64 = 1 << 64
@@ -203,6 +209,7 @@ class FingerprintRow:
     brightness: float | None = None
     width: int | None = None
     height: int | None = None
+    colour: str | None = None
     error: str | None = None
 
 
@@ -285,7 +292,7 @@ class PhotoStore:
         two-step migration resumes from the rung it reached rather than
         restarting or, worse, re-running an already-applied step.
         """
-        steps = {1: self._to_v2, 2: self._to_v3}
+        steps = {1: self._to_v2, 2: self._to_v3, 3: self._to_v4}
         while (version := self.schema_version()) != SCHEMA_VERSION:
             step = steps.get(version)
             if step is None:
@@ -333,6 +340,14 @@ class PhotoStore:
         `__init__`."""
         self._add_columns(_V3_COLUMNS)
         self._bump(3)
+
+    def _to_v4(self) -> None:
+        """The colour histogram. Nothing to backfill: NULL correctly says
+        "not measured yet", and `rekindle fingerprint` fills it in on its next
+        run - which is resumable precisely so a schema step never has to do
+        minutes of decoding inside an `__init__`."""
+        self._add_columns(_V4_COLUMNS)
+        self._bump(4)
 
     @staticmethod
     def _index_path(cur: sqlite3.Connection | sqlite3.Cursor, digest: str, path: Path) -> None:
@@ -417,8 +432,13 @@ class PhotoStore:
         Same live-cursor hazard as `iter_photos`: a caller that writes must
         materialise first.
         """
+        # Two shapes need work: a row never attempted, AND a row that was
+        # fingerprinted before a later schema added a measurement. The second
+        # is what makes a new signal (the v4 colour histogram) reach an index
+        # that already has hashes, without forcing a full re-index.
         for row in self._conn.execute(
-            "SELECT * FROM photos WHERE phash IS NULL AND phash_error IS NULL"
+            "SELECT * FROM photos WHERE (phash IS NULL AND phash_error IS NULL) "
+            "   OR (phash IS NOT NULL AND colour IS NULL)"
         ):
             yield self._row_to_photo(row)
 
@@ -442,12 +462,19 @@ class PhotoStore:
         cur = self._conn.cursor()
         n = 0
         for row in rows:
-            fields = ["phash = ?", "sharpness = ?", "phash_error = ?", "brightness = ?"]
+            fields = [
+                "phash = ?",
+                "sharpness = ?",
+                "phash_error = ?",
+                "brightness = ?",
+                "colour = ?",
+            ]
             values: list[object] = [
                 _signed64(row.phash),
                 row.sharpness,
                 row.error,
                 row.brightness,
+                row.colour,
             ]
             if row.width is not None and row.height is not None:
                 fields += ["width = ?", "height = ?"]
@@ -554,7 +581,7 @@ class PhotoStore:
                 favorite, camera_make, camera_model, width, height, source,
                 metadata_conflict, exif_taken_at_utc, takeout_people, archived,
                 trashed, sidecar_match, phash, sharpness, phash_error,
-                brightness)
+                brightness, colour)
                VALUES
                (:file_hash,:media_type,:paths,:albums,:edited_of,:first_seen,
                 :last_seen,:taken_at_utc,:taken_at_local,:tz_source,:gps_lat,
@@ -562,7 +589,7 @@ class PhotoStore:
                 :favorite,:camera_make,:camera_model,:width,:height,:source,
                 :metadata_conflict,:exif_taken_at_utc,:takeout_people,:archived,
                 :trashed,:sidecar_match,:phash,:sharpness,:phash_error,
-                :brightness)""",
+                :brightness,:colour)""",
             {
                 "file_hash": p.file_hash,
                 "media_type": str(p.media_type),
@@ -602,6 +629,7 @@ class PhotoStore:
                 "sharpness": m.sharpness,
                 "phash_error": m.phash_error,
                 "brightness": m.brightness,
+                "colour": m.colour,
             },
         )
         cur.execute("DELETE FROM photo_paths WHERE file_hash = ?", (p.file_hash,))
@@ -641,6 +669,7 @@ class PhotoStore:
             sharpness=row["sharpness"],
             phash_error=row["phash_error"],
             brightness=row["brightness"],
+            colour=row["colour"],
         )
         return Photo(
             file_hash=row["file_hash"],

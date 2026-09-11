@@ -21,6 +21,7 @@ from datetime import date, datetime
 from rekindle.memory import captions
 from rekindle.memory.composition import CompositionReport, compose
 from rekindle.memory.dedup import collapse
+from rekindle.memory.diversity import DiversityReport
 from rekindle.memory.history import DEFAULT_MAX_OVERLAP, overlap
 from rekindle.memory.index import MemoryIndex
 from rekindle.memory.recipes import MIN_SHOTS, Offer, registered
@@ -41,6 +42,9 @@ SKIP_DISMISSED = "dismissed"
 SKIP_COOLDOWN = "in_cooldown"
 SKIP_OVERLAP = "overlaps_another"
 SKIP_EMPTY = "no_candidates"
+# A recipe whose premise is spanning time could not span it: the quality or
+# composition gates left too few distinct periods standing.
+SKIP_TOO_NARROW = "too_few_periods"
 
 
 @dataclass
@@ -57,6 +61,7 @@ class BuildReport:
     # outcome, but a silent one would look exactly like the clustering bug
     # this reporting was added alongside.
     strata: list[StratumReport] = field(default_factory=list)
+    diversity: DiversityReport = field(default_factory=DiversityReport)
 
     def skip(self, reason: str) -> None:
         self.skipped[reason] = self.skipped.get(reason, 0) + 1
@@ -182,6 +187,12 @@ def build(
     )
     stratum.memory_id = offer.memory_id
     report.strata.append(stratum)
+    report.diversity.merge(stratum.diversity)
+    if stratum.dimension is not None and stratum.used < selection.min_strata:
+        # "Over the years" across one year is not a weaker memory, it is a
+        # different and misleading one. Refuse it and say so.
+        report.skip(SKIP_TOO_NARROW)
+        return None
     if selection.ordering != AS_GIVEN:
         chosen = chronological(chosen)
     else:

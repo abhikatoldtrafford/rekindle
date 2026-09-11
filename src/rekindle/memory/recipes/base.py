@@ -68,6 +68,18 @@ class Selection:
     # None means "do not stratify", which `then_and_now` needs: it wants the
     # extremes, not the spread.
     stratify: str | None = strata.BY_SPAN
+    # The fewest distinct buckets a memory of this kind may be built from.
+    #
+    # For a recipe whose entire premise is spanning time, temporal spread is a
+    # HARD REQUIREMENT, not a preference that content diversity may trade
+    # away. A four-shot `on_this_day` that genuinely spans four years is a
+    # real memory; a 24-shot one that is secretly a single afternoon in 2019
+    # is not - and it is worse, because it looks fine.
+    #
+    # When the gates leave fewer buckets than this, the memory is REFUSED and
+    # counted rather than quietly filled from whichever period happens to be
+    # photo-rich.
+    min_strata: int = 1
 
 
 @runtime_checkable

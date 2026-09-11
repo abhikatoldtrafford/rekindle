@@ -73,6 +73,16 @@ def _rich_library():
     return photos
 
 
+def _on_one_date(prefix, *, years, per_year=4, month=10, day=20, **kw):
+    """Photos on one calendar date across several years - the shape
+    `on_this_day` is about."""
+    out = []
+    for year in years:
+        for i in range(per_year):
+            out.append(_p(f"{prefix}{year}{i}", local=datetime(year, month, day, 9, i * 7), **kw))
+    return out
+
+
 def _index(tmp_path, photos, policy=None):
     store = PhotoStore(tmp_path / "db.sqlite")
     store.upsert_many(photos)
@@ -274,9 +284,22 @@ def test_a_photo_with_people_outranks_one_without_WITHIN_A_BUCKET(tmp_path):
     spread across periods is decided first, and `test_spread_beats_score...`
     below pins that half.
     """
-    photos = [_p(f"a{i}", local=datetime(2020, 5, 1, 9, i), albums=["A"]) for i in range(5)]
+    # Each photo gets a DISTINCT perceptual hash. With the diversity penalty
+    # in play, a fixture where every photo looks identical makes them
+    # interchangeable and ranking becomes unobservable - the test would then
+    # be measuring diversity, not the score it claims to measure.
+    photos = [
+        _p(f"a{i}", local=datetime(2020, 5, 1, 9, i), albums=["A"], phash=1 << (i * 6))
+        for i in range(5)
+    ]
     photos += [
-        _p(f"p{i}", local=datetime(2020, 5, 1, 14, i), albums=["A"], people=["Amy"])
+        _p(
+            f"p{i}",
+            local=datetime(2020, 5, 1, 14, i),
+            albums=["A"],
+            people=["Amy"],
+            phash=1 << (i * 6 + 3),
+        )
         for i in range(5)
     ]
     store, index = _index(tmp_path, photos)
@@ -885,5 +908,61 @@ def test_then_and_now_is_NOT_stratified(tmp_path):
         assert len(spec.shots) == 2
         assert spec.shots[0].taken_at_local[:4] == "2015"
         assert spec.shots[1].taken_at_local[:4] == "2023"
+    finally:
+        store.close()
+
+
+def test_a_span_recipe_is_REFUSED_when_it_cannot_span(tmp_path):
+    """A four-shot `on_this_day` that genuinely spans four years is a real
+    memory. A 24-shot one that is secretly a single afternoon in 2019 is not,
+    and it is worse because it looks fine.
+
+    Here the gates leave only one year standing, so the memory is refused and
+    counted rather than quietly filled from the photo-rich period.
+    """
+    photos = _on_one_date("ok", years=(2019, 2020, 2021), per_year=4)
+    # Every 2020 and 2021 photo fails the resolution floor, leaving one year.
+    for photo in photos:
+        if photo.meta.taken_at_local.year != 2019:
+            photo.meta.width, photo.meta.height = 100, 80
+
+    store, index = _index(tmp_path, photos)
+    try:
+        offers = REGISTRY["on_this_day"].offers(index)
+        assert offers, "the offer should still exist - it is built pre-gates"
+        report = engine.BuildReport(offered=1)
+        assert engine.build(index, offers[0], report=report) is None
+        assert report.skipped == {engine.SKIP_TOO_NARROW: 1}
+    finally:
+        store.close()
+
+
+def test_a_span_recipe_spanning_two_years_is_ACCEPTED(tmp_path):
+    """The floor is two, not the offer's three: a two-year "on this day" is a
+    real memory, and refusing it would throw away a genuine one."""
+    photos = _on_one_date("ok", years=(2019, 2020, 2021), per_year=4)
+    for photo in photos:
+        if photo.meta.taken_at_local.year == 2021:
+            photo.meta.width, photo.meta.height = 100, 80
+
+    store, index = _index(tmp_path, photos)
+    try:
+        offers = REGISTRY["on_this_day"].offers(index)
+        spec = engine.build(index, offers[0])
+        assert spec is not None
+        assert len({s.taken_at_local[:4] for s in spec.shots}) == 2
+    finally:
+        store.close()
+
+
+def test_an_album_story_is_NOT_subject_to_the_span_floor(tmp_path):
+    """A one-day album is a legitimate memory. The floor applies only to
+    recipes whose premise is spanning time."""
+    photos = [_p(f"a{i}", local=datetime(2022, 10, 24, 9, i), albums=["Diwali"]) for i in range(8)]
+    store, index = _index(tmp_path, photos)
+    try:
+        spec = engine.build(index, REGISTRY["album_story"].offers(index)[0])
+        assert spec is not None
+        assert len({s.taken_at_local[:10] for s in spec.shots}) == 1
     finally:
         store.close()

@@ -107,6 +107,91 @@ def sharpness(image: Image.Image) -> float:
     return float(ImageStat.Stat(ImageChops.difference(left, right)).mean[0])
 
 
+# A 4x4x4 RGB histogram: coarse enough that a slight exposure shift does not
+# move a photo between bins, fine enough to separate a red shirt from a blue
+# one. 64 bins is also small enough to store as 128 hex characters per row.
+_COLOUR_BINS = 4
+_COLOUR_SIZE = 32
+
+
+def colour_signature(image: Image.Image) -> str:
+    """A coarse colour distribution, hex-encoded. See memory.diversity.
+
+    Position-independent by design: the perceptual hash already encodes
+    layout, so the complementary information is WHAT colours are present -
+    the light, the room, what people are wearing - rather than where.
+
+    Computed at 32x32 because the distribution, not the detail, is the point,
+    and because it is another pass over an image already decoded.
+    """
+    small = image.convert("RGB").resize((_COLOUR_SIZE, _COLOUR_SIZE), Image.Resampling.BILINEAR)
+    counts = [0.0] * (_COLOUR_BINS**3)
+    step = 256 // _COLOUR_BINS
+    # tobytes() rather than getdata(): getdata() is deprecated in Pillow 14,
+    # and a flat RGB byte string is both faster and stable across versions.
+    raw = small.tobytes()
+    for offset in range(0, len(raw), 3):
+        index = (
+            (raw[offset] // step) * _COLOUR_BINS * _COLOUR_BINS
+            + (raw[offset + 1] // step) * _COLOUR_BINS
+            + (raw[offset + 2] // step)
+        )
+        counts[index] += 1.0
+
+    counts = _smooth(counts)
+    # Normalised against the PEAK bin, not the total: a photo dominated by one
+    # colour would otherwise quantise every other bin to zero and lose the
+    # detail that distinguishes it from another photo of the same wall.
+    peak = max(counts) or 1.0
+    return "".join(f"{min(255, round(255 * c / peak)):02x}" for c in counts)
+
+
+def _smooth(counts: list[float], keep: float = 0.55) -> list[float]:
+    """Diffuse each bin into its face-adjacent neighbours.
+
+    Hard binning makes the signature brittle exactly where it matters. With
+    four bins per channel, (200,40,40) and (150,30,30) - the same red shirt
+    under slightly different light - fall in different bins, and for an image
+    dominated by one colour that puts ALL the mass in disjoint bins and reads
+    as maximally different. Measured before smoothing: those two scored 1.000,
+    the same as red against blue.
+
+    Diffusing means neighbouring colours partially overlap, so a small
+    exposure or white-balance shift moves the signature a little rather than
+    completely. `keep` is the share a bin retains; the rest is split evenly
+    among its up-to-six neighbours.
+    """
+    bins = _COLOUR_BINS
+    out = [0.0] * len(counts)
+    for r in range(bins):
+        for g in range(bins):
+            for b in range(bins):
+                index = (r * bins + g) * bins + b
+                value = counts[index]
+                if value == 0.0:
+                    continue
+                neighbours = []
+                for dr, dg, db in (
+                    (1, 0, 0),
+                    (-1, 0, 0),
+                    (0, 1, 0),
+                    (0, -1, 0),
+                    (0, 0, 1),
+                    (0, 0, -1),
+                ):
+                    nr, ng, nb = r + dr, g + dg, b + db
+                    if 0 <= nr < bins and 0 <= ng < bins and 0 <= nb < bins:
+                        neighbours.append((nr * bins + ng) * bins + nb)
+                out[index] += value * keep
+                if neighbours:
+                    share = value * (1.0 - keep) / len(neighbours)
+                    for n in neighbours:
+                        out[n] += share
+                else:  # pragma: no cover - a 1-bin histogram has no neighbours
+                    out[index] += value * (1.0 - keep)
+    return out
+
+
 def brightness(image: Image.Image) -> float:
     """Mean luminance, 0-255.
 
@@ -125,6 +210,7 @@ class Fingerprint:
     sharpness: float | None
     error: str | None
     brightness: float | None = None
+    colour: str | None = None
     # Post-rotation, i.e. what a viewer actually sees. See `fingerprint_file`.
     width: int | None = None
     height: int | None = None
@@ -164,6 +250,7 @@ def fingerprint_file(path: Path) -> Fingerprint:
                 phash=dhash(upright),
                 sharpness=sharpness(upright),
                 brightness=brightness(upright),
+                colour=colour_signature(upright),
                 width=width,
                 height=height,
                 error=None,
@@ -250,6 +337,7 @@ def _row_for(photo: Photo) -> FingerprintRow:
         phash=last.phash,
         sharpness=last.sharpness,
         brightness=last.brightness,
+        colour=last.colour,
         width=last.width,
         height=last.height,
         error=last.error,

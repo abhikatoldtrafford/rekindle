@@ -348,3 +348,52 @@ def test_every_period_that_survives_the_gates_gets_a_slot_when_there_is_room(ind
                     f"{offer.memory_id}: {stratum.unslotted} periods unrepresented "
                     f"with only {len(spec.shots)} shots used"
                 )
+
+
+# --------------------------------------------------------------------------
+# content diversity
+
+
+def test_no_memory_contains_two_near_identical_shots(index):
+    """The defect: selection ranked by quality and took the top N, so three
+    good photos of the same child on the same afternoon all won on their own
+    merits. Measured on the real library after the fix, the minimum pairwise
+    dissimilarity within a memory is 0.33 and no pair is near-identical.
+
+    The criterion is CONTENT, not the calendar - a single-day memory of
+    genuinely different moments is fine, which is why this asserts on
+    dissimilarity rather than on dates.
+    """
+    import itertools
+
+    from rekindle.memory.diversity import HARD_FLOOR, CompositeSignal
+
+    signal = CompositeSignal()
+    offenders = []
+    for recipe in registered():
+        for offer in recipe.offers(index)[:4]:
+            spec = engine.build(index, offer)
+            if spec is None or len(spec.shots) < 2:
+                continue
+            photos = [index.get(s.file_hash) for s in spec.shots]
+            for a, b in itertools.combinations([p for p in photos if p], 2):
+                value = signal.between(a, b)
+                if value is not None and value < HARD_FLOOR:
+                    offenders.append((offer.memory_id, a.file_hash[:8], b.file_hash[:8], value))
+    assert offenders == [], f"near-identical shots in one memory: {offenders[:5]}"
+
+
+def test_the_diversity_signal_can_judge_most_of_a_real_library(index):
+    """A signal that abstains everywhere is inert. This catches an index where
+    the colour histogram was never backfilled, which would leave diversity
+    running on the perceptual hash alone without saying so."""
+    from rekindle.memory.diversity import ColourSignal
+
+    images = index.images()[:400]
+    if len(images) < 50:
+        pytest.skip("not enough images")
+    signal = ColourSignal()
+    judged = sum(
+        1 for a, b in zip(images, images[1:], strict=False) if signal.between(a, b) is not None
+    )
+    assert judged > len(images) * 0.9, "the colour histogram is missing from most of the index"
