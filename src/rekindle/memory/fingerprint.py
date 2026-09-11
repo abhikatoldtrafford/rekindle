@@ -31,9 +31,9 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PIL import Image, ImageChops, ImageStat
+from PIL import Image, ImageChops, ImageOps, ImageStat
 
-from rekindle.db import PhotoStore
+from rekindle.db import FingerprintRow, PhotoStore
 from rekindle.models import MediaType, Photo
 
 # The hash reads an 8x8 grid of horizontal gradients, so it needs 9 columns.
@@ -56,6 +56,10 @@ ERR_VIDEO = "video"
 ERR_UNREADABLE = "unreadable"
 ERR_UNDECODABLE = "undecodable"
 ERR_MISSING = "missing"
+
+# Shared with meta.exif: only these EXIF orientations exchange the two axes.
+_ORIENTATION = 0x0112
+_SWAPS_AXES = frozenset({5, 6, 7, 8})
 
 
 def dhash(image: Image.Image) -> int:
@@ -103,11 +107,27 @@ def sharpness(image: Image.Image) -> float:
     return float(ImageStat.Stat(ImageChops.difference(left, right)).mean[0])
 
 
+def brightness(image: Image.Image) -> float:
+    """Mean luminance, 0-255.
+
+    Drives the near-black and blown-out gates in `memory.composition`.
+    Measured over 1,149 real photos stratified across every year in the
+    library: the 1st percentile is 33 and the median 113, so the gates sit far
+    out in the tails deliberately.
+    """
+    gray = image.convert("L").resize((_SHARP, _SHARP), Image.Resampling.BILINEAR)
+    return float(ImageStat.Stat(gray).mean[0])
+
+
 @dataclass(frozen=True)
 class Fingerprint:
     phash: int | None
     sharpness: float | None
     error: str | None
+    brightness: float | None = None
+    # Post-rotation, i.e. what a viewer actually sees. See `fingerprint_file`.
+    width: int | None = None
+    height: int | None = None
 
     @property
     def ok(self) -> bool:
@@ -128,7 +148,26 @@ def fingerprint_file(path: Path) -> Fingerprint:
             # safe to call unconditionally; on JPEG it is the whole speedup.
             im.draft("L", _DRAFT)
             im.load()
-            return Fingerprint(phash=dhash(im), sharpness=sharpness(im), error=None)
+            # ORIENTATION FIRST. Everything below measures the image a viewer
+            # sees, not the bytes on disk: a phone stores a portrait photo as
+            # landscape pixels plus a tag, so measuring before transposing
+            # classifies it as landscape and sizes the canvas wrongly. It also
+            # REPAIRS the index - M0 stored the raw size, leaving ~2,475 rows
+            # with width and height swapped (see meta.exif.read_exif).
+            #
+            # draft() may already have scaled the image down, so `size` here
+            # is NOT the native resolution; `_native_size` re-reads that from
+            # the header, which is what the resolution floor needs.
+            upright = ImageOps.exif_transpose(im) or im
+            width, height = _native_size(path, upright)
+            return Fingerprint(
+                phash=dhash(upright),
+                sharpness=sharpness(upright),
+                brightness=brightness(upright),
+                width=width,
+                height=height,
+                error=None,
+            )
     except FileNotFoundError:
         return Fingerprint(None, None, ERR_MISSING)
     except OSError:
@@ -141,6 +180,26 @@ def fingerprint_file(path: Path) -> Fingerprint:
         # of file that reaches this code. Caught by name so the intent is
         # visible rather than relying on a broad except.
         return Fingerprint(None, None, ERR_UNDECODABLE)
+
+
+def _native_size(path: Path, upright: Image.Image) -> tuple[int | None, int | None]:
+    """The full-resolution, post-rotation size.
+
+    `Image.draft()` scales the decode down by up to 8x, so the loaded image is
+    not the native size and using it would record a 4000px photo as 500px -
+    which the resolution floor would then reject. Re-open the header (cheap:
+    no pixel decode) and apply the same axis swap the transpose applied.
+    """
+    try:
+        with Image.open(path) as fresh:
+            width, height = fresh.size
+            if fresh.getexif().get(_ORIENTATION) in _SWAPS_AXES:
+                width, height = height, width
+            return width, height
+    except (OSError, ValueError):
+        # The pixels decoded but the header re-read did not. Fall back to what
+        # we have rather than dropping the photo.
+        return upright.size
 
 
 @dataclass
@@ -166,17 +225,15 @@ class FingerprintReport:
         return self.considered == self.hashed + self.failed + self.skipped_video
 
 
-def _rows(
-    photos: list[Photo],
-) -> Iterator[tuple[str, int | None, float | None, str | None]]:
+def _rows(photos: list[Photo]) -> Iterator[FingerprintRow]:
     for photo in photos:
         if photo.media_type is MediaType.VIDEO:
-            yield (photo.file_hash, None, None, ERR_VIDEO)
+            yield FingerprintRow(file_hash=photo.file_hash, error=ERR_VIDEO)
             continue
         yield _row_for(photo)
 
 
-def _row_for(photo: Photo) -> tuple[str, int | None, float | None, str | None]:
+def _row_for(photo: Photo) -> FingerprintRow:
     """First readable path wins.
 
     A photo can be the same bytes in two folders, and on a partially mounted
@@ -188,7 +245,15 @@ def _row_for(photo: Photo) -> tuple[str, int | None, float | None, str | None]:
         last = fingerprint_file(path)
         if last.ok:
             break
-    return (photo.file_hash, last.phash, last.sharpness, last.error)
+    return FingerprintRow(
+        file_hash=photo.file_hash,
+        phash=last.phash,
+        sharpness=last.sharpness,
+        brightness=last.brightness,
+        width=last.width,
+        height=last.height,
+        error=last.error,
+    )
 
 
 def run_fingerprints(
@@ -216,15 +281,14 @@ def run_fingerprints(
     todo = list(store.iter_unfingerprinted())
     total = len(todo)
 
-    batch: list[tuple[str, int | None, float | None, str | None]] = []
+    batch: list[FingerprintRow] = []
     for index, row in enumerate(_rows(todo), start=1):
-        _, phash, _sharp, error = row
         report.considered += 1
-        if error == ERR_VIDEO:
+        if row.error == ERR_VIDEO:
             report.skipped_video += 1
-        elif phash is None:
+        elif row.phash is None:
             report.failed += 1
-            report._fail(error or ERR_UNDECODABLE)
+            report._fail(row.error or ERR_UNDECODABLE)
         else:
             report.hashed += 1
         batch.append(row)

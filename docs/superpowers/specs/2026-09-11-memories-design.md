@@ -82,8 +82,10 @@ Module layout under `src/rekindle/memory/`:
 |---|---|
 | `policy.py` | `ExclusionPolicy`, the public-safe rule, TOML config load |
 | `index.py` | `MemoryIndex` — the chokepoint |
-| `fingerprint.py` | dHash + sharpness, one decode per photo |
+| `fingerprint.py` | dHash, sharpness, brightness and post-rotation size, one decode per photo |
 | `dedup.py` | burst collapse |
+| `composition.py` | orientation cohesion, canvas, resolution/aspect/quality gates (§5A) |
+| `history.py` | dismissal and resurfacing state (§5B) |
 | `spec.py` | `MemorySpec`, `Shot`, `FactSheet` |
 | `recipes/` | the eight recipes plus the registry |
 | `engine.py` | the pipeline above |
@@ -289,6 +291,216 @@ path- or mtime-based tiebreak is not.
 Dedup runs in the engine *after* the recipe selects and *before* the cap, so the
 cap is filled with 24 distinct photos rather than 24 slots of which 6 are
 duplicates.
+
+---
+
+## 5A. Composition guardrails: what can be shown side by side
+
+Selection answers *which photos belong together*. This answers *which of those
+can actually be watched together* — and it is the same promise, because a
+memory that mixes a portrait phone photo with a 9.41:1 panorama and a 101x24
+barcode looks broken however well chosen its contents were.
+
+**Every rule rejects, every rejection is counted with a reason, and the count is
+surfaced.** A guardrail that drops photos silently is the defect, not the
+feature: a user who expected a photo and did not get it must be able to find out
+why. `CompositionReport` keeps one example filename per reason so the CLI can
+say *which kind* of photo a rule is catching.
+
+### 5A.1 The orientation trap, and a genuine M0 bug
+
+A camera stores a rotated portrait as **landscape pixels plus an orientation
+tag**. `Image.size` is the raw stored size — Pillow does not apply the tag — and
+M0's `read_exif` recorded exactly that.
+
+Measured: **13.6% of a 456-file sample carry a 90/270° tag, so roughly 2,475 of
+18,201 live images were indexed with width and height swapped.** This is a real
+M0 defect, fixed at source in `meta/exif.py` rather than worked around in the
+memory layer. It stayed latent through two milestones because `w*h` is invariant
+under the swap, so even the dedup tiebreak that reads those columns could not
+notice; only a rule that asks "is this taller than it is wide?" exposes it.
+
+Only orientations **5-8** exchange the axes. 2, 3 and 4 are mirrors and 180°
+rotations, so the tempting `orientation != 1` test would corrupt photos that are
+currently correct. Both readings are pinned by tests.
+
+Existing indexes keep the wrong values until re-indexed, so **the fingerprint
+pass repairs them in place** — it decodes every image anyway, and the
+alternative was telling every existing user to re-index from scratch.
+Orientation is applied exactly once, at measurement time; nothing downstream may
+re-apply it.
+
+### 5A.2 Orientation cohesion — majority wins
+
+Classification: **square when the long edge is within 1.05x the short one**,
+otherwise portrait or landscape. Measured justification: 178 live images are
+*exactly* 1:1 and 210 are within 1.02, while only 21 more fall in the 1.02-1.05
+band. There is a natural cliff at 1.02 and the band above it is nearly empty, so
+the exact tolerance barely matters; 1.05 forgives a crop that is a pixel off
+without swallowing a real 4:3 (1.33).
+
+**A mixed set keeps the majority orientation and drops the minority**, rather
+than splitting into one memory per orientation. Two reasons: several recipes are
+not splittable (`then_and_now` is exactly two shots; `person_years` walks one
+person through time and halving it destroys the narrative), and splitting
+doubles the memory count while halving each one, working against the "return
+fewer photos than you think" rule the engine follows elsewhere.
+
+- **Ties break towards landscape.** 73% of this library is landscape and a
+  montage is watched in a landscape frame. It is a choice, and it is
+  deterministic.
+- **Square is never the minority.** It letterboxes acceptably into either
+  canvas, so it is a compatible minority rather than a competing majority.
+- **Orientation is decided *after* the per-photo gates.** Otherwise a pile of
+  rejected portrait thumbnails outvotes the real landscape photos and empties
+  the memory.
+
+### 5A.3 Canvas: derived from the set, never upscaled
+
+The canvas is **the smallest width and the smallest height present among the
+kept photos**, minimised *independently*. Taking the dimensions of the single
+smallest photo would let one unusually narrow photo dictate a canvas that is
+also too tall; the independent minimum is the largest box every photo can fill
+in at least one axis.
+
+`fit_within` clamps the scale at `1.0`, so **nothing is ever upscaled**.
+Upscaling a 640px photo to sit beside a 4000px one produces visible mush, which
+is the whole reason the canvas comes from the set rather than from a constant.
+
+### 5A.4 The per-photo gates, each with its measurement
+
+| Gate | Threshold | Measured cost | Why there |
+|---|---|---|---|
+| Resolution floor | short edge >= **480px** | 303 images (1.66%) | Short-edge percentiles are p1=240, p2=480, p5=600, median=2976. 480 sits exactly on the knee. 640 would remove 986 (5.42%) and start eating genuine early-2010s phone photos. |
+| Extreme aspect | ratio <= **2.5:1** | 30 images (0.16%) | The widest image in the library is a 8874x943 VR panorama at 9.41:1, which would render as a 1280x136 band. A 1886x8485 crop is the same problem the other way. Essentially free. |
+| Near-black | mean luma >= **20** | ~0.26% | Mean-luma percentiles over 1,149 photos stratified across every year: p1=33, median=113. The gate sits far outside anything real. |
+| Blown out | mean luma <= **235** | ~0.09% | p99 is 186. |
+| Out of focus | sharpness >= **1.5** | ~1% | See below — the one that had to be tuned carefully. |
+| Screenshots | see 5A.5 | 401 images (2.1%) | |
+| Videos | always | 1,117 (5.8%) | See 5A.6 |
+| Undecodable | always | counted | Never silently dropped. |
+
+**The sharpness threshold is the one the brief warned about, and the warning was
+right.** Per-year 5th-percentile sharpness ranges from **1.83 (2011)** and 2.28
+(2023) to **6.18 (2020)**. A threshold set at the whole-library p5 (3.23) would
+delete roughly a fifth of 2011, 2018 and 2023 while touching almost nothing in
+2020 — silently gutting the early years exactly as predicted. **1.5 sits below
+every single year's p5**, so no year is singled out, and it removes about 1%
+overall. Soft-but-acceptable photos are not dropped at all: sharpness is *also*
+the ranking signal, so they simply rank lower.
+
+A photo with no measured brightness or sharpness has simply never been
+fingerprinted, and is **kept**. The quality gates filter on measured evidence;
+they do not require that evidence to exist. Otherwise an unfingerprinted index
+would produce zero memories instead of one clear warning.
+
+### 5A.5 Screenshots and documents — what metadata can and cannot prove
+
+Two branches, and measurement showed they are **not** equally strong:
+
+- **Filename convention** (`Screenshot_20161008-222024.png`) is a positive
+  assertion by the operating system. 89 files match it in this library and all
+  89 also have no camera metadata. Trusted on its own.
+- **Matching a known screen size** is only circumstantial. With "no camera
+  metadata" it flagged 370 more files — mostly downloaded wallpapers at
+  1920x1200, which is the right answer — **but 58 of them carry Google face
+  tags.** A photo Google found a person in is a photograph, not a screen
+  capture; those were re-compressed photos (many from WhatsApp) that happen to
+  land on a common screen size.
+
+So the size branch additionally requires that **nobody was detected in the
+image**. Total after the refinement: **401 excluded (2.1%)**, down from 459.
+
+**Absence of camera metadata is never sufficient on its own.** 1,801 live images
+(9.9%) have no make or model, mostly from a re-save or a messaging app, and
+dropping all of them was explicitly declined.
+
+**What this cannot detect, stated plainly:** a *photograph* of a document, a
+receipt or a whiteboard. Those carry ordinary camera metadata and ordinary
+dimensions and are indistinguishable from any other photo without a model, which
+v1 deliberately does not have. **They will appear in memories.** Equally, an
+untagged re-compressed photo at exactly a screen size is still dropped — face
+tags cover only 55.9% of the library, so the exemption is unavailable for the
+other 44%. Roughly 93 WhatsApp images remain caught by the size branch.
+
+### 5A.6 Videos do not appear in memories
+
+**Decided explicitly.** All 1,117 video rows are excluded and counted. Three
+reasons, any one of which would be sufficient:
+
+- They have **no stored dimensions at all**, so they cannot be classified for
+  orientation or contribute to the canvas.
+- They have no perceptual hash, so they cannot be deduped.
+- Rendering one needs ffmpeg, which must stay optional — and including them
+  *only when ffmpeg happens to be installed* would make the `MemorySpec` itself
+  depend on the machine. The spec must be deterministic.
+
+This is a real 5.8% reduction and it is recorded in `known-limitations.md`
+rather than buried.
+
+---
+
+## 5B. Dismissal, repetition and history
+
+### 5B.1 Dismissal is the sensitivity mechanism
+
+Offered four sensitivity controls, the user chose exactly one: **any surfaced
+memory can be dismissed and never returns.** No confirmation prompt before a
+person memory, no temporary quiet period, no config file the user is expected to
+hand-edit. `rekindle dismiss <recipe> <key>` and it is gone, permanently.
+
+The **store** behind that gesture is deliberately more capable: it holds a
+dismissed memory, a person, an album or a date range, because the architectural
+rule is that exclusions are enforced at one chokepoint and the chokepoint must
+be able to express all of them. `MemoryState.apply_to(policy)` merges persisted
+dismissals into the loaded `ExclusionPolicy`, so **downstream a dismissed person
+is indistinguishable from one listed in `exclusions.toml`** — it is not a
+second, parallel filter. A user who wants to add a row by hand can; the format
+is documented and it is plain SQL. Nothing prompts for it.
+
+### 5B.2 Memory identity must survive library growth
+
+**The failure this prevents:** if a memory were identified by the set of photos
+in it, one new photo would make a "new" memory and a dismissal would silently
+stop working — the worst possible failure for a control whose entire promise is
+"never again".
+
+So a memory id is `recipe:key` — its **defining facts**, never its contents:
+
+```
+album_story:Kashmir        not  album_story:<hash of 507 photos>
+on_this_day:10-20
+person_years:Avyan
+year_in_review:2016
+```
+
+Adding a thousand photos to Kashmir does not change `album_story:Kashmir`.
+`test_history.py` pins this directly by dismissing a memory, adding 40 photos to
+its album across new dates, and asserting it is still dismissed.
+
+The one residual: `place_cluster` keys include the visit's start date, so adding
+a photo *earlier than the first photo of a visit* changes that visit's key.
+Recorded in `known-limitations.md`.
+
+### 5B.3 Repetition: overlap cap and cooldown
+
+- **Overlap cap, 0.5.** Two memories in one batch may not share more than half
+  their photos. Below half the two still show mostly different photos and are
+  worth watching separately; at or above half the viewer is being shown the same
+  memory twice under two titles. Overlap is measured against the **smaller** of
+  the two sets, not the union: a 24-shot memory entirely contained in a 200-shot
+  one is 100% redundant to a viewer even though Jaccard would call it 12% — and
+  containment is exactly the case that occurs here, where `on_this_day` is a
+  subset of `year_in_review`.
+- **Cooldown, 90 days.** Long enough that a weekly `--auto` never repeats itself
+  within a season; short enough that an annual anniversary is never blocked —
+  `on_this_day:12-25` recurs 365 days apart by construction, so any cooldown
+  below a year is safe.
+
+Both live in **one store**, in the same database as the photos: they gate the
+same thing — what a user sees — and two mechanisms in two places are two
+mechanisms that can disagree. The tables are created by `CREATE TABLE IF NOT
+EXISTS` in `_SCHEMA`; new *tables*, unlike new columns, need no migration rung.
 
 ---
 

@@ -179,9 +179,9 @@ def test_the_second_readable_path_is_used_when_the_first_is_gone(tmp_path):
     partially extracted export can have one copy missing."""
     good = _jpeg(tmp_path / "b.jpg", _gradient((100, 100)))
     photo = _photo("h", [str(tmp_path / "gone.jpg"), str(good)])
-    digest, phash, sharp, error = fp._row_for(photo)
-    assert phash is not None
-    assert error is None
+    row = fp._row_for(photo)
+    assert row.phash is not None
+    assert row.error is None
 
 
 # --------------------------------------------------------------------------
@@ -287,3 +287,82 @@ def test_a_hash_with_the_top_bit_set_survives_the_round_trip(tmp_path):
         stored = store.get("a").meta.phash
     assert stored == fp.fingerprint_file(path).phash
     assert stored >= 0
+
+
+# --------------------------------------------------------------------------
+# brightness, and the orientation repair
+
+
+def test_brightness_tracks_mean_luminance():
+    assert fp.brightness(Image.new("L", (128, 128), 0)) == pytest.approx(0.0)
+    assert fp.brightness(Image.new("L", (128, 128), 255)) == pytest.approx(255.0, abs=1)
+    assert fp.brightness(Image.new("L", (128, 128), 128)) == pytest.approx(128.0, abs=1)
+
+
+def test_brightness_is_stored_by_the_pass(tmp_path):
+    path = _jpeg(tmp_path / "dark.jpg", Image.new("L", (120, 90), 4))
+    with PhotoStore(tmp_path / "db.sqlite") as store:
+        store.upsert_many([_photo("a", path)])
+        fp.run_fingerprints(store)
+        assert store.get("a").meta.brightness < 20
+
+
+def _oriented(path, size, orientation):
+    """Landscape pixels plus a rotation tag - how a phone stores a portrait."""
+    im = Image.new("RGB", size, (90, 120, 150))
+    exif = im.getexif()
+    exif[0x0112] = orientation
+    path.parent.mkdir(parents=True, exist_ok=True)
+    im.save(path, "JPEG", exif=exif)
+    return path
+
+
+def test_the_pass_measures_the_image_a_viewer_SEES(tmp_path):
+    """Orientation is applied before anything is measured. Roughly 2,475 rows
+    in the reference library are stored 400x300 while a viewer sees 300x400."""
+    path = _oriented(tmp_path / "p.jpg", (400, 300), 6)
+    result = fp.fingerprint_file(path)
+    assert (result.width, result.height) == (300, 400)
+
+
+def test_the_pass_repairs_swapped_dimensions_in_the_index(tmp_path):
+    """The in-place repair for indexes built before the orientation fix. The
+    alternative was telling every existing user to re-index from scratch."""
+    path = _oriented(tmp_path / "p.jpg", (400, 300), 6)
+    with PhotoStore(tmp_path / "db.sqlite") as store:
+        # Exactly as M0 stored it: raw, unrotated.
+        store.upsert_many([_photo("a", path, meta=PhotoMeta(width=400, height=300))])
+        fp.run_fingerprints(store)
+        got = store.get("a")
+    assert (got.meta.width, got.meta.height) == (300, 400)
+
+
+def test_the_repair_records_NATIVE_resolution_not_the_drafted_size(tmp_path):
+    """draft() scales the decode down by up to 8x. Measuring the loaded image
+    would record a 4000px photo as 500px, and the resolution floor would then
+    reject a perfectly good photo."""
+    path = _jpeg(tmp_path / "big.jpg", _gradient((1600, 1200)))
+    result = fp.fingerprint_file(path)
+    assert (result.width, result.height) == (1600, 1200)
+
+
+def test_a_video_row_keeps_its_null_dimensions(tmp_path):
+    """All 1,117 video rows have width/height NULL and are never decoded, so
+    the pass must not write a dimension it never measured."""
+    with PhotoStore(tmp_path / "db.sqlite") as store:
+        store.upsert_many([_photo("v", tmp_path / "c.mp4", MediaType.VIDEO)])
+        fp.run_fingerprints(store)
+        got = store.get("v")
+    assert got.meta.width is None and got.meta.height is None
+
+
+def test_a_failed_decode_does_not_null_stored_dimensions(tmp_path):
+    """A None width must leave the stored value alone, not overwrite it."""
+    with PhotoStore(tmp_path / "db.sqlite") as store:
+        store.upsert_many(
+            [_photo("a", tmp_path / "gone.jpg", meta=PhotoMeta(width=800, height=600))]
+        )
+        fp.run_fingerprints(store)
+        got = store.get("a")
+    assert (got.meta.width, got.meta.height) == (800, 600)
+    assert got.meta.phash_error == fp.ERR_MISSING

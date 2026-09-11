@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from types import TracebackType
@@ -63,7 +64,8 @@ CREATE TABLE IF NOT EXISTS photos (
     sidecar_match TEXT NOT NULL DEFAULT 'none',
     phash         INTEGER,
     sharpness     REAL,
-    phash_error   TEXT
+    phash_error   TEXT,
+    brightness    REAL
 );
 
 -- `paths` is a JSON blob and therefore unqueryable, so this table exists to
@@ -85,6 +87,34 @@ CREATE TABLE IF NOT EXISTS photo_paths (
     name_cf   TEXT NOT NULL,
     parent    TEXT NOT NULL,
     PRIMARY KEY (file_hash, path)
+);
+
+-- Persisted state that decides what a user SEES. One store, deliberately:
+-- dismissal and the resurfacing cooldown both gate the same thing, and two
+-- mechanisms in two places are two mechanisms that can disagree.
+--
+-- New TABLES, unlike new columns, are safe in this script: CREATE TABLE IF NOT
+-- EXISTS creates them on an old database too, so no migration rung is needed.
+--
+-- `kind` is 'memory' | 'person' | 'album' | 'dates'. The first is checked when
+-- offers are generated; the other three are merged into the ExclusionPolicy
+-- and enforced at the MemoryIndex chokepoint like any other exclusion, so a
+-- dismissal cannot be honoured in one place and forgotten in another.
+CREATE TABLE IF NOT EXISTS memory_exclusions (
+    kind       TEXT NOT NULL,
+    value      TEXT NOT NULL,
+    reason     TEXT NOT NULL DEFAULT 'dismissed',
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (kind, value)
+);
+
+-- When each memory was last surfaced, for the resurfacing cooldown. Keyed by
+-- the STABLE memory id (recipe + subject + period), never by its photo set -
+-- see memory.history.memory_id.
+CREATE TABLE IF NOT EXISTS memory_history (
+    memory_id   TEXT PRIMARY KEY,
+    surfaced_at TEXT NOT NULL,
+    title       TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_photos_taken ON photos(taken_at_utc);
@@ -124,6 +154,7 @@ _V3_COLUMNS = (
     ("phash", "INTEGER"),
     ("sharpness", "REAL"),
     ("phash_error", "TEXT"),
+    ("brightness", "REAL"),
 )
 
 
@@ -155,6 +186,24 @@ def _unsigned64(value: int | None) -> int | None:
     if value is None:
         return None
     return value + _U64 if value < 0 else value
+
+
+@dataclass(frozen=True)
+class FingerprintRow:
+    """One photo's measured pixels, as `set_fingerprints` writes them.
+
+    A dataclass rather than a tuple: it grew from three fields to seven, and a
+    positional tuple that long is exactly how `sharpness` and `brightness`
+    end up swapped with nothing to notice.
+    """
+
+    file_hash: str
+    phash: int | None = None
+    sharpness: float | None = None
+    brightness: float | None = None
+    width: int | None = None
+    height: int | None = None
+    error: str | None = None
 
 
 def _dt(value: datetime | None) -> str | None:
@@ -373,25 +422,38 @@ class PhotoStore:
         ):
             yield self._row_to_photo(row)
 
-    def set_fingerprints(
-        self, rows: Iterable[tuple[str, int | None, float | None, str | None]]
-    ) -> int:
-        """Write (file_hash, phash, sharpness, phash_error) tuples, one
-        transaction.
+    def set_fingerprints(self, rows: Iterable[FingerprintRow]) -> int:
+        """Write the fingerprint columns for a batch, in one transaction.
 
         A targeted UPDATE, deliberately not `update_many`: that path rewrites
         every column of the row plus its whole `photo_paths` block, so a
-        fingerprint pass would rewrite 19,480 full rows to store one integer
+        fingerprint pass would rewrite 19,480 full rows to store three numbers
         each - and would silently clobber any enrichment written since the
-        Photo objects were loaded. This touches three columns and nothing else.
+        Photo objects were loaded. This touches only what it computed.
+
+        Width and height are written only when the pass actually measured
+        them, because it also REPAIRS them: M0 stored `Image.size` without
+        applying the EXIF orientation tag, leaving roughly 2,475 rows with the
+        two swapped. The fingerprint pass decodes every image anyway, so it
+        can correct them without the full re-index that would otherwise be the
+        only route. A None leaves the stored value untouched rather than
+        nulling a dimension the decode simply could not read.
         """
         cur = self._conn.cursor()
         n = 0
-        for digest, phash, sharpness, error in rows:
-            cur.execute(
-                "UPDATE photos SET phash = ?, sharpness = ?, phash_error = ? WHERE file_hash = ?",
-                (phash, sharpness, error, digest),
-            )
+        for row in rows:
+            fields = ["phash = ?", "sharpness = ?", "phash_error = ?", "brightness = ?"]
+            values: list[object] = [
+                _signed64(row.phash),
+                row.sharpness,
+                row.error,
+                row.brightness,
+            ]
+            if row.width is not None and row.height is not None:
+                fields += ["width = ?", "height = ?"]
+                values += [row.width, row.height]
+            values.append(row.file_hash)
+            cur.execute(f"UPDATE photos SET {', '.join(fields)} WHERE file_hash = ?", values)
             n += cur.rowcount
         self._conn.commit()
         return n
@@ -491,14 +553,16 @@ class PhotoStore:
                 gps_lon, gps_alt, people, face_regions, keywords, description,
                 favorite, camera_make, camera_model, width, height, source,
                 metadata_conflict, exif_taken_at_utc, takeout_people, archived,
-                trashed, sidecar_match, phash, sharpness, phash_error)
+                trashed, sidecar_match, phash, sharpness, phash_error,
+                brightness)
                VALUES
                (:file_hash,:media_type,:paths,:albums,:edited_of,:first_seen,
                 :last_seen,:taken_at_utc,:taken_at_local,:tz_source,:gps_lat,
                 :gps_lon,:gps_alt,:people,:face_regions,:keywords,:description,
                 :favorite,:camera_make,:camera_model,:width,:height,:source,
                 :metadata_conflict,:exif_taken_at_utc,:takeout_people,:archived,
-                :trashed,:sidecar_match,:phash,:sharpness,:phash_error)""",
+                :trashed,:sidecar_match,:phash,:sharpness,:phash_error,
+                :brightness)""",
             {
                 "file_hash": p.file_hash,
                 "media_type": str(p.media_type),
@@ -537,6 +601,7 @@ class PhotoStore:
                 "phash": _signed64(m.phash),
                 "sharpness": m.sharpness,
                 "phash_error": m.phash_error,
+                "brightness": m.brightness,
             },
         )
         cur.execute("DELETE FROM photo_paths WHERE file_hash = ?", (p.file_hash,))
@@ -575,6 +640,7 @@ class PhotoStore:
             phash=_unsigned64(row["phash"]),
             sharpness=row["sharpness"],
             phash_error=row["phash_error"],
+            brightness=row["brightness"],
         )
         return Photo(
             file_hash=row["file_hash"],

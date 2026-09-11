@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from rekindle.db import SCHEMA_VERSION, PhotoStore
+from rekindle.db import SCHEMA_VERSION, FingerprintRow, PhotoStore
 from rekindle.models import MediaType, Photo, PhotoMeta, TzSource, merge_meta
 
 T0 = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
@@ -229,7 +229,7 @@ def test_set_fingerprints_writes_only_the_three_columns(tmp_path):
         # Something else updates the row after the fingerprint pass read it.
         store.update_photo(_photo("h1", meta=PhotoMeta(description="written later")))
 
-        written = store.set_fingerprints([("h1", 42, 3.5, None)])
+        written = store.set_fingerprints([FingerprintRow("h1", phash=42, sharpness=3.5)])
 
         assert written == 1
         got = store.get("h1")
@@ -244,4 +244,7 @@ def test_set_fingerprints_reports_rows_that_do_not_exist(tmp_path):
     this project exist to prevent."""
     with PhotoStore(tmp_path / "db.sqlite") as store:
         store.upsert_many([_photo("h1")])
-        assert store.set_fingerprints([("h1", 1, 1.0, None), ("gone", 2, 2.0, None)]) == 1
+        assert (
+            store.set_fingerprints([FingerprintRow("h1", phash=1), FingerprintRow("gone", phash=2)])
+            == 1
+        )

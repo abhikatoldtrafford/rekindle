@@ -95,6 +95,9 @@ class PhotoMeta:
     # yet" from "tried and could not", exactly as `enriched_at` does for
     # enrichment.
     phash_error: str | None = None
+    # Mean luminance 0-255 of the decoded image. Drives the near-black and
+    # blown-out quality gates in memory.composition.
+    brightness: float | None = None
 
     @classmethod
     def empty(cls) -> PhotoMeta:
@@ -235,6 +238,7 @@ def merge_meta(old: PhotoMeta, new: PhotoMeta) -> tuple[PhotoMeta, bool]:
         phash=old.phash if old.phash is not None else new.phash,
         sharpness=old.sharpness if old.sharpness is not None else new.sharpness,
         phash_error=old.phash_error or new.phash_error,
+        brightness=old.brightness if old.brightness is not None else new.brightness,
     )
     return merged, conflict
 
