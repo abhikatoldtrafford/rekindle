@@ -1,0 +1,290 @@
+"""The pipeline. Recipes propose; the engine disposes.
+
+    offer -> recipe.select -> compose -> dedup -> rank -> cap -> order -> spec
+
+Everything after `select` happens HERE, once, for every recipe. That is the
+point: a recipe cannot forget to dedup, cannot exceed the cap, cannot skip a
+composition guardrail and cannot reach a photo the policy blocked. The only
+thing a recipe controls is which photos it asks for and in what order they
+should end up.
+
+`test_engine.py` asserts the pipeline guarantees against EVERY REGISTERED
+RECIPE via the registry, not against a hand-picked list, so a recipe added
+later cannot opt out of them.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import date, datetime
+
+from rekindle.memory import captions
+from rekindle.memory.composition import CompositionReport, compose
+from rekindle.memory.dedup import collapse
+from rekindle.memory.history import DEFAULT_MAX_OVERLAP, overlap
+from rekindle.memory.index import MemoryIndex
+from rekindle.memory.recipes import MIN_SHOTS, Offer, registered
+from rekindle.memory.recipes.base import AS_GIVEN, chronological
+from rekindle.memory.spec import MemorySpec, Shot, build_fact_sheet
+from rekindle.models import Photo
+
+# How many photos reach a memory. 24 is already long for a montage - at 2.5
+# seconds a shot that is a minute - and the guide's own advice is "return
+# fewer photos than you think".
+DEFAULT_MAX_SHOTS = 24
+
+# Reasons a candidate memory was not built. Counted and surfaced, never
+# silently dropped.
+SKIP_TOO_FEW = "too_few_photos"
+SKIP_DISMISSED = "dismissed"
+SKIP_COOLDOWN = "in_cooldown"
+SKIP_OVERLAP = "overlaps_another"
+SKIP_EMPTY = "no_candidates"
+
+
+@dataclass
+class BuildReport:
+    """Why the memories you got are the memories you got."""
+
+    offered: int = 0
+    built: int = 0
+    skipped: dict[str, int] = field(default_factory=dict)
+    composition: CompositionReport = field(default_factory=CompositionReport)
+    deduped: int = 0
+
+    def skip(self, reason: str) -> None:
+        self.skipped[reason] = self.skipped.get(reason, 0) + 1
+
+    @property
+    def total_skipped(self) -> int:
+        return sum(self.skipped.values())
+
+    @property
+    def accounted(self) -> bool:
+        return self.offered == self.built + self.total_skipped
+
+
+def score(photo: Photo, sharp_rank: float) -> float:
+    """How well a photo presents. Used ONLY to choose which of the allowed
+    photos fit in the cap - never to decide what is allowed.
+
+    A fixed, documented sum rather than a tuned model, so that the reason a
+    photo did or did not appear can always be reconstructed by hand:
+
+        +3  favourite          (3 rows in this library - nearly inert, but
+                                free, and meaningful in other libraries)
+        +2  has a description  (142 rows)
+        +2  has face tags      (people are what makes a memory a memory)
+        +1  has GPS
+        +1  sidecar_match == "exact"
+        +   sharpness percentile within this selection, in [0, 1]
+
+    The sharpness term is a PERCENTILE within the selection, not the raw
+    value: raw sharpness is not comparable between cameras, and a 2008 photo
+    would lose every contest against a 2025 one on an absolute scale.
+    """
+    meta = photo.meta
+    total = 0.0
+    if meta.favorite:
+        total += 3.0
+    if meta.description:
+        total += 2.0
+    if any(meta.people):
+        total += 2.0
+    if meta.gps is not None:
+        total += 1.0
+    if photo.sidecar_match == "exact":
+        total += 1.0
+    return total + sharp_rank
+
+
+def _ranked(photos: list[Photo]) -> list[Photo]:
+    """Best first. Total order, so the result never depends on input order."""
+    measured = sorted(
+        (p.meta.sharpness for p in photos if p.meta.sharpness is not None),
+    )
+
+    def rank(photo: Photo) -> float:
+        value = photo.meta.sharpness
+        if value is None or not measured:
+            # Never fingerprinted. Treated as mid-pack rather than worst:
+            # penalising it would make an unfingerprinted library rank by
+            # nothing but metadata, which is a different product.
+            return 0.5
+        below = sum(1 for m in measured if m < value)
+        return below / len(measured)
+
+    return sorted(
+        photos,
+        key=lambda p: (-score(p, rank(p)), p.meta.taken_at_utc, p.file_hash),
+    )
+
+
+def build(
+    index: MemoryIndex,
+    offer: Offer,
+    *,
+    max_shots: int = DEFAULT_MAX_SHOTS,
+    min_shots: int = MIN_SHOTS,
+    report: BuildReport | None = None,
+) -> MemorySpec | None:
+    """One offer to one spec, or None with a counted reason."""
+    report = report if report is not None else BuildReport()
+    recipe = _recipe_for(offer)
+    if recipe is None:
+        report.skip(SKIP_EMPTY)
+        return None
+
+    selection = recipe.select(index, offer)
+    if selection is None or not selection.photos:
+        report.skip(SKIP_EMPTY)
+        return None
+
+    # A recipe with a fixed, smaller form declares its own floor.
+    floor = selection.min_shots if selection.min_shots is not None else min_shots
+
+    # 1. Composition guardrails. Before dedup, so that the orientation
+    #    majority and the canvas are computed over photos that can be shown.
+    usable, comp_report = compose(selection.photos)
+    report.composition.merge(comp_report)
+    if len(usable) < floor:
+        report.skip(SKIP_TOO_FEW)
+        return None
+
+    # 2. Dedup, before the cap, so the cap is filled with 24 DISTINCT photos
+    #    rather than 24 slots of which six are near-duplicates.
+    kept, dedup_report = collapse(usable)
+    report.deduped += dedup_report.collapsed
+    if len(kept) < floor:
+        report.skip(SKIP_TOO_FEW)
+        return None
+
+    # 3. Rank, cap, then restore the recipe's ordering. Ranking first and
+    #    re-sorting after is what lets a chronological memory still contain
+    #    the best 24 of 500 photos rather than the first 24.
+    chosen = _ranked(kept)[:max_shots]
+    if selection.ordering != AS_GIVEN:
+        chosen = chronological(chosen)
+    else:
+        # Preserve the recipe's own sequence among the survivors.
+        order = {p.file_hash: i for i, p in enumerate(selection.photos)}
+        chosen = sorted(chosen, key=lambda p: order.get(p.file_hash, 0))
+
+    shots = tuple(
+        Shot(
+            file_hash=p.file_hash,
+            caption=selection.captions.get(p.file_hash, ""),
+            taken_at_local=p.meta.taken_at_local.isoformat() if p.meta.taken_at_local else None,
+            public_safe=index.is_public_safe(p),
+        )
+        for p in chosen
+    )
+    report.built += 1
+    return MemorySpec(
+        recipe=offer.recipe,
+        key=offer.key,
+        title=offer.title,
+        subtitle=captions.subtitle_for(chosen),
+        shots=shots,
+        # Facts describe the FINAL shots, not the candidate pool: a fact sheet
+        # about 500 candidates while the memory shows 24 would let a narrator
+        # assert things the viewer cannot see.
+        facts=build_fact_sheet(
+            chosen,
+            title=offer.title,
+            recipe=offer.recipe,
+            albums=selection.facts.albums,
+        ),
+        # A memory is publishable only when EVERY shot in it is. One
+        # non-qualifying photo makes the whole thing unpublishable.
+        public_safe=all(s.public_safe for s in shots),
+    )
+
+
+def _recipe_for(offer: Offer):
+    for recipe in registered():
+        if recipe.name == offer.recipe:
+            return recipe
+    return None
+
+
+def all_offers(index: MemoryIndex) -> list[Offer]:
+    """Every offer from every recipe, in registry order then recipe order."""
+    out: list[Offer] = []
+    for recipe in registered():
+        out.extend(recipe.offers(index))
+    return out
+
+
+def build_all(
+    index: MemoryIndex,
+    offers: list[Offer],
+    *,
+    max_shots: int = DEFAULT_MAX_SHOTS,
+    min_shots: int = MIN_SHOTS,
+    max_overlap: float = DEFAULT_MAX_OVERLAP,
+    dismissed: frozenset[str] = frozenset(),
+    cooling: frozenset[str] = frozenset(),
+    limit: int | None = None,
+) -> tuple[list[MemorySpec], BuildReport]:
+    """Build a batch, refusing dismissed, cooling and redundant memories.
+
+    Overlap is checked against memories ALREADY ACCEPTED in this batch, in
+    offer order. That makes the result depend on the order offers arrive in -
+    which is exactly why `all_offers` is deterministic: the first of two
+    redundant memories wins, and "first" must mean the same thing every run.
+    """
+    report = BuildReport(offered=len(offers))
+    built: list[MemorySpec] = []
+    accepted: list[list[str]] = []
+
+    for offer in offers:
+        if offer.memory_id in dismissed:
+            report.skip(SKIP_DISMISSED)
+            continue
+        if offer.memory_id in cooling:
+            report.skip(SKIP_COOLDOWN)
+            continue
+        spec = build(index, offer, max_shots=max_shots, min_shots=min_shots, report=report)
+        if spec is None:
+            continue
+        hashes = [s.file_hash for s in spec.shots]
+        if any(overlap(hashes, other) >= max_overlap for other in accepted):
+            # `build` already counted this as built; undo that before
+            # recording the real reason, or the accounting identity breaks.
+            report.built -= 1
+            report.skip(SKIP_OVERLAP)
+            continue
+        accepted.append(hashes)
+        built.append(spec)
+        if limit is not None and len(built) >= limit:
+            # The remaining offers were never considered. They are not
+            # "skipped" - they were not reached - so the offered count is
+            # corrected rather than a bogus reason being invented.
+            report.offered = report.built + report.total_skipped
+            break
+    return built, report
+
+
+def offers_for_today(index: MemoryIndex, today: date | datetime) -> list[Offer]:
+    """Today's anniversary offers, best first.
+
+    `on_this_day` for today's calendar date, falling back to `on_this_month`
+    when the day is too thin to stand alone. The fallback is the reason
+    `on_this_month` exists as a separate recipe.
+    """
+    moment = today.date() if isinstance(today, datetime) else today
+    day_key = f"{moment.month:02d}-{moment.day:02d}"
+    month_key = f"{moment.month:02d}"
+
+    out = [o for o in _offers_of("on_this_day", index) if o.key == day_key]
+    if not out:
+        out = [o for o in _offers_of("on_this_month", index) if o.key == month_key]
+    return out
+
+
+def _offers_of(name: str, index: MemoryIndex) -> list[Offer]:
+    for recipe in registered():
+        if recipe.name == name:
+            return recipe.offers(index)
+    return []

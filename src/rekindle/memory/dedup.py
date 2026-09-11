@@ -174,7 +174,16 @@ def collapse(
         if len(group) > 1:
             report.bursts += 1
 
-    kept = [p for p in photos if p.file_hash in winners]
+    # `winners` is a set of hashes, so a filter alone would emit a photo once
+    # per APPEARANCE in the input. A caller handing in the same photo twice -
+    # a recipe that unions two overlapping queries, say - would then get a
+    # memory showing it twice, with dedup having "run". Emit each winner once.
+    seen: set[str] = set()
+    kept = []
+    for photo in photos:
+        if photo.file_hash in winners and photo.file_hash not in seen:
+            seen.add(photo.file_hash)
+            kept.append(photo)
     report.kept = len(kept)
     report.collapsed = report.considered - report.kept
     report.unfingerprinted = sum(1 for p in kept if p.meta.phash is None)
