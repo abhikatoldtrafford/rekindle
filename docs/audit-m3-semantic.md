@@ -569,3 +569,385 @@ with no network, no GPU, no model weights and no photos.
    cannot even open it. That turned "keep your footprint small" from advice
    into a hard requirement, and is why the semantic pipeline reads the index
    through its own version-agnostic reader.
+
+---
+
+# Part II — the resumed session
+
+Written after the session that produced everything above ended unexpectedly.
+Its last commit was preserved unreviewed by the orchestrator as `612f498`,
+with a note that it needed reviewing before being trusted. Everything below
+was measured on the same machine against the same library.
+
+## 11. The inherited commit: reverted, and why
+
+`612f498` carried one line of source:
+
+```diff
+-  "local_files_only": not allow_download,
++  "local_files_only": False,
+```
+
+**It is a debugging leftover, not a decision, and it was reverted.** Three
+pieces of evidence, in increasing order of how much they settle it.
+
+1. **It contradicts the docstring three lines above it**, which states the
+   offline contract in full and explains that the default was chosen *because*
+   the alternative was found by running.
+
+2. **It broke the suite.** The baseline on the inherited tree was **471 passed,
+   3 failed** — not the 473/9 the audit above reports:
+
+   ```
+   FAILED test_semantic_cli.py::test_embed_without_the_extra_names_the_extra
+   FAILED test_semantic_cli.py::test_embed_with_device_cuda_refuses_rather_than_falling_back
+   FAILED test_semantic_mutants.py::test_the_torch_encoder_never_downloads
+   ```
+
+   The third failed with `DID NOT RAISE SemanticUnavailable` while pytest's
+   captured stderr showed a weight-loading progress bar — the exact failure
+   that test was written to prevent, reproduced by the change itself. **The
+   change is its own mutation test, and the suite killed it.**
+
+3. **There was no load problem to debug around.** With the line restored and
+   `HF_HUB_OFFLINE=1` set: the cache at `data/models` loads in **7.02 s**,
+   `device auto` resolves to `cuda`, parameters land on `cuda:0` in
+   `torch.float16`, and an empty cache directory refuses with *"run `rekindle
+   semantic setup`"* without attempting a download.
+
+### What it would actually have cost
+
+Measured after the fact, because "it contradicts the offline promise" understates
+it. Same load, same populated cache, with the hub endpoint refusing connections:
+
+| | time to load |
+|---|---|
+| `local_files_only = not allow_download` | **15.0 s** |
+| `local_files_only = False` | **385.8 s** |
+
+**25×.** `huggingface_hub` retries a `HEAD` five times per file before falling
+back to the cache. On a genuinely offline machine the inherited change costs
+six and a half minutes on **every** encoder load, not just the first.
+
+### The offline guarantee is now tested, not assumed
+
+The first replacement test written for it **did not fail when the defect was
+put back**, because the fixture sets `HF_HUB_OFFLINE=1` — the environment was
+doing the work and the code could have been anything. That is the decision
+log's "test that cannot fail", caught only by re-injecting the defect.
+
+`test_loading_from_the_cache_makes_no_network_request_at_all` instead **unsets**
+`HF_HUB_OFFLINE`, points `HF_ENDPOINT` at a local socket that counts what
+arrives, loads from the populated cache, and requires the count to be **zero**.
+It is about the code rather than the environment, and it fails in 12 s.
+
+## 12. Does the batch size exploit 16 GB of VRAM?
+
+**No, and it should not try.** The obvious criticism of a hardcoded `32` is that
+it was tuned for a laptop card and wastes an A4000. Measured on 512 real photos,
+pre-decoded so the GPU is the only variable:
+
+| batch | img/s | peak VRAM |
+|---|---|---|
+| 8 | 75.1 | 899 MiB |
+| 16 | 71.2 | 966 MiB |
+| 32 | **79.4** | 1,099 MiB |
+| 64 | 79.3 | 1,365 MiB |
+| 128 | 76.5 | 1,900 MiB |
+| 256 | 75.4 | 2,963 MiB |
+
+**A 32× range of batch sizes spans 71–79 img/s — no trend, all noise.** Even
+batch 256 uses 18% of the card. Sizing the batch from available VRAM would have
+been cargo cult: it would have produced a large number, changed nothing, and
+looked like engineering.
+
+### Why the batch is flat
+
+`TorchEncoder.encode_images`, stage by stage, 256 images at batch 32:
+
+| stage | share | throughput alone |
+|---|---|---|
+| **Hugging Face image processor (CPU)** | **65.9%** | **117 img/s** |
+| host → device copy | 0.7% | 11,686 img/s |
+| **ViT-L/14 forward (GPU)** | **32.7%** | **236 img/s** |
+| device → host + `tolist` | 0.2% | 36,348 img/s |
+| `_normalise` (python) | 0.5% | 15,022 img/s |
+
+The encoder is **CPU-preprocessing-bound**. The GPU is idle two thirds of the
+time even during the part of the pipeline that is supposed to be GPU work, and
+a bigger batch grows the serial CPU half in exact proportion to the GPU half it
+is trying to fill.
+
+**The cause is a silent fallback.** `torchvision` is not installed, so
+transformers falls back from `CLIPImageProcessor` to `CLIPImageProcessorPil`
+and says so only in a log line nobody reads. This is the same shape as PyPI's
+CPU-only torch wheel in §3 — a dependency that is quietly absent and whose only
+symptom is being slower. `use_fast=True` does not help; it resolves to the same
+PIL class, and produces byte-identical pixel values (max abs difference
+0.000000), which is how that was confirmed rather than assumed.
+
+### The lever that does exist
+
+The old loop called `pool.map` and blocked on the result, so the decode pool was
+idle for every second of the encode and the encode was idle for every second of
+the decode — while the module docstring claimed the pool ran "one batch ahead of
+the GPU". **It did not, and nothing tested the claim.**
+
+`prepare_images` / `encode_prepared` now split both encoders at the CPU/device
+line, `embed_photos` runs the CPU half in the pool it already owns, and batches
+are submitted `PREFETCH_BATCHES` ahead and consumed in order.
+
+| prefetch | median img/s | observed range |
+|---|---|---|
+| 1 | 25.4 | 18 – 29 |
+| 2 | 52.3 | 30 – 53 |
+| 4 | 78.7 | 52 – 83 |
+| 6 | 60.1 | 58 – 93 |
+| **12** | **93.4** | 67 – 103 |
+| 24 | 70.8 | 68 – 98 |
+
+*(Median of five interleaved rounds over 512 real photos, the order rotated each
+round.)*
+
+**Read the ranges, not only the medians.** A prefetch of 1 — the old shape — is
+3–4× slower than anything from 4 up, and that gap is far outside the noise.
+Between 4 and 24 **this machine cannot tell them apart**: another agent was
+building in the main worktree throughout, and the same setting measured 17.9 and
+106.8 img/s twenty minutes apart. An earlier descending sweep that looked
+monotonic was a warming page cache, not a result; it is recorded here because
+believing it would have been the easy mistake. 12 is chosen as 2 × workers and
+the comment in the source says the measurement could not pick a winner.
+
+### The whole library, again
+
+```
+considered=18201  embedded=18201  already=0  missing=0  unreadable=0  accounted=True
+188.4 s  ->  96.6 img/s   (3m 08s)
+peak VRAM allocated by torch: 1,099 MiB of 16,375  (6.7% of the card)
+```
+
+| | before | after |
+|---|---|---|
+| full library | 336.1 s · 54.1 img/s | **188.4 s · 96.6 img/s** |
+| wall clock | 5 min 36 s | **3 min 08 s** |
+
+**1.79×, with the vectors bit-identical** — verified over 1,024 real photos at a
+fixed batch, and again on the toy encoder at every prefetch depth from 1 to 40.
+
+One honest wrinkle. Only **25 of 18,201** vectors are bit-identical to the store
+the previous session left, worst cosine **0.99902**. That is not the pipeline
+change. It is that the old store was built at batch 64 and the rebuild ran at
+the default 32, and **fp16 reduction order depends on batch shape**:
+
+| batch, against batch 32 | bit-identical | min cosine |
+|---|---|---|
+| 16 | yes | 0.99999996 |
+| 64 | **no** | 0.99997994 |
+| 128 | **no** | 0.99997996 |
+
+Irrelevant at the cosines search and clustering work with (0.25–0.29), but it
+means **a store should be filled with one batch size throughout**, and it is a
+further reason not to treat the batch as a free knob. The existing store was
+left untouched rather than rebuilt.
+
+## 13. Where each of the three models actually runs
+
+The question was whether the face detector and the aesthetic predictor quietly
+sit on the CPU while CLIP uses the card. **One of them does, it is the slowest
+stage in the milestone, and it cannot do otherwise.**
+
+| | device | evidence | throughput | whole library |
+|---|---|---|---|---|
+| CLIP ViT-L/14 | **GPU** | params on `cuda:0`, `torch.float16`, 1,099 MiB allocated during a real run | 96.6 img/s end to end | **3m 08s** |
+| aesthetic head | **CPU** | never imports torch; five numpy matmuls | ~110,000 vec/s | **0.16 s** |
+| YOLOv11n-face | **CPU only** | see below | 11.7 → 26.4 img/s | 26m → **11m** |
+
+**The aesthetic head is on the CPU and that is correct.** It is a linear chain
+of five matrix multiplies over vectors that are already in memory; the whole
+library scores in 0.16 s. Moving it to the GPU would optimise 0.05% of the
+milestone and add a torch dependency to a feature that currently has none.
+
+**The face detector is on the CPU because it has no choice here.** Two reasons,
+both measured rather than inferred:
+
+```
+onnxruntime 1.30.0
+ort.get_device()             -> 'CPU'
+ort.get_available_providers()-> ['AzureExecutionProvider', 'CPUExecutionProvider']
+model input shape            -> [1, 3, 640, 640]
+```
+
+* **The installed onnxruntime is the CPU build.** There is no
+  `CUDAExecutionProvider` to select, so `FaceDetector(prefer_gpu=True)` resolves
+  to `('CPUExecutionProvider',)` and **silently does nothing**. Fixing it means
+  `onnxruntime-gpu`, which *replaces* `onnxruntime` in the same import
+  namespace — putting the verified ONNX CPU fallback (§7) at risk for the sake
+  of a stage that is not CLIP. **Not done, deliberately.**
+* **The pinned graph is fixed batch 1.** Even with a CUDA provider, batching
+  would need the model re-exported.
+
+### What was done instead
+
+The scan was entirely serial and 60% of its cost was not inference at all:
+
+| stage | share | alone |
+|---|---|---|
+| open + `draft` + convert | 30.9% | 38.9 img/s |
+| letterbox (PIL resize + numpy) | 29.4% | 40.9 img/s |
+| onnxruntime `session.run` (CPU) | 39.6% | 30.3 img/s |
+| YOLO decode (python) | 0.1% | 8,520 img/s |
+
+Pillow, numpy and onnxruntime all release the GIL, so threads give real
+parallelism. Two runs over 240 real face-tag-free photos:
+
+| workers | 1 | 2 | 4 | 6 | 8 |
+|---|---|---|---|---|---|
+| img/s, `detect()` directly | 9.6 | 18.8 | 25.3 | 23.7 | 16.2 |
+| img/s, through `gate_photos` | 11.7 | 19.0 | 26.4 | **28.5** | 27.3 |
+
+**2.44×. The library scan goes from 26.0 minutes to 10.6.**
+
+The two runs put the peak in different places, so they do **not** agree that 4
+beats 6 — only that anything from 4 up is roughly 2.4× serial and the curve is
+flat there. **4 is the shipped default**, as the conservative end of that
+plateau: it leaves a core for onnxruntime's own intra-op pool
+(`intra_op_num_threads` defaults to 0, meaning all of them) and does not fall
+off a 4-core machine. `--workers` is exposed for anyone whose machine disagrees.
+
+### A publishing gate does not get "probably the same"
+
+Over the same 240 real photos, **at every width from 1 to 8, the verdicts, the
+boxes and their order were identical to the serial run**, with
+eligible/has_face/uncertain/errors at 129/76/35/0 throughout.
+
+And through the shipped CLI over the same 400 untagged photos §8 used:
+
+```
+219 proposed as face-free, 148 contain a face, 33 uncertain, 0 unreadable  (20.9 img/s)
+This is a PROPOSAL, not a decision. Nothing is published.
+```
+
+**Exactly the counts §8 recorded at 11.4 img/s.** The threading changed the
+speed and nothing else.
+
+## 14. The gate's driver had no test at all
+
+Mutation testing on the new pipeline turned up a survivor that had nothing to do
+with it. Replacing `if tagged - allowed:` with `if False:` — **deleting the
+allow-list, so a photo Google has tagged with a stranger is sent to the detector
+to be judged on its pixels** — left the entire suite green.
+
+`test_semantic_faces.py` tests `classify`, `_nms`, `_iou`, `Box` and
+`precision_recall` thoroughly, and every one of those is worth testing. **None
+of them is the driver.** The allow-list, the missing / unreadable /
+detector-raised paths, the accounting identity and the threshold pass-through
+were all untested, in the one component of this milestone whose failure mode is
+publishing a stranger's face.
+
+Two new files close it, both built on detectors that score a real feature of a
+real image rather than mocks:
+
+* `tests/test_semantic_gate_driver.py` — 38 tests, no model, no weights, runs in
+  CI.
+* `tests/test_semantic_face_detector.py` — 11 tests against the **real ONNX
+  detector on real photos**, skipped unless both the weights and an index are
+  present.
+
+### Why a real-photo test, when the helpers were already tested exhaustively
+
+Because deleting the `_nms` **call** from `FaceDetector.detect` also left the
+suite green — `_nms` was tested; its being used was not.
+
+That gap is not academic. Over 300 random real photos at the shipped gate
+threshold, **NMS removed at least one box on 220 of them, and on one photo it
+cut 206 raw boxes down to 33.** Without it the gate would report a landscape as
+containing two hundred faces.
+
+A synthetic face cannot stand in, and this was tried rather than assumed: a
+hand-drawn face scores **0.0033** on YOLOv11n-face and produces no raw boxes at
+all to suppress. The detector is confident or silent — the same property §8's
+threshold sweep found — so **only real photographs reach this code**.
+
+## 15. Mutation testing, this session
+
+**55 defects injected one at a time, 41 killed.** Eight rounds; each round's
+survivors became the next round's tests, which is why the same mutation appears
+twice with different outcomes.
+
+| # | target | injected | killed | survived |
+|---|---|---|---|---|
+| 1 | the pipelined embed loop | 12 | 9 | 3 |
+| 2 | `gate_photos`, after round 1 exposed the allow-list | 13 | 12 | 1 |
+| 3 | `TorchEncoder`, against the new weights-gated file | 5 | 4 | 1 |
+| 4 | round 3's survivor, after the request-counting test | 1 | **1** | 0 |
+| 5 | the threaded gate | 9 | 8 | 1 |
+| 6 | round 5's survivor, after the fixture grew a second box | 2 | **1** | 1 |
+| 7 | `FaceDetector` geometry | 7 | 3 | 4 |
+| 8 | round 7's survivors, after the invariants were tightened | 6 | 3 | 3 |
+| | **total** | **55** | **41** | |
+
+Fourteen raw survivors across the rounds collapse to **four distinct ones**: the
+rest were killed by a later round once the test that should have caught them
+existed. Those four are below.
+
+**Three tests that could not fail were caught by injecting the defect and
+watching them pass** — which is the only way any of them would have been found:
+
+1. **The first offline test.** The fixture set `HF_HUB_OFFLINE=1`, so the
+   environment enforced the guarantee and the code could have been anything.
+   Replaced with the request-counting server in §11.
+2. **The first bounds test for detector geometry.** `detect` *clamps* its boxes
+   into the image, so a completely wrong pad or scale still produces boxes that
+   are "inside the photo". Replaced with translation and scale invariance: move
+   the photo by (dx, dy) and the box must move by exactly (dx, dy).
+3. **A 2:1 canvas for the letterbox test.** Not wide enough to lose the face to
+   a centre crop when the scale is picked with `max` instead of `min`. 4:1 is.
+
+And one **fixture certifying its own fiction**, in miniature: `faces_found +=
+len(boxes)` survived because `ScriptedDetector` only ever returned one box, so
+"boxes" and "boxes above `detect_threshold`" could not differ. It now also
+produces a fainter second detection — which real photos have, as a face in the
+background or a reflection — and the mutation dies.
+
+### The survivors, recorded rather than papered over
+
+| survivor | why it is not a defect |
+|---|---|
+| consuming the newest future rather than the oldest in `embed_photos` | Rows are assigned in `add_many` order and the manifest maps hash → row, so a different consumption order yields a different but entirely self-consistent matrix. A **throughput** defect (it blocks on the least-complete work), not a correctness one. Killing it would mean pinning row order, which is not a contract. |
+| `pad = (0, 0)` instead of centring the letterbox | The paste and the undo use the same pad, so top-left padding is a self-consistent alternative convention. An equivalent mutant. |
+| zero-area boxes not filtered | No real photo in the sample produces one. The guard is defence against an export that might. |
+| `NEAREST` instead of `BILINEAR` when resizing | Breaks no invariant. It would show up as **recall**, which is measured on a hand-checked sample in §8, not in a unit test. |
+
+## 16. Where the suite stands
+
+| | |
+|---|---|
+| inherited baseline | 471 passed, **3 failed**, 10 skipped |
+| now | **550 passed, 10 skipped** |
+| `ruff check`, `ruff format --check` | clean |
+| tests needing a network | 0 |
+| tests needing a GPU | 0 |
+| tests needing model weights | 0 in CI (23 skip without them) |
+
+The 23 that skip are the two weights-gated files, `test_semantic_torch_encoder.py`
+and `test_semantic_face_detector.py`. They exist because mutation testing showed
+that **no CI test loads a real model**, so the bodies of both the torch encoder
+and the ONNX detector could be deleted with the suite green. On a machine that
+has run `rekindle semantic setup` they run and kill those mutations; in CI they
+report why they skipped.
+
+## 17. What is still open
+
+* **`onnxruntime-gpu` for the face detector.** It would need a provider swap in
+  a shared import namespace, and the win over four threads is unmeasured. The
+  honest position is that 11 minutes for the whole library is now acceptable and
+  the risk to the ONNX fallback was not.
+* **`torchvision`, to get transformers' fast image processor.** It is the
+  remaining two thirds of the encode. Not installed here, and installing it
+  would change the pixel values the model sees, which means re-measuring
+  agreement before trusting any vector it produced — a re-embed of the whole
+  library, not a dependency line.
+* **The gate's sample is still 19 positives.** Nothing in this session enlarged
+  it. §8's caveat stands in full: nineteen consecutive successes bound the miss
+  rate below roughly 15% at 95% confidence and no tighter, and the gate still
+  must not auto-publish, and still does not.

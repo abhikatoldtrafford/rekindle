@@ -260,3 +260,39 @@ silent quality loss this milestone's storage design exists to prevent.
   user's. It likes sunsets, bokeh and symmetry and undervalues a blurry photo
   of someone who matters. It ranks within a candidate set and never filters
   across the library.
+
+### Two silent CPU fallbacks in the accelerated path
+
+Both measured in [audit-m3-semantic.md](audit-m3-semantic.md) §12–13. Neither
+is a crash, neither logs anything a user reads, and the only symptom of each is
+being slower — which is exactly the shape the PyPI CPU-only torch wheel taught
+this milestone to distrust.
+
+- **`torchvision` is absent, so transformers silently falls back from
+  `CLIPImageProcessor` to `CLIPImageProcessorPil`.** CLIP preprocessing then
+  runs at 117 img/s on one CPU thread while the ViT-L/14 forward it feeds
+  sustains 236 img/s — **66% of the encode is CPU preprocessing**, which is why
+  raising the batch changes nothing and why the fix was to run that half in the
+  decode pool. Installing torchvision would change the pixel values the model
+  sees, so it cannot be done without re-measuring agreement and re-embedding
+  the library. Not a dependency line; a migration.
+- **`FaceDetector(prefer_gpu=True)` does nothing.** The installed onnxruntime
+  is the CPU build, whose `get_available_providers()` offers only
+  `AzureExecutionProvider` and `CPUExecutionProvider`, so the CUDA branch is
+  unreachable and the detector reports `('CPUExecutionProvider',)` without
+  complaint. The pinned graph is fixed batch 1 as well. Reaching the GPU means
+  `onnxruntime-gpu`, which *replaces* `onnxruntime` in the same import
+  namespace and would put the verified ONNX CPU fallback at risk for a stage
+  that is not CLIP. Threading brought the library scan to about 11 minutes
+  instead of 26, which made the swap not worth its risk — **but `prefer_gpu`
+  should say that it could not be honoured rather than quietly returning CPU.**
+
+### The batch size changes the stored vectors
+
+fp16 reduction order depends on batch shape. Against batch 32, batch 16 is
+bit-identical, while batches 64 and 128 differ at a minimum cosine of 0.99998.
+Irrelevant at the 0.25–0.29 cosines search and clustering work with, but **a
+store should be filled with one batch size throughout**: the reference store was
+built at 64 and a rebuild at the default 32 reproduced only 25 of 18,201 vectors
+bit-for-bit (worst cosine 0.99902). Nothing detects this, and nothing needs to;
+it is recorded so the next person measuring agreement does not chase it.
