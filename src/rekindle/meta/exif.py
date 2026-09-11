@@ -68,14 +68,14 @@ def open_upright(path: Path, *, draft: tuple[int, int] | None = None) -> Image.I
                 target = (draft[1], draft[0])
             # A no-op on every format but JPEG, so it is safe unconditionally.
             im.draft("RGB", target)
-        upright = ImageOps.exif_transpose(im)
-        if upright is None:  # pragma: no cover - defensive; Pillow returns a copy
-            upright = im.copy()
-        # Force the decode while the file is still open. `exif_transpose`
-        # returns a detached copy, but loading here means a truncated file
-        # raises OSError HERE, inside the caller's try, rather than later.
-        upright.load()
-        return upright
+        # `exif_transpose` always returns a NEW, already-loaded image - it
+        # either transposes (which loads) or copies (which loads) - so the
+        # result outlives the `with` and a truncated file raises OSError
+        # HERE, inside every caller's try. The `or im` fallback the call
+        # sites used to carry was unreachable, and so was an explicit
+        # `load()` after this line: deleting both failed no test, which is
+        # the only evidence that a line is doing nothing.
+        return ImageOps.exif_transpose(im)
 
 
 @dataclass(frozen=True)

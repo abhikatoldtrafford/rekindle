@@ -158,11 +158,29 @@ def test_the_draft_hint_never_decodes_below_the_size_it_was_asked_for(tmp_path):
     handed over. Passing it straight through compares a width against a
     height, and on a rotated photo that can pick a scale whose output is
     SMALLER than the caller asked for - which the caller then upscales, the
-    one thing `plan_placement` exists to avoid."""
+    one thing `plan_placement` exists to avoid.
+
+    The numbers are chosen to make the two pairings disagree: upright 400x1600
+    is 1600x400 on disk, so the wrong pairing reads 1600//400 and 400//100 and
+    picks a 4x reduction, decoding to 100x400 - a quarter of the width asked
+    for. The right pairing reads 400//400 and 1600//100 and picks 1x.
+    """
     path = tmp_path / "pano.jpg"
-    # Raw 1600x400 tagged 90 degrees, so upright it is 400x1600.
-    write_oriented(path, 6, size=(1600, 400))
+    write_oriented(path, 6, size=(400, 1600))  # raw 1600x400
     canvas = (400, 100)
+    got = open_upright(path, draft=canvas)
+    assert got.width >= canvas[0]
+    assert got.height >= canvas[1]
+
+
+def test_the_draft_hint_is_left_alone_when_the_tag_keeps_the_axes(tmp_path):
+    """The mirror image of the test above, and the reason the guard names
+    `_SWAPS_AXES` rather than `!= 1`. Orientations 2, 3 and 4 do NOT exchange
+    the axes, so transposing their hint is the same mistake pointing the other
+    way: here it would pick a 4x reduction where 1x is correct."""
+    path = tmp_path / "flat.jpg"
+    write_oriented(path, 3, size=(1600, 400))  # 180 degrees: raw is 1600x400 too
+    canvas = (100, 400)
     got = open_upright(path, draft=canvas)
     assert got.width >= canvas[0]
     assert got.height >= canvas[1]
@@ -191,6 +209,20 @@ def test_open_upright_raises_what_the_callers_catch(tmp_path):
         open_upright(bad)
     with pytest.raises(OSError):
         open_upright(tmp_path / "absent.jpg")
+
+
+def test_a_truncated_file_raises_inside_the_helper_not_after_it(tmp_path):
+    """The returned image must be fully decoded and detached from the file.
+    If the decode were deferred, it would happen after the `with` had closed
+    the handle and OUTSIDE every caller's `except OSError` - turning one
+    truncated photo among 18,000 into a dead run rather than a counted one."""
+    whole = tmp_path / "whole.jpg"
+    write_oriented(whole, 6, size=(300, 400))
+    truncated = tmp_path / "cut.jpg"
+    data = whole.read_bytes()
+    truncated.write_bytes(data[: len(data) // 2])
+    with pytest.raises(OSError):
+        open_upright(truncated)
 
 
 # -------------------------------------------------------------- the renderer
