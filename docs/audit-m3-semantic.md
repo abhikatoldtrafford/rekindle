@@ -270,6 +270,19 @@ not weak matches. 31 ms per query over 18,201 vectors is why there is no ANN
 index: an approximate one would turn 31 ms into perhaps 5 ms and cost a C++
 dependency and a recall knob.
 
+Run through the shipped CLI, offline, as a user would:
+
+```
+$ HF_HUB_OFFLINE=1 rekindle semantic find "a dog" -k 5
+ 0.2440  2024-12-25  .../Photos from 2024/IMG_20241225_205833.jpg
+ 0.2416  2011-10-10  .../Photos from 2011/Photo0213.jpg
+ ...
+```
+
+The second hit is a street dog photographed in 2011. It has no face tag and no
+album, so no recipe in the design could ever have reached it. It is now one
+word away.
+
 ### Scene clustering — the point of the milestone
 
 Run over the **6,483 embedded photos that have no face tag and no album that
@@ -335,6 +348,59 @@ Plain top-k on an aesthetic score really is a near-duplicate machine: Leh
 Ladakh's top 40 contained 47 pairs above 0.92 cosine. The spread rule removes
 all of them for a score cost of 0.09–0.22 rating points at the tail
 (Kashmir's 40th pick falls 5.139 → 5.083).
+
+### The ONNX CPU fallback, measured against the GPU path
+
+The fallback exists so a contributor without 2.5 GB of torch can use the
+features. If its vectors did not land in the same place as the torch path's,
+a store filled by one and queried by the other would be quietly wrong — so
+the same 32 real photos were run through both:
+
+| | ONNX, fp32, CPU | torch, fp16, CUDA |
+|---|---|---|
+| throughput | **1.04 img/s** | **51.1 img/s** |
+| session / model load | 2.29 s | ~7 s |
+| whole library would take | ~4.9 hours | 5 min 36 s |
+
+| agreement between the two runtimes | |
+|---|---|
+| image-vector cosine | min 0.9746 · **mean 0.9966** |
+| text-vector cosine | **1.00000** |
+| queries returning a byte-identical top-5 | 3 of 4 (the fourth differs only in the order of ranks 3–5) |
+
+The residual disagreement is fp16 against fp32, not a defect. **The fallback
+is correct and 49× slower**, which is the honest trade and is why the torch
+path is preferred automatically when it is available.
+
+`Xenova/clip-vit-large-patch14` also ships `vision_model_uint8.onnx` and
+`_fp16` variants that would be several times faster. They are **not** pinned,
+because their agreement with the fp32 path has not been measured here and an
+unmeasured quantisation is exactly the silent quality loss the rest of this
+design works to prevent.
+
+**Two defects found by running this comparison, neither visible to a green
+suite:**
+
+1. **The ONNX pin named the wrong graph.** `Xenova/clip-vit-large-patch14`
+   ships `onnx/model.onnx`, `onnx/vision_model.onnx` and
+   `onnx/text_model.onnx`. The first is the *combined* CLIP model and requires
+   `input_ids`, `pixel_values` **and** `attention_mask` in one call; giving it
+   images alone fails with *"Required inputs (['pixel_values',
+   'attention_mask']) are missing"*. It looked entirely correct in the
+   repository file listing and passed every test, because no test loaded a
+   real session. Fixed to the two single-tower graphs, each of which takes one
+   input and returns the 768-d projected embedding, and pinned by
+   `test_the_onnx_pin_names_the_single_tower_graphs_not_the_combined_one`.
+
+2. **`TorchEncoder` had no `local_files_only`.** The first encoder load would
+   download 1.7 GB — straight through this milestone's central promise that
+   only `rekindle semantic setup` touches the network. It surfaced the instant
+   torch was installed on this machine: a CLI test that expected an immediate
+   "install the extra" message instead sat pulling CLIP into a pytest
+   temporary directory. Offline is now the default, with an explicit
+   `allow_download` flag, and
+   `test_the_torch_encoder_never_downloads` asserts that an empty cache
+   produces a message rather than a download.
 
 ## 8. The face gate, measured honestly
 
