@@ -279,6 +279,30 @@ These entries were carried into M2 as open questions. Each is now closed.
   second derivation needed a person looking at the photographs it rejected.
   A library of scanned film or of screenshots would need it re-derived, and
   nothing in the code detects that.
+- **A `recurring_event` key can move if its peak sits on a fortnight
+  boundary.** The key is the centre day-of-year quantised to a half-month, so
+  that adding a year does not change a memory's id and silently un-dismiss it.
+  Adding a year moves a decade-old peak by a day or two, which the bucket
+  absorbs unless the centre already sat that close to the 15th or the 1st.
+  Same shape as `place_cluster`'s entry above; the alternative, keying on the
+  discovered dates, breaks on *every* new year rather than rarely.
+- **Two `recurring_event` peaks in one fortnight: the weaker is dropped.**
+  Two peaks thirteen days apart normally merge, because one window covering
+  both outscores either alone - measured, a collision occurs in about 1 random
+  burst layout in 16,000. When it does happen the stronger event is offered
+  and the weaker becomes unreachable, because publishing both would give two
+  different memories one id and dismissing either would dismiss both. The
+  dropped one is not reported to the user.
+- **`recurring_event` finds the festival and cannot name it.** On this library
+  it discovers Durga Puja (12 years, 2,297 photos) and Kali Puja (11 years,
+  1,134) from timestamps alone, and titles them `Mid October, most years` and
+  `Early November, most years`, because naming requires an album name that
+  recurs across years and this library's festival albums do not
+  (`Mahasaptami, 2013` and `Durga Puja 25` are one year each). Guessing the
+  festival from the date is deliberately not done: a religious observance
+  named wrongly in a title someone is shown is worse than a description that
+  is merely dull. An `album_aliases` config would fix the naming, and is the
+  same mechanism the entry below asks for.
 - **Album merging is manual.** `Leh Ladakh` / `ladakh` and the three Kashmir
   albums are each one trip, but no metadata says so, and `Diwali 25` /
   `Diwali Kali Puja 22` are different years under an equally similar pair of

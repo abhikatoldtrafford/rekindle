@@ -1314,3 +1314,112 @@ makes about making no network calls in the default configuration.
 - **Sensitive-context detection.** The README already describes it as weak; the
   exclusion list is the honest mechanism and it is what M2 ships.
 - **Person-level dedup across bursts.** Burst-only was the settled decision.
+
+
+---
+
+## Addendum — `recurring_event`, the ninth recipe
+
+Added after the user asked why October and November — full of Durga Puja and
+Kali Puja — produce no memories while December does.
+
+### The measurement that answers it
+
+```
+12-25   503 photos across 13 years    <- Christmas: a FIXED date
+12-26   358 across 10 years
+11-23   432 across  6 years           <- almost certainly Puja dates,
+11-02   400 across  7 years              each stranded on its own date
+10-05   332 across  8 years
+```
+
+Christmas works *because* it is fixed. Durga Puja ran 9–13 Oct 2013, 15–19 Oct
+2018, 28 Sep–2 Oct 2017 and 22–24 Sep 2023. `on_this_day` needs three distinct
+years on **one** calendar date; the most any single Puja date musters is two.
+No threshold change reaches it — the premise of that recipe *is* the date.
+
+Three separate causes were measured, and only the first is fixed here:
+
+1. **Lunar festivals move**, so `on_this_day` structurally cannot accumulate
+   them. This recipe.
+2. **Festival albums are per-year and separately named** — `Christmas 2025`,
+   `Christmas 15`, `Diwali Kali Puja 22` — so `album_story` makes one memory
+   per year. `memory.albums.family` now merges a trailing year suffix, which
+   is the conservative half of the fix; `Leh Ladakh`/`ladakh` still needs the
+   `album_aliases` config that `known-limitations.md` already asks for.
+3. **`on_this_month` gives "Every October"** — generic, and not the festival.
+
+### What a recurring event is, in timestamps only
+
+> A multi-day burst of unusually dense photography that happens at about the
+> same time of year, for several years, even as the exact dates drift.
+
+No festival calendar, no cultural knowledge, and it generalises: it finds
+Durga Puja here and would find Thanksgiving or Midsummer elsewhere.
+
+**Dense days**, per year: at least `4.0x` the median *active* day of that year
+and at least 12 photos. Per-year because a 2011 phone and a 2025 phone produce
+different volumes; median of active days because a mean over 365 would call
+every ordinary day dense; the absolute floor because nine photos against a
+baseline of two is four and a half times the median and still nobody's
+festival. Runs a day apart join into one burst. Measured: 154 bursts over 23
+years.
+
+**Peak search, not gap-splitting.** The obvious design — group bursts wherever
+there is a gap — was built first and fails, for a reason worth keeping: *in a
+Bengali autumn there is no gap.* Durga Puja, Kali Puja and the weeks between
+form one unbroken run from late September to late November. At an 8-day split
+it found two events on this library and neither was a festival.
+
+Instead: find the day-of-year window the **most distinct years** agree on,
+claim it, repeat. Ties on years and photos are broken by the window whose
+members sit closest around it — without that the *lowest* qualifying centre
+wins, which put a 1 October festival's centre eleven days early, titled it
+"Mid September", and pushed a second burst outside the claimed window so it was
+published as a separate memory. `±12` days of drift is the smallest window
+that holds Durga Puja's 24-day span and near the largest that does not swallow
+Kali Puja three weeks later. Four years minimum: three admits a wedding plus
+two anniversaries of the same trip.
+
+### What it finds here
+
+| window | years | photos | title |
+|---|---|---|---|
+| late December | 16 | 2,307 | Late December, most years |
+| mid October | 12 | 2,297 | Mid October, most years — **Durga Puja** |
+| early November | 11 | 1,134 | Early November, most years — **Kali Puja** |
+| late November | 8 | 1,272 | Late November, most years |
+| mid June | 7 | 961 | Mid June, most years |
+| late August | 7 | 721 | Late August, most years |
+| late July | 7 | 393 | Late July, most years |
+| mid May | 5 | 1,521 | Mid May, most years |
+| early February | 5 | 498 | Early February, most years |
+| late September | 4 | 171 | Late September, most years |
+| mid March | 4 | 147 | Mid March, most years |
+
+Eleven events in 0.29 s over 18,201 photos.
+
+### Titles: evidence only
+
+A title is an album-name **family** that recurs in at least two distinct years
+of the event, or a description of when it happens. Never a guessed festival.
+Inferring "Diwali" from a date in late October is exactly the confident
+wrongness this project exists not to commit — the date is evidence of density,
+not of a festival, and a religious observance named wrongly in a title someone
+is shown is worse than a title that is merely dull.
+
+Two filters were added because the first run without them was wrong:
+
+- **Google's per-year folders are on every photo**, so the winning name for
+  every event on this library was going to be **"Photos from"**. The
+  presentability rule that `album_story` already applied is now shared, in
+  `memory.albums`, because a rule every consumer of album names must apply is
+  not one module's private helper.
+- **A name another recipe owns is not used.** The late-August peak is named
+  `Avyan` by the evidence, truthfully — it is a child's album, recurring — and
+  `person_years` already publishes a memory called `Avyan`. Two
+  differently-shaped memories under one name is worse than one honest
+  description.
+
+On this library that leaves every event described rather than named, which is
+the correct answer: no festival album here recurs under a stable name.

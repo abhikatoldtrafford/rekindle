@@ -110,6 +110,7 @@ def test_select_on_a_stale_offer_returns_none_rather_than_raising(recipe, tmp_pa
             "then_and_now": "person:Nobody",
             "year_in_review": "1999",
             "place_cluster": "22.50,87.25",
+            "recurring_event": "10-a",
         }
         offer = Offer(recipe=recipe.name, key=keys[recipe.name], title="t")
         assert recipe.select(index, offer) is None
@@ -129,7 +130,7 @@ def test_every_offer_has_a_nonempty_title_and_a_stable_id(recipe, tmp_path):
         store.close()
 
 
-def test_all_eight_recipes_are_registered():
+def test_all_nine_recipes_are_registered():
     assert set(REGISTRY) == {
         "album_story",
         "on_this_day",
@@ -139,6 +140,7 @@ def test_all_eight_recipes_are_registered():
         "then_and_now",
         "year_in_review",
         "place_cluster",
+        "recurring_event",
     }
 
 
@@ -567,6 +569,7 @@ def test_every_other_recipe_declares_a_dimension(tmp_path):
         "year_in_review": strata.BY_MONTH,
         "place_cluster": strata.BY_SPAN,
         "then_and_now": strata.NONE,
+        "recurring_event": strata.BY_YEAR,
     }
     assert set(expected) == set(REGISTRY), "a recipe was added without a declared dimension"
 

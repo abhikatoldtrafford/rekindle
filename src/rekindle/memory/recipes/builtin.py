@@ -12,10 +12,9 @@ be visibly a threshold chosen for A library rather than a law of nature.
 
 from __future__ import annotations
 
-import re
 from datetime import timedelta
 
-from rekindle.memory import captions, strata
+from rekindle.memory import albums, captions, recurring, strata
 from rekindle.memory.composition import compose
 from rekindle.memory.index import MemoryIndex
 from rekindle.memory.recipes.base import (
@@ -31,24 +30,11 @@ from rekindle.memory.recipes.registry import register
 from rekindle.memory.spec import build_fact_sheet
 from rekindle.models import Photo
 
-# Google's own per-year albums. Every photo is in one, so they carry no
-# information a recipe could use, and "Photos from 2019" is not a title anyone
-# wants to see. 23 of the 66 albums in the reference library.
-_AUTO_ALBUM = re.compile(r"^Photos from \d{4}$")
-
-# Album titles that are real metadata but not presentable. Google writes
-# "Untitled", "Untitled(1)", "Untitled(3)" for albums the user never named -
-# five such albums here - and a handful begin with a stray comma
-# (", Abhirup, sudipta"). Neither can be shown as a memory title, and
-# inventing a better one would be inventing a fact.
-_UNTITLED = re.compile(r"^Untitled(\(\d+\))?$", re.IGNORECASE)
-
-
-def _presentable_album(name: str) -> bool:
-    if not name or _AUTO_ALBUM.match(name) or _UNTITLED.match(name):
-        return False
-    # A title that opens with punctuation is a Google export artefact.
-    return name[0].isalnum()
+# Which album names may be shown, and which two names are one album, now
+# live in `memory.albums` - `recurring` needs the same rules, and the first
+# thing that happened without them was every discovered festival being titled
+# "Photos from".
+_presentable_album = albums.presentable
 
 
 def _facts(photos: list[Photo], *, title: str, recipe: str, albums=()) -> object:
@@ -523,3 +509,94 @@ class PlaceCluster:
             stratify=strata.BY_SPAN,
             captions={p.file_hash: captions.month_year(p.meta.taken_at_local) for p in ordered},
         )
+
+
+@register
+class RecurringEvent:
+    """A burst of photography that happens every year at about the same time.
+
+    The recipe the user asked for without asking for it: "October and November
+    are full of Durga Puja and Kali Puja and none of it produces a memory."
+    `on_this_day` cannot, because the Bengali festival calendar is lunar and
+    no calendar date ever accumulates. See `memory.recurring` for the
+    detection, which uses timestamps only and knows no festivals.
+
+    Measured on the reference library: eleven events, the largest being 16
+    years around late December (2,307 photos), 12 years around early October
+    (2,297 - Durga Puja) and 11 years around late October (1,134 - Kali Puja).
+    The October pair are the memories that did not exist before this recipe.
+    """
+
+    name = "recurring_event"
+    title = "Every year, about this time"
+
+    def offers(self, index: MemoryIndex) -> list[Offer]:
+        photos = index.images()
+        reserved = frozenset(p.casefold() for p in index.people_counts())
+        out: list[Offer] = []
+        seen: set[str] = set()
+        for event in recurring.events(photos):
+            # Two peaks can quantise into one fortnight bucket. Offers are
+            # strongest first, so keeping the first is deterministic - but it
+            # IS a dropped memory, so it is not done silently: the weaker
+            # event becomes unreachable and the subtitle of the survivor does
+            # not mention it. Recorded in known-limitations.md.
+            if event.key in seen:
+                continue
+            seen.add(event.key)
+            out.append(
+                Offer(
+                    recipe=self.name,
+                    key=event.key,
+                    title=self._title(event, photos, reserved),
+                    subtitle=f"{len(event.years)} years, {event.count} photos",
+                    size=event.count,
+                )
+            )
+        return out
+
+    def select(self, index: MemoryIndex, offer: Offer) -> Selection | None:
+        photos = index.images()
+        reserved = frozenset(p.casefold() for p in index.people_counts())
+        event = next((e for e in recurring.events(photos) if e.key == offer.key), None)
+        if event is None:
+            return None
+        chosen = chronological(recurring.photos_in(event, photos))
+        if len(chosen) < MIN_SHOTS:
+            return None
+        years = sorted(years_of(chosen))
+        return Selection(
+            photos=chosen,
+            facts=_facts(chosen, title=self._title(event, photos, reserved), recipe=self.name),
+            ordering=CHRONOLOGICAL,
+            # BY YEAR, hard. The premise is that this happens EVERY year; a
+            # memory of one year's festival is `album_story`, not this.
+            stratify=strata.BY_YEAR,
+            min_strata=2,
+            captions={p.file_hash: captions.anniversary_caption(p, years[-1]) for p in chosen},
+        )
+
+    @staticmethod
+    def _title(event, photos: list[Photo], reserved: frozenset[str]) -> str:
+        """From evidence only. NEVER a guessed festival name.
+
+        Inferring "Diwali" from a date in late October is exactly the
+        confident wrongness this project exists not to commit: the date is
+        evidence of density, not of a festival, and a religious observance
+        named wrongly in a title a person is shown is worse than saying
+        nothing. If an album family names the event across years, that name is
+        used because the user wrote it; otherwise the title says only what is
+        known, which is when it happens and how often.
+        """
+        named = recurring.naming_evidence(event, photos, reserved=reserved)
+        if named:
+            return named
+        span = range(event.years[0], event.years[-1] + 1)
+        available = len(
+            {
+                p.meta.taken_at_local.year
+                for p in photos
+                if p.meta.taken_at_local and p.meta.taken_at_local.year in span
+            }
+        )
+        return recurring.describe(event, years_available=available)
