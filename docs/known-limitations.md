@@ -500,3 +500,73 @@ that killed the earlier seven signals in a different costume.
   who types a thousand prompts gets a thousand entries in
   `data/prompt_tags.json`. Fine at the scale anyone will reach by hand; not
   fine if prompts are ever generated.
+
+## Fixed after M3: the semantic pipeline decoded every photo raw
+
+**`semantic.embed._decode` and `semantic.faces._examine` never applied the
+EXIF orientation tag.** Both opened the file, called `draft`, and converted to
+RGB — the exact idiom the renderer and the fingerprint pass had already been
+fixed away from. 2,503 of the library's 18,363 images (13.6%) carry a
+90/270-degree tag, and another 35 carry a 180-degree one, so the encoder and
+the face detector were looking at 13.8% of the library on its side.
+
+Measured with the real `yolov11n-face` detector on 200 of those photos:
+
+- **14.5% of gate verdicts change** once the transpose is applied.
+- **9.0% were judged too permissively** — the old decode called them safer
+  than they are. `DSC_0436.JPG` shows the detector **zero** faces sideways and
+  **eight** upright; `IMG_20201114_200059981_HDR.jpg` goes 0 → 4. A gate whose
+  stated failure mode is "a stranger's face on the internet" was failing open
+  on roughly 225 of the 2,503 rotated photos.
+- It cost accuracy in the other direction too:
+  `IMG_20161030_193606253_HDR(1).jpg` scores **ten** faces sideways and zero
+  upright. The gallery review sheet's "one photo tagged 'Abhik Maiti' came
+  back with ten faces" — 82 of 189 frames excluded at that step — is that
+  photo.
+
+**The renderer was never affected, and a bug report said it was.** The gallery
+review recorded six files as "renders 90° rotated" and dropped them. All six
+carry orientation 6 or 8; re-rendering `on_this_month --key 08` and
+`year_in_review --key 2017` against the same index draws every one of them
+upright, and the WebP is byte-identical before and after this change. What was
+sideways was the **contact sheet they were reviewed on**, which decoded with
+`Image.open` + `draft` + `convert` and no transpose — the same idiom that was
+genuinely still shipping in `semantic`. A review harness that does not share
+the renderer's decode path is a review harness that can condemn a good frame,
+and four of those six were dropped for a defect that was never in the render.
+
+And with the real CLIP ViT-L/14 encoder on 60 of them: the sideways vector has
+a **median cosine of 0.935** against the upright one, where two entirely
+unrelated photos of this library sit at **0.553** (max 0.866 over 190 pairs).
+The worst case, 0.811, is further from its own upright vector than some
+unrelated pairs are from each other. The aesthetic head scores those same
+vectors, so it inherited the error.
+
+**Why M2's fix and M2's tests did not prevent this.** M2 corrected the stored
+`width`/`height` and shipped tests for them — and those tests assert NUMBERS.
+A 400x300 file tagged 90 degrees is 300x400 whichever direction the rotation
+went, and orientations 2, 3 and 4 do not change the size at all, so half the
+tag values are invisible to any dimension assertion. The index was right and
+two decode sites were still wrong, for a whole milestone.
+
+`meta.exif.open_upright` is now the single place pixels are turned the right
+way up, and all four decode sites go through it. `tests/test_orientation.py`
+asserts the PIXELS at every one of them, using a four-colour quadrant marker
+that distinguishes all eight orientations from each other; the fixture is
+itself checked against Pillow's `exif_transpose` rather than against our own
+code, and against its own ability to tell a mirror from a rotation.
+
+### Carried: 2,503 stored vectors were computed from sideways pixels
+
+The fix corrects future decodes. It does not touch the 18,201 vectors already
+in `data/semantic/clip-vit-l14/`, and `embed_photos` skips any hash the store
+already holds, so **13.8% of the live embedding store stays wrong until it is
+rebuilt** — semantic search, clustering and every aesthetic score inherit it.
+There is no targeted re-embed: `EmbeddingStore` has no invalidation path, and
+`model_revision` raises on a mismatch rather than expiring rows. The recovery
+today is to delete the store directory and re-run `rekindle semantic embed` -
+about five and a half minutes on the GPU, five hours on CPU.
+
+**A `--redo` flag taking a set of hashes is the right fix**, and is not built
+here: it is a new CLI surface, and this change is deliberately confined to the
+decode.
