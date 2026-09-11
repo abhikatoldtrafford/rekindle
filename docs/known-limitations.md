@@ -615,3 +615,68 @@ The honest fixes are a per-file override the user can set, or an
 orientation-detection model, and both are new surface area. Recorded so the
 next person who opens a montage and sees a photograph on its side does not go
 looking for the bug in `open_upright`.
+
+**Mostly resolved, by content.** `rekindle semantic orient` (`meta.orientation`)
+now proves staleness from the picture instead of from the metadata, using the
+face detector that already ships. `open_upright` is untouched in its logic: the
+pass records, per file, that a tag is stale, and the chokepoint stops applying
+that one tag. It can only ever DISABLE a tag the file already carries — it never
+invents a rotation for a file whose tag says upright, and never proposes 180
+degrees. Measured on the reference library:
+
+| | |
+|---|---|
+| images examined | 18,363 (1,117 videos are out of scope) |
+| carrying a 90/270-degree tag | 2,503 (13.6%) |
+| **proved stale, now decoded without the tag** | **212 (1.15% of images, 8.5% of the suspects)** |
+| tag trusted — the picture agrees with it | 1,463 |
+| **no face at any rotation — UNREACHABLE** | **828 (33.1% of the suspects)** |
+| unreadable | 0 |
+| whole library, 6 threads | 222 s |
+
+Precision was hand-checked by opening 90 of the proposals and looking at them:
+at the shipped margin of 0.35, **two independent samples of 30 found 57 right,
+0 wrong and 3 unsure** (a macro flower and two pets, where no orientation is
+objectively right). In the band just below it, 0.20–0.35, 30 files gave 21
+right and 4 genuinely wrong, which is why the default sits where it does;
+`--margin` exposes the knob.
+
+Compare the dimension-based detector this replaces: 5 right for 13 wrong.
+
+**The three files that started this are NOT among the 212, and that is the
+most useful thing this section can tell you.** `DSC01306.jpg1.jpg`,
+`DSC01319.jpg2.jpg` and `DSC01320.jpg1.jpg` are genuinely stale — opening them
+both ways confirms it — and the detector agrees, but only by +0.233, +0.098
+and +0.106. They are night shots at a crowded Diwali event, where the faces
+are small and dim and the detector is weak in BOTH orientations, so the
+evidence points the right way and never becomes decisive. Lowering the margin
+far enough to catch them means entering the band measured at 44% precision,
+which would turn more correct photographs sideways than it repaired.
+
+So they go to `rekindle semantic orient --review`, which ranks every
+sub-threshold file that leans against its tag, using the evidence already
+stored — no detector, no decode, so it runs on a machine with no model at all.
+That queue is **282 files long, and the three sit at ranks 51, 150 and 160**.
+They are not at the top of it and nothing about the evidence puts them there:
+a human would have to work a fair way down. That is the honest shape of the
+result — the queue is a place to look, not a shortlist.
+
+The queue mixes the two ways a file can fall short, and labels which: 220
+failed the margin, 62 had no detection confident enough to count as a face at
+all. Neither is evidence the tag is right.
+
+**The unreachable third is the real limit, and it is not going away.** A
+rotated photograph with no face in it carries no evidence this method can
+read, so 828 files keep whatever their tag says. Nothing proposes them for
+review either — a queue of 828 photographs nobody will ever work through is
+not a fix.
+
+**Invalidation, which did not previously exist.** Recording a stale tag
+changes the pixels `open_upright` returns, so `PhotoStore.set_orientations`
+clears that photo's `phash`, `sharpness`, `brightness`, `colour` and
+`phash_error`, which puts it back in `rekindle fingerprint`'s queue (and the
+re-run repairs the stored `width`/`height`, which were swapped). **Embeddings
+are still not invalidated** — they live in a separate store with no delete
+path, which is exactly how 2,503 sideways vectors survived the earlier fix.
+The pass prints the count and says so; `--redo` remains the right fix and
+still is not built.

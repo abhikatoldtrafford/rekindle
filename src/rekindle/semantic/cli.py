@@ -20,6 +20,10 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+# `meta.orientation` imports nothing heavier than json and pathlib - PIL is
+# deferred inside its functions - so naming its default here costs `rekindle
+# --help` nothing and stops the CLI and the module disagreeing about it.
+from rekindle.meta.orientation import MIN_MARGIN
 from rekindle.semantic.availability import SemanticUnavailable
 from rekindle.semantic.embed import PREFETCH_BATCHES
 from rekindle.semantic.faces import DEFAULT_GATE_WORKERS
@@ -644,6 +648,192 @@ def semantic_facegate(
     console.print(table)
     if not report.accounted:
         console.print("[red]![/red] Accounting does not balance - this is a bug.")
+
+
+@semantic_app.command("orient")
+def semantic_orient(
+    limit: Annotated[int | None, typer.Option("--limit", help="Examine at most N photos.")] = None,
+    margin: Annotated[
+        float,
+        typer.Option("--margin", help="Evidence a tag-free decode must win by."),
+    ] = MIN_MARGIN,
+    face: Annotated[str | None, typer.Option("--face-model")] = None,
+    workers: Annotated[int, typer.Option("--workers")] = DEFAULT_GATE_WORKERS,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run/--write", help="Report without recording anything.")
+    ] = False,
+    review: Annotated[
+        bool,
+        typer.Option("--review", help="List the near misses a human should settle. Runs nothing."),
+    ] = False,
+    data_dir: DataDir = Path("./data"),
+) -> None:
+    """Find files whose EXIF orientation tag is STALE, and stop applying it.
+
+    A one-time, resumable pass. Only files carrying a 90/270-degree tag are
+    decoded at all, and only the hypothesis "this tag is stale" is ever
+    tested - it can never invent a rotation for a file whose tag says upright.
+    """
+    from rekindle.db import PhotoStore
+    from rekindle.meta import orientation
+    from rekindle.semantic.faces import load_detector
+    from rekindle.semantic.setup import cache_dir_for
+
+    db_path = _db_path(data_dir)
+    if not db_path.is_file():
+        raise _fail(f"No index at {db_path}. Run `rekindle index <folder>` first.", code=2)
+    if review:
+        # Reads the evidence the pass already stored. No detector is loaded,
+        # so this works on a machine with no model and no `semantic` extra -
+        # which is the whole point of a queue a HUMAN works through.
+        _print_review_queue(db_path, limit)
+        return
+    try:
+        detector = load_detector(cache_dir_for(data_dir), face)
+    except SemanticUnavailable as exc:
+        # The whole feature is optional. Without a model the library keeps
+        # decoding by EXIF alone, which is what it has always done.
+        raise _fail(f"{exc}\nWithout it, rekindle decodes by the EXIF tag alone.") from exc
+
+    with PhotoStore(db_path) as store:
+        todo = list(store.iter_unoriented())
+        if limit is not None:
+            todo = todo[:limit]
+        if not todo:
+            counts = store.orientation_counts()
+            console.print(
+                "[green]Nothing to do[/green] - every photo has been examined. "
+                f"{counts['examined']} examined, "
+                f"{counts['ignoring_exif']} decoding with the tag IGNORED."
+            )
+            return
+        console.print(
+            f"Examining {len(todo)} photos with [bold]{detector.spec.key}[/bold] "
+            f"({', '.join(detector.providers)}). Only 90/270-tagged files are decoded."
+        )
+        target = _PassTarget(store, todo, write=not dry_run)
+        with typer.progressbar(length=max(1, len(todo)), label="examining") as bar:
+            state = {"last": 0}
+
+            def tick(done: int, _total: int) -> None:
+                bar.update(done - state["last"])
+                state["last"] = done
+
+            report = orientation.run_orientation(
+                target, detector, workers=workers, min_margin=margin, progress=tick
+            )
+
+    console.print(
+        f"\n[bold]{report.tag_ignored}[/bold] files have a STALE orientation tag and will now "
+        f"decode without it.\n"
+        f"  {report.no_tag} had no axis-swapping tag (never examined further), "
+        f"{report.tag_trusted} had one the picture agrees with,\n"
+        f"  {report.no_face} had one but NO FACE to argue from - unreachable by this method - "
+        f"and {report.errors} could not be read.\n"
+        f"  {report.examined} examined in {report.elapsed_s:.0f}s."
+    )
+    if not report.accounted:
+        console.print("[red]![/red] Accounting does not balance - this is a bug.")
+    if dry_run:
+        console.print("[yellow]--dry-run: nothing was recorded.[/yellow]")
+    if report.corrected:
+        table = Table(title="every rotation applied, and the evidence for it")
+        table.add_column("tag")
+        table.add_column("evidence with tag", justify="right")
+        table.add_column("without", justify="right")
+        table.add_column("margin", justify="right")
+        table.add_column("best face", justify="right")
+        table.add_column("file")
+        for path, v in sorted(report.corrected, key=lambda c: -c[1].margin):
+            table.add_row(
+                str(v.tag),
+                f"{v.e_tag:.3f}",
+                f"{v.e_raw:.3f}",
+                f"{v.margin:+.3f}",
+                f"{v.m_raw:.3f}",
+                Path(path).name,
+            )
+        console.print(table)
+        console.print(
+            f"[yellow]{len(report.invalidated)} photos changed their decoded PIXELS.[/yellow]\n"
+            "  Their fingerprints have been cleared - run `rekindle fingerprint` to recompute\n"
+            "  them (this also repairs the stored width/height, which were swapped).\n"
+            "  Their EMBEDDINGS are in a separate store with no invalidation path: re-run\n"
+            "  `rekindle semantic embed` after deleting that store, or those vectors stay\n"
+            "  sideways. See docs/known-limitations.md."
+        )
+
+
+def _print_review_queue(db_path: Path, limit: int | None) -> None:
+    """The near misses: the tag is contradicted, but not decisively."""
+    from rekindle.db import PhotoStore
+    from rekindle.meta import orientation
+
+    with PhotoStore(db_path) as store:
+        counts = store.orientation_counts()
+        rows = store.orientation_review_queue(limit or 40)
+    if not counts["examined"]:
+        console.print(
+            "[yellow]Nothing examined yet.[/yellow] Run `rekindle semantic orient` first."
+        )
+        return
+    console.print(
+        f"{counts['ignoring_exif']} files were corrected outright. Below are "
+        f"{len(rows)} that were NOT, though the picture leans against the tag. "
+        "They failed one of two\nguards, and the `why` column says which: the "
+        f"margin did not reach {MIN_MARGIN}, or nothing in the tag-free decode "
+        "was confident\nenough to count as a face. Neither is evidence the tag is "
+        "RIGHT - only that the arithmetic would not commit."
+    )
+    table = Table(title="orientation review queue (closest call first)")
+    table.add_column("tag")
+    table.add_column("with tag", justify="right")
+    table.add_column("without", justify="right")
+    table.add_column("margin", justify="right")
+    table.add_column("best face", justify="right")
+    table.add_column("why")
+    table.add_column("file")
+    for path, ev in rows:
+        table.add_row(
+            str(ev.get("tag")),
+            f"{ev.get('e_tag', 0):.3f}",
+            f"{ev.get('e_raw', 0):.3f}",
+            f"{ev.get('margin', 0):+.3f}",
+            f"{ev.get('m_raw', 0):.3f}",
+            "margin" if ev.get("reason") == orientation.MARGIN_TOO_SMALL else "no face",
+            path.name,
+        )
+    console.print(table)
+    console.print(
+        "Nothing here has been changed. To act on one, re-run with a lower "
+        "[bold]--margin[/bold] after deciding the band is worth it - "
+        "see docs/known-limitations.md for what that costs."
+    )
+
+
+class _PassTarget:
+    """What the pass writes through: applies `--limit`, honours `--dry-run`.
+
+    Both are properties of THIS INVOCATION, not of the index, so they live
+    here and `PhotoStore` keeps its one honest answer to "what still needs
+    examining?". `--dry-run` swallowing the write at this seam is also the
+    only version of it that cannot half-apply: the pass itself has no branch
+    in it, so there is no path on which some verdicts are written and others
+    are not.
+    """
+
+    def __init__(self, store, todo, *, write: bool) -> None:
+        self._store = store
+        self._todo = todo
+        self._write = write
+
+    def iter_unoriented(self):
+        return iter(self._todo)
+
+    def set_orientations(self, rows):
+        if not self._write:
+            return sum(1 for _ in rows)
+        return self._store.set_orientations(rows)
 
 
 def register(app: typer.Typer) -> None:

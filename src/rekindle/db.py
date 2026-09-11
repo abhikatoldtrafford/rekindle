@@ -24,7 +24,7 @@ from rekindle.models import (
     merge_meta,
 )
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -66,7 +66,9 @@ CREATE TABLE IF NOT EXISTS photos (
     sharpness     REAL,
     phash_error   TEXT,
     brightness    REAL,
-    colour        TEXT
+    colour        TEXT,
+    orient_ignore_exif INTEGER,
+    orient_evidence    TEXT
 );
 
 -- `paths` is a JSON blob and therefore unqueryable, so this table exists to
@@ -163,6 +165,21 @@ _V3_COLUMNS = (
 # a row, about 2.5 MB across this library.
 _V4_COLUMNS = (("colour", "TEXT"),)
 
+# v6: whether this file's EXIF orientation tag was proved STALE from image
+# content, and the evidence that proved it. See `meta.orientation`.
+#
+# `orient_ignore_exif` is deliberately THREE-valued. NULL means "never
+# examined", which is what every row starts as and what makes
+# `rekindle semantic orient` resumable; 0 means "examined, the tag is
+# trusted"; 1 means "examined, the tag is stale, decode without it". A
+# two-valued column would make "not looked at" and "looked at and fine"
+# indistinguishable, and the pass would re-examine the whole library on every
+# run - which for a detector at two decodes a photo is not free.
+_V6_COLUMNS = (
+    ("orient_ignore_exif", "INTEGER"),
+    ("orient_evidence", "TEXT"),
+)
+
 
 _SIGN_BIT = 1 << 63
 _U64 = 1 << 64
@@ -254,6 +271,11 @@ class PhotoStore:
             # about to be REJECTED below is not written to on the way out.
             self._conn.executescript(_LATE_INDEXES)
             self._conn.commit()
+            # Opening the index is the moment its stale-tag corrections become
+            # knowable, and `meta.exif.open_upright` needs them on every
+            # decode. Guarded on the version for the same reason the indexes
+            # are: a database about to be rejected is not read from here.
+            self._load_orientation_overrides()
         if found != SCHEMA_VERSION:
             # A raise here means __init__ never returns, so the caller gets no
             # handle to close the connection - it would otherwise stay open
@@ -292,7 +314,13 @@ class PhotoStore:
         two-step migration resumes from the rung it reached rather than
         restarting or, worse, re-running an already-applied step.
         """
-        steps = {1: self._to_v2, 2: self._to_v3, 3: self._to_v4, 4: self._to_v5}
+        steps = {
+            1: self._to_v2,
+            2: self._to_v3,
+            3: self._to_v4,
+            4: self._to_v5,
+            5: self._to_v6,
+        }
         while (version := self.schema_version()) != SCHEMA_VERSION:
             step = steps.get(version)
             if step is None:
@@ -385,6 +413,148 @@ class PhotoStore:
             " colour = NULL WHERE phash IS NOT NULL"
         )
         self._bump(5)
+
+    def _to_v6(self) -> None:
+        """Orientation verdicts. Nothing to backfill and nothing to clear.
+
+        Every existing row is legitimately "never examined", which is what
+        NULL says, and `rekindle semantic orient` fills them in. No stored
+        measurement changes meaning here: until that pass actually records a
+        stale tag, every decode in the program is byte-for-byte what it was
+        at v5.
+        """
+        self._add_columns(_V6_COLUMNS)
+        self._bump(6)
+
+    # ------------------------------------------------------------- orientation
+
+    def _load_orientation_overrides(self) -> int:
+        """Install this index's stale-tag corrections into `meta.orientation`.
+
+        Done HERE because opening the index is the moment the corrections
+        become knowable, and `meta.exif.open_upright` - which needs them on
+        every decode, from four modules in three packages - takes a Path and
+        no index handle. Loading REPLACES whatever was there, so two indexes
+        opened in one process cannot blend.
+
+        Only the rows that actually override anything are read, which on the
+        reference library is on the order of a hundred paths.
+        """
+        from rekindle.meta import orientation
+
+        try:
+            rows = self._conn.execute(
+                "SELECT p.path FROM photo_paths p JOIN photos ph"
+                " ON ph.file_hash = p.file_hash WHERE ph.orient_ignore_exif = 1"
+            ).fetchall()
+        except sqlite3.OperationalError:  # pragma: no cover - pre-v6 only
+            # A database that is about to be REJECTED for its version does not
+            # have the column. It has no corrections either, so clearing is
+            # the right answer rather than leaving a previous index's in place.
+            orientation.clear_overrides()
+            return 0
+        return orientation.load_overrides(Path(r["path"]) for r in rows)
+
+    def iter_unoriented(self) -> Iterator[Photo]:
+        """Rows no orientation pass has examined yet.
+
+        The resume predicate, exactly as `iter_unfingerprinted` is for
+        fingerprints: a row that has been examined - whichever way it came out
+        - is finished work and is not decoded again.
+
+        IMAGES ONLY. A video has no EXIF orientation tag this module can call
+        stale and is never decoded by `open_upright`, so it is out of scope
+        rather than failed: the first run over the reference library handed
+        1,117 of them to Pillow, recorded each as an error, and - because an
+        error is deliberately NOT stored as a verdict - would have re-opened
+        every one of them on every subsequent run, so the pass could never
+        report itself finished.
+        """
+        for row in self._conn.execute(
+            "SELECT * FROM photos WHERE orient_ignore_exif IS NULL AND media_type = 'image'"
+        ):
+            yield self._row_to_photo(row)
+
+    def set_orientations(self, rows: Iterable[tuple[str, bool, str]]) -> int:
+        """Record `(file_hash, ignore_exif, evidence_json)` verdicts.
+
+        **A verdict of True INVALIDATES that photo's fingerprint**, by nulling
+        the columns `iter_unfingerprinted` resumes on, so the next
+        `rekindle fingerprint` recomputes it. This is not tidiness: changing
+        the decode changes the pixels, and `phash`, `sharpness`, `brightness`,
+        `colour` and the stored `width`/`height` are all measurements OF those
+        pixels. Leaving them is how 2,503 sideways embedding vectors survived
+        an earlier orientation fix - there was no invalidation path at all,
+        and the store had to be deleted and rebuilt whole.
+
+        `phash_error` is cleared with them: a row that failed to decode before
+        should be re-attempted, because the reason may have been the decode
+        this verdict just changed.
+
+        The EMBEDDING store is a separate database and is not reached from
+        here. `rekindle semantic orient` prints the affected hashes for that
+        reason - see its `--redo` note.
+        """
+        cur = self._conn.cursor()
+        n = 0
+        for file_hash, ignore, evidence in rows:
+            cur.execute(
+                "UPDATE photos SET orient_ignore_exif = ?, orient_evidence = ?"
+                " WHERE file_hash = ?",
+                (1 if ignore else 0, evidence, file_hash),
+            )
+            if ignore:
+                cur.execute(
+                    "UPDATE photos SET phash = NULL, sharpness = NULL, brightness = NULL,"
+                    " colour = NULL, phash_error = NULL WHERE file_hash = ?",
+                    (file_hash,),
+                )
+            n += 1
+        self._conn.commit()
+        self._load_orientation_overrides()
+        return n
+
+    def orientation_review_queue(self, limit: int = 40) -> list[tuple[Path, dict]]:
+        """Files whose tag the content DISAGREES with, but not decisively.
+
+        The near misses, ranked by how close they came. These are the ones the
+        arithmetic cannot commit to and a human can settle by looking - which
+        is not a hypothetical: the three files that prompted this whole
+        mechanism (a dim, crowded Diwali evening, where the detector is weak
+        in both orientations) sit at the top of this list and NOT in the set
+        the pass corrects.
+
+        Reads only the evidence the pass already stored. No detector, no
+        decode, no model - so it works on a machine that has none of them.
+        """
+        import json as _json
+
+        rows = self._conn.execute(
+            "SELECT paths, orient_evidence FROM photos"
+            " WHERE orient_ignore_exif = 0 AND orient_evidence IS NOT NULL"
+        ).fetchall()
+        out = []
+        for row in rows:
+            blob = _json.loads(row["orient_evidence"])
+            # Only files that carry an axis-swapping tag AND scored better
+            # without it. A negative margin is the picture AGREEING with its
+            # own metadata, which is the overwhelmingly common case and is
+            # not a near miss by any reading.
+            if blob.get("tag") is None or blob.get("margin", 0) <= 0:
+                continue
+            paths = _json.loads(row["paths"])
+            if paths:
+                out.append((Path(paths[0]), blob))
+        out.sort(key=lambda t: -t[1]["margin"])
+        return out[:limit]
+
+    def orientation_counts(self) -> dict[str, int]:
+        """`{examined, ignoring_exif}`, for the doctor and the pass report."""
+        row = self._conn.execute(
+            "SELECT COUNT(orient_ignore_exif) AS examined,"
+            " COALESCE(SUM(orient_ignore_exif), 0) AS ignoring FROM photos"
+        ).fetchone()
+        return {"examined": int(row["examined"]), "ignoring_exif": int(row["ignoring"])}
 
     @staticmethod
     def _index_path(cur: sqlite3.Connection | sqlite3.Cursor, digest: str, path: Path) -> None:

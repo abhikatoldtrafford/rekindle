@@ -82,7 +82,7 @@ def test_v2_database_migrates_to_v5_keeping_every_prior_value(tmp_path):
     _write_v2_database(db)
 
     with PhotoStore(db) as store:
-        assert store.schema_version() == SCHEMA_VERSION == 5
+        assert store.schema_version() == SCHEMA_VERSION == 6
         photo = store.get("v2row")
 
     assert photo is not None
@@ -129,7 +129,7 @@ def _fingerprinted_v4(db):
     """A v4 database holding one measured row and one row that failed."""
     _write_v2_database(db)
     with PhotoStore(db) as store:
-        assert store.schema_version() == 5  # v2 -> v5 on open
+        assert store.schema_version() == 6  # v2 -> v6 on open
         store.set_fingerprints(
             [
                 FingerprintRow(
@@ -161,7 +161,7 @@ def test_v5_clears_every_measurement_taken_on_the_old_scale(tmp_path):
     _fingerprinted_v4(db)
 
     with PhotoStore(db) as store:
-        assert store.schema_version() == 5
+        assert store.schema_version() == 6
         meta = store.get("v2row").meta
 
     assert meta.sharpness is None

@@ -142,6 +142,29 @@ class PhotoIndexReader:
         except BaseException:
             self._conn.close()
             raise
+        self._load_orientation_overrides()
+
+    def _load_orientation_overrides(self) -> None:
+        """Install this index's stale-tag corrections into `meta.orientation`.
+
+        The same call `db.PhotoStore` makes, for the same reason: the embedder
+        and the face gate decode through `meta.exif.open_upright`, which takes
+        a Path and no index handle, so the corrections have to be installed
+        when the index is opened. Silently a no-op on an index written before
+        schema v6 - this reader has never enforced a version and does not
+        start here.
+        """
+        from rekindle.meta import orientation
+
+        try:
+            rows = self._conn.execute(
+                "SELECT p.path FROM photo_paths p JOIN photos ph"
+                " ON ph.file_hash = p.file_hash WHERE ph.orient_ignore_exif = 1"
+            ).fetchall()
+        except sqlite3.DatabaseError:
+            orientation.clear_overrides()
+            return
+        orientation.load_overrides(Path(r["path"]) for r in rows)
 
     def _require_columns(self) -> None:
         try:

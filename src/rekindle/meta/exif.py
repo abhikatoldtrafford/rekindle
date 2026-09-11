@@ -10,6 +10,7 @@ from pathlib import Path
 
 from PIL import Image, ImageOps
 
+from rekindle.meta import orientation
 from rekindle.models import Gps
 
 # Without this, Image.open on a HEIC raises, read_exif swallows it, and every
@@ -60,14 +61,34 @@ def open_upright(path: Path, *, draft: tuple[int, int] | None = None) -> Image.I
 
     Never applies the tag twice, and never raises anything `Image.open` would
     not: callers keep their existing error handling.
+
+    ONE FILE-LEVEL EXCEPTION: some files are stored already upright and still
+    carry a 90/270-degree tag, so applying it turns a correct photograph on
+    its side. `meta.orientation` proves that from image content and records
+    it against the file; where it has, the tag is IGNORED and the stored
+    pixels are handed back as they are. With no such record - every CI run,
+    every library the pass has not been run on - this is exactly the function
+    it has always been. See `meta.orientation` for the rule and its measured
+    precision, and note that a photograph whose decode changes here needs its
+    fingerprint and its embedding recomputed.
     """
+    ignore_tag = orientation.ignores_exif(path)
     with Image.open(path) as im:
         if draft is not None:
             target = draft
-            if im.getexif().get(_ORIENTATION) in _SWAPS_AXES:
+            # `draft` arrives in the axis order of the UPRIGHT image. When the
+            # tag is being ignored, the stored pixels ARE that image, so the
+            # order already matches and transposing it here would ask libjpeg
+            # for the wrong scale - the same defect the transpose exists to
+            # avoid, in the other direction.
+            if not ignore_tag and im.getexif().get(_ORIENTATION) in _SWAPS_AXES:
                 target = (draft[1], draft[0])
             # A no-op on every format but JPEG, so it is safe unconditionally.
             im.draft("RGB", target)
+        if ignore_tag:
+            # `copy()` loads, so a truncated file raises OSError HERE, inside
+            # every caller's try, exactly as `exif_transpose` does below.
+            return im.copy()
         # `exif_transpose` always returns a NEW, already-loaded image - it
         # either transposes (which loads) or copies (which loads) - so the
         # result outlives the `with` and a truncated file raises OSError
@@ -166,7 +187,13 @@ def read_exif(path: Path) -> ExifData:
                 # stored dimensions against the pixels a viewer actually sees -
                 # w*h is invariant under the swap, so even the dedup tiebreak
                 # that reads them could not notice.
-                if exif.get(_ORIENTATION) in _SWAPS_AXES:
+                #
+                # A file whose tag `meta.orientation` has proved STALE is not
+                # swapped: its stored pixels are already the upright ones, so
+                # swapping here would make the index disagree with what
+                # `open_upright` now hands back - and a canvas sized from the
+                # index would not match the frame drawn from the file.
+                if exif.get(_ORIENTATION) in _SWAPS_AXES and not orientation.ignores_exif(path):
                     width, height = height, width
                 sub = exif.get_ifd(_EXIF_IFD)
                 gps_ifd = exif.get_ifd(_GPS_IFD)
