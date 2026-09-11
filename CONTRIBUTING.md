@@ -101,7 +101,8 @@ invisible to 700 passing tests and obvious within one run against real data.
 If you have an index, the memory engine has its own conformance suite:
 
 ```bash
-REKINDLE_MEMORY_DB=data/rekindle.sqlite uv run pytest     tests/test_memory_conformance.py -v
+REKINDLE_MEMORY_DB=data/rekindle.sqlite uv run pytest \
+    tests/test_memory_conformance.py -v
 ```
 
 Both decision logs record the defects, the judgement calls and the testing
