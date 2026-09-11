@@ -434,3 +434,69 @@ store should be filled with one batch size throughout**: the reference store was
 built at 64 and a rebuild at the default 32 reproduced only 25 of 18,201 vectors
 bit-for-bit (worst cosine 0.99902). Nothing detects this, and nothing needs to;
 it is recorded so the next person measuring agreement does not chase it.
+
+
+## M4 — prompt memories
+
+### The refusal gate is shipped disabled, and the reason is a measurement
+
+`prompt.tag_agreement` is computed, printed, and **used for nothing**. It was
+the eighth statistic tested as a refusal signal on this library and the eighth
+to fail: over 16 concepts the library holds and 16 it does not, the
+distributions overlap almost completely (present 0.10–0.86 median 0.49; absent
+0.05–0.81 median 0.41), and the best available threshold refuses 7 of 16 absent
+concepts while wrongly refusing 2 of 16 present ones — 66% accuracy against a
+50% base rate. Among concepts described by three or more tags the direction
+reverses.
+
+`tests/test_prompt_real.py::test_tag_agreement_does_not_separate_present_from_absent`
+re-measures it and fails if it ever starts working, which is the point: that
+would be news, not a green light. **Do not add a threshold here without
+repeating the 16-vs-16 evaluation and writing the numbers down.**
+
+Pool size separates the two sets at 88% accuracy and is *not* shipped: the
+threshold falls exactly on the largest present value with zero margin, and a
+raw pool size is a library-scale quantity, which is the absolute-magnitude trap
+that killed the earlier seven signals in a different costume.
+
+### Deferred, with the measurement that deferred it
+
+- **No place filter and no gazetteer.** GeoNames `cities1000` would name 11 of
+  this library's 12 GPS clusters and resolve the user's own spelling
+  "midnapur", but the payoff for the query that motivates it is 8 photos from
+  one morning of 2019 — about 2 after burst dedup, below `MIN_SHOTS`. It needs
+  a fetch command, a checksum, a CC BY 4.0 attribution obligation, a reverse
+  geocode at index time and a `places` table, and it is its own milestone. The
+  CLI says "this word narrowed nothing" instead. **CLIP is worse than a
+  constant predictor at place** — 46.0% on 7-way classification against a 62.5%
+  majority baseline — so do not try to substitute it.
+- **Tag consensus is a small step BACKWARDS on a concept CLIP already
+  resolves.** `durga puja` straight to the encoder gives 23 of 24 correct
+  shots; the best hand-written tag set alone gives 17. The corpus month window
+  is what recovers it to 24. Nothing detects which case a prompt is in, and
+  nothing chooses between them.
+- **Day expansion assumes a capture day is one coherent event.** A day holding
+  a pandal visit *and* an unrelated lunch pulls the lunch in. The shipped Durga
+  Puja memory contains two shots of a college lawn for exactly this reason.
+  **Nobody has measured how often it happens.**
+- **`MIN_SEEDS` is nearly inert** now that the day quorum exists, and is kept
+  at 2 only because it is free. Do not describe it as load-bearing; the plan
+  did, and measurement disagreed.
+- **`SEED_K`, `TAG_K` and the quorum were not swept.** Two tag sets, three
+  prompts, three values of `min_seeds`. The right values may differ by prompt
+  shape.
+- **The LLM plausibility gate is unmeasured.** It is implemented, biased hard
+  towards accepting, and refuses nothing on an unparseable reply — but it needs
+  an API key and the session that wrote it had none. It has never been run
+  against a real model.
+- **`minority_orientation` is an untaxed cost on this path.** A 15-year
+  semantic pool is near a coin-flip on orientation while an album is one shoot,
+  so `composition.py` discards 20-30% of a prompt pool wholesale: 349 photos on
+  the shipped Durga memory, 235 on the Kali one. It did not starve any measured
+  prompt; it is not proven safe on a thin one.
+- **No video, ever.** All 1,117 videos are unembedded, so the search cannot see
+  them. The CLI says so on every build rather than leaving it here.
+- **The tag cache has no eviction, no versioning and no size bound.** A user
+  who types a thousand prompts gets a thousand entries in
+  `data/prompt_tags.json`. Fine at the scale anyone will reach by hand; not
+  fine if prompts are ever generated.

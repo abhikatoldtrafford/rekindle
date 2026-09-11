@@ -192,6 +192,39 @@ uv run rekindle semantic rank --album Kashmir -k 40
 uv run rekindle semantic facegate               # propose face-free photos
 ```
 
+### Memories from your own words (optional)
+
+With the semantic extra installed and the library embedded:
+
+```bash
+uv run rekindle memory "durga puja over the years"
+```
+
+**Your words never go to the model that looks at your photos.** A prompt is
+turned into *visual descriptions* — what such a photograph would look like —
+and each of those is searched separately. A photo then ranks by how many of
+those descriptions agree on it. That is not a flourish: "Durga Puja" and "Kali
+Puja" are nearly the same string to an image-text model, and searching the
+names put nine of twenty-four shots of a Kali Puja memory on a Durga Puja day.
+A ten-armed goddess with a lion and a black goddess with a red tongue are not
+close at all. Measured again with the descriptions: none.
+
+The descriptions come from a checked-in
+[festival corpus](src/rekindle/memory/corpus/festivals.toml) and a checked-in
+[tag cache](src/rekindle/memory/corpus/prompt_tags.json) — both editable data
+files, both working with no API key. Set `OPENAI_API_KEY` and anything they do
+not cover is described by a language model once and cached, so the same prompt
+gives the same memory forever.
+
+**A prompt memory is a preview, never an offer.** It is built only when you
+ask for it by name. It never appears in `rekindle memories` and `--auto` will
+never show you one, because **nothing can check that the photos match your
+words** — eight statistics have now been tested as a refusal signal on the
+reference library and all eight failed. So the command prints what it searched
+for, which days it found, the month and year histogram of what it built, and
+then says: *look at the memory before you keep it.* The whole measurement is
+in [the decision log](docs/decision-log-prompt-memories.md).
+
 `semantic setup` is the only command in rekindle that makes a network
 request. Every other command loads from the local cache and fails with a
 message if something is missing, rather than downloading 1.7 GB you did not
@@ -291,6 +324,16 @@ We'd rather tell you than let you find out:
   v1 deliberately does not have.
 - **Videos do not appear in memories.** They carry no stored dimensions and no
   perceptual hash, and rendering one needs ffmpeg, which stays optional.
+- **Nothing verifies that a prompt memory matches your prompt.** `rekindle
+  memory "scuba diving underwater"` builds a perfectly confident 24-shot
+  memory from a library with no scuba photographs in it. Eight statistics have
+  been tested as a refusal signal and none separates a concept the library
+  holds from one it does not, so no threshold ships. A prompt memory is a
+  preview you are expected to look at.
+- **A prompt cannot filter by place.** There is no gazetteer, so a place name
+  in a prompt is searched for as a *picture* and nothing else. `christmas in
+  midnapur` builds a good Christmas memory across seven Decembers, none of
+  which is filtered by where it was taken, and the command says so.
 
 ## Privacy
 

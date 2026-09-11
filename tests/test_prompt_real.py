@@ -284,3 +284,75 @@ def test_every_corpus_festival_finds_something_in_this_library(index, retrieve):
         if build.seed_days:
             found += 1
     assert found >= 4, f"only {found} corpus festivals found any day in this library"
+
+
+# --------------------------------------------------------------------------
+# The refusal gate, measured rather than asserted
+#
+# Seven statistics had already been tested as refusal signals on this library
+# before this milestone and all seven failed. Tag agreement was the eighth,
+# and the one reason to hope: it is built from how much INDEPENDENT
+# descriptions of a concept converge, which does not depend on absolute
+# scores the way the other seven did.
+#
+# It failed too. The test below re-measures it and asserts that it STILL
+# fails, which sounds perverse and is not: the failure is the thing the
+# product shape rests on. If a future change made `tag_agreement` separate
+# present from absent concepts, this test failing is how anyone would find
+# out, and the right response would be to re-read the numbers here and then
+# think very hard, not to switch a gate on.
+
+
+def _gate_concepts():
+    import json
+
+    raw = json.loads(
+        (Path(__file__).parent / "fixtures" / "prompt_gate_concepts.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    present = {name: tags.read_caches().get(name) for name in raw["present"]}
+    missing = [n for n, v in present.items() if not v]
+    assert not missing, f"the starter cache no longer describes {missing}"
+    return present, raw["absent"]
+
+
+def test_tag_agreement_does_not_separate_present_from_absent(index, retrieve):
+    present_concepts, absent_concepts = _gate_concepts()
+    assert len(present_concepts) == 16 and len(absent_concepts) == 16
+
+    def agreement_of(concept, concept_tags):
+        query = prompt.parse(concept, index)
+        build = prompt.build_selection(index, query, concept_tags, retrieve)
+        return build.agreement
+
+    present = [agreement_of(c, t) for c, t in present_concepts.items()]
+    absent = [agreement_of(c, t) for c, t in absent_concepts.items()]
+
+    # The distributions overlap almost completely. Asserted as a RANGE
+    # overlap rather than as medians, so a re-embedded store moving every
+    # number a little cannot fail this for the wrong reason.
+    assert min(absent) < max(present) and min(present) < max(absent)
+
+    # And no threshold does better than this, which is barely better than a
+    # coin. Anything above about 0.8 here would mean a usable gate exists and
+    # the product shape should be reconsidered from the evidence.
+    best = 0.0
+    for threshold in sorted(set(present + absent)):
+        refused_absent = sum(1 for value in absent if value < threshold)
+        refused_present = sum(1 for value in present if value < threshold)
+        best = max(best, (refused_absent + (len(present) - refused_present)) / 32)
+    assert best < 0.8, (
+        f"tag agreement now separates present from absent at {best:.0%} accuracy. "
+        "Re-read docs/decision-log-prompt-memories.md before acting on that."
+    )
+
+
+def test_the_gate_evaluation_is_not_vacuous(index, retrieve):
+    """Guards the test above: the absent concepts really do retrieve photos,
+    so the overlap is not an artefact of one side returning nothing."""
+    _, absent_concepts = _gate_concepts()
+    for concept, concept_tags in absent_concepts.items():
+        query = prompt.parse(concept, index)
+        build = prompt.build_selection(index, query, concept_tags, retrieve)
+        assert build.pool > 0, f"{concept} retrieved nothing at all"
