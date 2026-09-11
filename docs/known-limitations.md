@@ -147,11 +147,26 @@ M1 made the enrichment verdict **retractable** — a date the user corrects in
 Google Photos now clears the flag, where `or` had made it permanent. Because
 there is one boolean and no record of which comparison set it, that recompute
 also clears a *description* conflict `merge_meta` had raised on a photo
-enrichment then dates. The window is narrow (it needs two copies of one file
-carrying different XMP descriptions, and 0 rows on the reference export have
-any XMP description at all) and the alternative — never retracting — was the
-worse bug. **M2 should split the flag by cause** rather than widening either
-side of this trade.
+enrichment then dates. The window is narrow (0 rows on the reference export
+have any XMP description at all) but reachable two ways, not one: two copies
+of one file carrying different XMP descriptions (`FolderSource`'s same-bytes-
+in-two-folders case), **or a single copy re-indexed**: after `enrich` writes
+Google's description onto the row, the next `index` calls `merge_meta(stored,
+freshly-scanned)`, whose description clause compares that just-written value
+against the file's own (unchanged) XMP description and raises the flag, and
+the following `enrich` clears it — no second copy involved at all. The
+alternative to retracting — never doing so — was the worse bug. **M2 should
+split the flag by cause** rather than widening either side of this trade.
+
+Residual 3 fixed a narrower, separate defect on the same flag: `conflicts`/
+`conflicts_retracted` (the *counters* `doctor` prints, not the flag itself)
+used to read this shared, cause-blind boolean directly, so a description-
+caused flip of it was mis-credited as a date conflict retracting (or a
+genuine new date conflict on an already-flagged row was silently dropped).
+The counters now re-derive the prior DATE-only verdict from the fields that
+comparison actually reads, so they credit only what their labels say. The
+flag itself is unchanged by that fix and still carries both causes as
+described above.
 
 ## Album collision detection is metadata-only, not folder-name-complete
 

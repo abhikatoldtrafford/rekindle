@@ -498,6 +498,31 @@ def apply_sidecar(
             was_naive = meta.tz_source is TzSource.EXIF_NAIVE or (
                 meta.tz_source is TzSource.TAKEOUT and meta.exif_taken_at_utc is not None
             )
+            # `photo.metadata_conflict` is one boolean for two causes (date
+            # AND description, see docs/known-limitations.md) - a re-index
+            # between two enrich runs can OR a DESCRIPTION conflict onto it
+            # via `models.merge_meta` without touching any of the four fields
+            # read below. Gating `conflicts`/`conflicts_retracted` on that
+            # combined flag credits or blames the DATE row for a change that
+            # was never about a date. Re-deriving what THIS check's own
+            # verdict was last time - from the same fields it is about to
+            # overwrite, snapshotted before that happens - gates both
+            # counters on the date cause alone, with no new stored field:
+            # `apply_sidecar` is idempotent (see docstring), so replaying its
+            # own formula against the untouched prior state reproduces
+            # exactly what it last concluded.
+            previous_exif = meta.exif_taken_at_utc
+            previous_utc = meta.taken_at_utc
+            previous_local = meta.taken_at_local
+            previous_conflict = False
+            if previous_exif is not None and previous_utc is not None:
+                previous_normalised = previous_exif
+                if was_naive and previous_local is not None:
+                    previous_offset = previous_local.utcoffset()
+                    if previous_offset is not None:
+                        previous_normalised = previous_exif - previous_offset
+                previous_conflict = abs(previous_normalised - previous_utc) > CONFLICT_TOLERANCE
+
             # Keep the displaced EXIF instant BEFORE overwriting it, and only
             # on the first enrich - on a re-run taken_at_utc is already
             # Google's, and copying that here would erase the real one.
@@ -531,9 +556,9 @@ def apply_sidecar(
                     if offset is not None:
                         normalised = meta.exif_taken_at_utc - offset
                 conflict = abs(normalised - utc) > CONFLICT_TOLERANCE
-                if conflict and not photo.metadata_conflict:
+                if conflict and not previous_conflict:
                     report.conflicts += 1
-                elif photo.metadata_conflict and not conflict:
+                elif previous_conflict and not conflict:
                     report.conflicts_retracted += 1
                 # ASSIGNED, not OR-ed. `or` is monotonic, so a date the user
                 # later corrects in Google Photos stays flagged forever - and

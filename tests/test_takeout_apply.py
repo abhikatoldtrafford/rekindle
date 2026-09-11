@@ -90,6 +90,69 @@ def test_a_genuinely_different_instant_is_a_conflict_and_is_retained():
     assert report.conflicts == 1
 
 
+def test_a_description_only_conflict_is_not_credited_as_a_date_retraction():
+    """Residual 3: `metadata_conflict` is one boolean for two causes (date
+    and description, see docs/known-limitations.md). A re-index between two
+    enrich runs can OR a DESCRIPTION conflict onto the flag via
+    `models.merge_meta` without touching `taken_at_utc`/`exif_taken_at_utc`/
+    `tz_source`/`taken_at_local` at all - so a `photo.metadata_conflict`
+    that is already True going into `apply_sidecar` is not proof of a PRIOR
+    date conflict. The old gate (`elif photo.metadata_conflict and not
+    conflict`) trusted it anyway and mis-credited a description-only
+    clearing as "EXIF/Google conflicts retracted".
+
+    MUTATION (run, not assumed): replace `previous_conflict` with
+    `photo.metadata_conflict` in both branches of the gate in
+    `apply_sidecar` and this fails with `conflicts_retracted 1 != 0`.
+    """
+    google = datetime(2020, 3, 11, 15, 30, tzinfo=UTC)
+    photo = _photo(
+        PhotoMeta(
+            taken_at_utc=google,
+            taken_at_local=datetime(2020, 3, 11, 21, 0, tzinfo=IST),
+            tz_source=TzSource.EXIF_OFFSET,
+        )
+    )
+    # Simulates a re-index that OR'd a description conflict onto the flag -
+    # nothing about the date fields above changed.
+    photo.metadata_conflict = True
+    report = EnrichReport()
+    apply_sidecar(photo, _sidecar(taken_at_utc=google), frozenset(), report)
+    assert report.conflicts == 0
+    assert report.conflicts_retracted == 0
+    # The flag-clearing itself is unchanged and deliberately out of scope
+    # (docs/known-limitations.md) - only the COUNTER is fixed here.
+    assert photo.metadata_conflict is False
+
+
+def test_a_new_date_conflict_is_still_credited_on_a_row_already_flagged():
+    """Symmetric to the test above: a genuine NEW date conflict on a row
+    already flagged for a description reason must still increment
+    `conflicts` - the old gate (`if conflict and not
+    photo.metadata_conflict`) silently ate this because the flag was
+    already True.
+
+    MUTATION (run, not assumed): replace `previous_conflict` with
+    `photo.metadata_conflict` in both branches of the gate in
+    `apply_sidecar` and this fails with `conflicts 0 != 1`.
+    """
+    exif = datetime(2016, 6, 24, 9, 47, 33, tzinfo=UTC)
+    photo = _photo(PhotoMeta(taken_at_utc=exif, taken_at_local=exif, tz_source=TzSource.EXIF_NAIVE))
+    # A description-only conflict already flagged this row - no date field
+    # was ever touched to produce it.
+    photo.metadata_conflict = True
+    report = EnrichReport()
+    apply_sidecar(
+        photo,
+        _sidecar(taken_at_utc=datetime(2020, 3, 14, 14, 17, 31, tzinfo=UTC)),
+        frozenset(),
+        report,
+    )
+    assert photo.metadata_conflict is True
+    assert report.conflicts == 1
+    assert report.conflicts_retracted == 0
+
+
 def test_a_clustered_google_date_does_not_override_a_real_exif_date():
     """618 real sidecars share one second. They did not fire together."""
     exif = datetime(2016, 6, 24, 9, 47, 33, tzinfo=UTC)
