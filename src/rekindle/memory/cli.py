@@ -178,6 +178,7 @@ def memory_cmd(
     music: Path | None,
     no_mp4: bool,
     limit: int,
+    captions: str = "deterministic",
     today: datetime | None = None,
 ) -> None:
     store, index = open_index(data_dir, public_safe=public_safe)
@@ -220,12 +221,56 @@ def memory_cmd(
             _render_build_report(report)
             return
 
+        specs = _maybe_caption(specs, captions)
         for spec in specs:
             _render_one(spec, index, out_dir, gif_frames, music, no_mp4)
             state.record_surfaced(memory_id(spec.recipe, spec.key), title=spec.title)
         _render_build_report(report)
     finally:
         store.close()
+
+
+def _maybe_caption(specs: list[MemorySpec], mode: str) -> list[MemorySpec]:
+    """The ONE place the optional LLM layer is reached from.
+
+    Off unless `--captions gpt`. A missing key, an unreachable service or a
+    rejected caption all fall back to the deterministic captions with a
+    warning and exit 0 - `rekindle` must keep working for everyone who never
+    sets an API key, which is the default configuration.
+    """
+    if mode != "gpt":
+        return specs
+
+    from rekindle.memory.llm import LLMUnavailable, apply_captions, captioner_from_env
+
+    try:
+        captioner = captioner_from_env()
+    except LLMUnavailable as exc:
+        console.print(f"[yellow]![/yellow] {exc}")
+        return specs
+
+    out: list[MemorySpec] = []
+    accepted = requested = 0
+    rejected: dict[str, int] = {}
+    for spec in specs:
+        rewritten, report = apply_captions(spec, captioner)
+        out.append(rewritten)
+        accepted += report.accepted
+        requested += report.requested
+        for reason, count in report.rejected.items():
+            rejected[reason] = rejected.get(reason, 0) + count
+        if report.error:
+            console.print(f"[yellow]![/yellow] {report.error}")
+            # One failure means the service is unreachable; stop asking.
+            out.extend(specs[len(out) :])
+            break
+    detail = ", ".join(f"{n} {r}" for r, n in sorted(rejected.items()))
+    console.print(
+        f"[dim]GPT captions: {accepted}/{requested} accepted"
+        + (f"; rejected {detail}" if detail else "")
+        + "[/dim]"
+    )
+    return out
 
 
 def _render_build_report(report: engine.BuildReport) -> None:

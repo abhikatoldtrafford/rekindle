@@ -200,11 +200,25 @@ def memory(
         bool, typer.Option("--no-mp4", help="Skip the MP4 even if ffmpeg is here.")
     ] = False,
     limit: Annotated[int, typer.Option("--limit", help="Maximum memories to build.")] = 1,
+    captions: Annotated[
+        str,
+        typer.Option(
+            "--captions",
+            help=(
+                "'deterministic' (default) or 'gpt'. GPT sees only the fact "
+                "sheet - never your photos - and needs OPENAI_API_KEY."
+            ),
+        ),
+    ] = "deterministic",
     data_dir: DataDir = Path("./data"),
 ) -> None:
     """Build one or more memories into a folder. Renders a GIF, and an MP4 if
     ffmpeg is on PATH."""
     from rekindle.memory.cli import memory_cmd
+
+    if captions not in ("deterministic", "gpt"):
+        console.print(f"[red]--captions must be 'deterministic' or 'gpt', not {captions!r}[/red]")
+        raise typer.Exit(code=2)
 
     memory_cmd(
         _resolved(data_dir),
@@ -218,6 +232,7 @@ def memory(
         music,
         no_mp4,
         limit,
+        captions,
     )
 
 

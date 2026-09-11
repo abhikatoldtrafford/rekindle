@@ -506,3 +506,128 @@ def test_watch_once_prints_and_renders_nothing(tmp_path):
     assert result.exit_code == 0, result.output
     assert "Watching" in result.output
     assert list(out.iterdir()) == [], "the watcher must never render anything"
+
+
+# --------------------------------------------------------------------------
+# the optional GPT caption layer, from the CLI
+
+
+def test_captions_defaults_to_deterministic_and_makes_no_network_call(tmp_path, monkeypatch):
+    """The default configuration makes no network calls at all. Asserted by
+    forbidding sockets for the whole invocation."""
+    import socket
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("the default configuration attempted a network call")
+
+    monkeypatch.setattr(socket, "socket", forbidden)
+    monkeypatch.setattr(socket, "create_connection", forbidden)
+
+    data = _library(tmp_path)
+    result = runner.invoke(
+        app,
+        [
+            "memory",
+            "--recipe",
+            "album_story",
+            "--key",
+            "Kashmir",
+            "--no-mp4",
+            "--out",
+            str(tmp_path / "o"),
+            "--data-dir",
+            str(data),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+
+
+def test_an_unknown_captions_mode_exits_2(tmp_path):
+    data = _library(tmp_path)
+    result = runner.invoke(
+        app,
+        [
+            "memory",
+            "--captions",
+            "magic",
+            "--recipe",
+            "album_story",
+            "--key",
+            "Kashmir",
+            "--no-mp4",
+            "--out",
+            str(tmp_path / "o"),
+            "--data-dir",
+            str(data),
+        ],
+    )
+    assert result.exit_code == 2
+    assert "deterministic" in result.output
+
+
+def test_captions_gpt_without_a_key_falls_back_cleanly(tmp_path, monkeypatch):
+    """A missing key is a supported configuration, not an error: deterministic
+    captions, one warning, exit 0."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    data = _library(tmp_path)
+    out = tmp_path / "o"
+    result = runner.invoke(
+        app,
+        [
+            "memory",
+            "--captions",
+            "gpt",
+            "--recipe",
+            "album_story",
+            "--key",
+            "Kashmir",
+            "--no-mp4",
+            "--out",
+            str(out),
+            "--data-dir",
+            str(data),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert "OPENAI_API_KEY is not set" in result.output
+    assert (next(iter(out.iterdir())) / "memory.gif").is_file()
+
+
+def test_deleting_the_llm_module_leaves_a_working_product(tmp_path, monkeypatch):
+    """The test of whether the layer is really ADDITIVE.
+
+    Simulates `rm src/rekindle/memory/llm.py` by making its import fail, then
+    builds and renders a memory. If anything outside the --captions gpt path
+    reached into it, this breaks.
+    """
+    import builtins
+
+    real_import = builtins.__import__
+
+    def refuse(name, *args, **kwargs):
+        if name == "rekindle.memory.llm" or name.endswith(".llm"):
+            raise ModuleNotFoundError("No module named 'rekindle.memory.llm'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", refuse)
+    monkeypatch.delitem(__import__("sys").modules, "rekindle.memory.llm", raising=False)
+
+    data = _library(tmp_path)
+    out = tmp_path / "o"
+    result = runner.invoke(
+        app,
+        [
+            "memory",
+            "--recipe",
+            "album_story",
+            "--key",
+            "Kashmir",
+            "--no-mp4",
+            "--out",
+            str(out),
+            "--data-dir",
+            str(data),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert (next(iter(out.iterdir())) / "memory.gif").is_file()
