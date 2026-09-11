@@ -127,7 +127,7 @@ class TorchEncoder:
         pin = spec.pin("torch")
         kwargs: dict[str, object] = {
             "revision": pin.revision,
-            "local_files_only": False,
+            "local_files_only": not allow_download,
         }
         if cache_dir is not None:
             kwargs["cache_dir"] = str(cache_dir)
