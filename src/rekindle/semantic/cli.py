@@ -22,6 +22,7 @@ from rich.table import Table
 
 from rekindle.semantic.availability import SemanticUnavailable
 from rekindle.semantic.embed import PREFETCH_BATCHES
+from rekindle.semantic.faces import DEFAULT_GATE_WORKERS
 
 #: Exit code for "the optional dependency or the model is not here". Distinct
 #: from 2 ("you pointed me at the wrong thing"), because a wrapper script
@@ -570,6 +571,10 @@ def semantic_facegate(
     detect_threshold: Annotated[float, typer.Option("--detect-threshold")] = 0.45,
     gate_threshold: Annotated[float, typer.Option("--gate-threshold")] = 0.15,
     face: Annotated[str | None, typer.Option("--face-model")] = None,
+    workers: Annotated[
+        int,
+        typer.Option("--workers", help="Decode+detect threads. 4 measured best on 6 cores."),
+    ] = DEFAULT_GATE_WORKERS,
     untagged_only: Annotated[
         bool,
         typer.Option("--untagged-only/--all", help="Only photos with no face tag at all."),
@@ -606,6 +611,7 @@ def semantic_facegate(
                 detect_threshold=detect_threshold,
                 gate_threshold=gate_threshold,
                 allow_people=tuple(allow or ()),
+                workers=workers,
                 progress=tick,
             )
     finally:

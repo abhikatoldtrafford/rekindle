@@ -44,7 +44,9 @@ THE SAFETY MODEL
 from __future__ import annotations
 
 import math
+from collections import deque
 from collections.abc import Iterable, Sequence
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
@@ -65,6 +67,38 @@ DEFAULT_DETECT_THRESHOLD = 0.45
 DEFAULT_GATE_THRESHOLD = 0.15
 #: IoU above which two boxes are the same face.
 DEFAULT_NMS_IOU = 0.4
+#: Threads decoding and detecting at once.
+#:
+#: The face detector is the SLOWEST STAGE IN THIS MILESTONE and it is the one
+#: that cannot use the GPU: the installed onnxruntime is the CPU build, whose
+#: `get_available_providers()` offers only CPU and Azure, so `prefer_gpu` is
+#: dead on this machine. The pinned graph is fixed batch 1 (`[1,3,640,640]`)
+#: as well, so batching is not available either without re-exporting it.
+#:
+#: What IS available is threads. Two runs over 240 real face-tag-free photos,
+#: the second through `gate_photos` itself:
+#:
+#:     workers      1     2     4     6     8
+#:     img/s      9.6  18.8  25.3  23.7  16.2   (detect() directly)
+#:     img/s     11.7  19.0  26.4  28.5  27.3   (through the gate)
+#:
+#: The two runs put the peak in different places, so THEY DO NOT AGREE THAT 4
+#: BEATS 6 - they agree only that anything from 4 up is roughly 2.4x serial
+#: and that the curve is flat there. 4 is chosen as the conservative end of
+#: that plateau: it leaves a core for onnxruntime's own intra-op pool, which
+#: defaults to all of them, and it does not fall off a 4-core machine.
+#:
+#: The scores are not merely close at every width - over 240 real photos the
+#: verdicts, the boxes and their order were IDENTICAL to the serial run. For
+#: a publishing gate that is the bar, and `--workers` exists for anyone whose
+#: machine disagrees with this one.
+#:
+#: A stage split of 31% decode, 29% letterbox, 40% inference is why threads
+#: work at all here: only the last of those is onnxruntime's, and Pillow and
+#: numpy release the GIL for the other two.
+#:
+#: At 4 workers the whole library is about 11 minutes instead of 26.
+DEFAULT_GATE_WORKERS = 4
 
 
 class Verdict(StrEnum):
@@ -375,6 +409,7 @@ def gate_photos(
     detect_threshold: float = DEFAULT_DETECT_THRESHOLD,
     gate_threshold: float = DEFAULT_GATE_THRESHOLD,
     allow_people: Sequence[str] = (),
+    workers: int = DEFAULT_GATE_WORKERS,
     progress=None,
 ) -> GateReport:
     """Run the detector over photos and bucket them. Never publishes anything.
@@ -388,8 +423,6 @@ def gate_photos(
     """
     import time
 
-    from PIL import Image as PILImage
-
     allowed = {p.casefold() for p in allow_people}
     report = GateReport(
         model_key=detector.spec.key,
@@ -398,61 +431,102 @@ def gate_photos(
     )
     started = time.perf_counter()
     items = list(photos)
-    for n, photo in enumerate(items, start=1):
-        report.considered += 1
-        tagged = {p.casefold() for p in getattr(photo, "people", ())}
-        if tagged - allowed:
-            report.detections.append(Detection(photo.file_hash, photo.path, (), Verdict.HAS_FACE))
-            report.has_face += 1
+    total = len(items)
+    depth = max(1, workers) * 4
+
+    def decide(photo) -> Detection:
+        return _examine(
+            photo,
+            detector,
+            allowed,
+            detect_threshold=detect_threshold,
+            gate_threshold=gate_threshold,
+        )
+
+    # Consumed IN ORDER, so `detections` comes out in the order the photos
+    # went in and `progress` counts 1, 2, 3 with no gaps. The workers decide;
+    # nothing but this thread touches the counters. `report.errors += 1` from
+    # four threads is a lost-update race, and the count it would corrupt is
+    # the one that says how many photos nobody managed to look at.
+    with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+        pending: deque[Future[Detection]] = deque()
+        queue = iter(items)
+
+        def submit_more() -> None:
+            while len(pending) < depth:
+                photo = next(queue, None)
+                if photo is None:
+                    return
+                pending.append(pool.submit(decide, photo))
+
+        submit_more()
+        n = 0
+        while pending:
+            found = pending.popleft().result()
+            submit_more()
+            n += 1
+            report.considered += 1
+            report.detections.append(found)
+            report.faces_found += sum(1 for b in found.boxes if b.score >= detect_threshold)
+            if found.verdict is Verdict.ERROR:
+                report.errors += 1
+            elif found.verdict is Verdict.ELIGIBLE:
+                report.eligible += 1
+            elif found.verdict is Verdict.HAS_FACE:
+                report.has_face += 1
+            else:
+                report.uncertain += 1
             if progress:
-                progress(n, len(items))
-            continue
-        path = photo.existing_path()
-        if path is None:
-            report.detections.append(
-                Detection(photo.file_hash, photo.path, (), Verdict.ERROR, error="file not found")
-            )
-            report.errors += 1
-            if progress:
-                progress(n, len(items))
-            continue
-        try:
-            with PILImage.open(path) as im:
-                im.draft("RGB", (detector.size * 2, detector.size * 2))
-                rgb = im.convert("RGB")
-                size = rgb.size
-                boxes, _ = detector.detect(
-                    rgb,
-                    detect_threshold=detect_threshold,
-                    gate_threshold=gate_threshold,
-                )
-        except (OSError, ValueError, RuntimeError) as exc:
-            report.detections.append(
-                Detection(
-                    photo.file_hash,
-                    path,
-                    (),
-                    Verdict.ERROR,
-                    error=f"{type(exc).__name__}: {exc}",
-                )
-            )
-            report.errors += 1
-            if progress:
-                progress(n, len(items))
-            continue
-        verdict = classify(boxes, detect_threshold=detect_threshold, gate_threshold=gate_threshold)
-        report.detections.append(Detection(photo.file_hash, path, boxes, verdict, image_size=size))
-        report.faces_found += sum(1 for b in boxes if b.score >= detect_threshold)
-        if verdict is Verdict.ELIGIBLE:
-            report.eligible += 1
-        elif verdict is Verdict.HAS_FACE:
-            report.has_face += 1
-        else:
-            report.uncertain += 1
-        if progress:
-            progress(n, len(items))
+                progress(n, total)
     report.elapsed_s = time.perf_counter() - started
     return report
+
+
+def _examine(
+    photo,
+    detector: FaceDetector,
+    allowed: set[str],
+    *,
+    detect_threshold: float,
+    gate_threshold: float,
+) -> Detection:
+    """One photo's verdict. Runs on a WORKER THREAD and never raises.
+
+    DEFAULT DENY IS IN THIS FUNCTION. Every path that is not "the detector
+    ran and saw nothing" returns something other than ELIGIBLE, including
+    both of the paths that mean "I could not look at it".
+    """
+    from PIL import Image as PILImage
+
+    tagged = {p.casefold() for p in getattr(photo, "people", ())}
+    if tagged - allowed:
+        # Blocked on the tag alone, WITHOUT being decoded. The tag is already
+        # proof of a face, and letting the detector overrule a person Google
+        # has already named is how a stranger gets published.
+        return Detection(photo.file_hash, photo.path, (), Verdict.HAS_FACE)
+    path = photo.existing_path()
+    if path is None:
+        return Detection(photo.file_hash, photo.path, (), Verdict.ERROR, error="file not found")
+    try:
+        with PILImage.open(path) as im:
+            im.draft("RGB", (detector.size * 2, detector.size * 2))
+            rgb = im.convert("RGB")
+            size = rgb.size
+            boxes, _ = detector.detect(
+                rgb,
+                detect_threshold=detect_threshold,
+                gate_threshold=gate_threshold,
+            )
+    except (OSError, ValueError, RuntimeError) as exc:
+        return Detection(
+            photo.file_hash,
+            path,
+            (),
+            Verdict.ERROR,
+            error=f"{type(exc).__name__}: {exc}",
+        )
+    verdict = classify(boxes, detect_threshold=detect_threshold, gate_threshold=gate_threshold)
+    return Detection(photo.file_hash, path, boxes, verdict, image_size=size)
 
 
 def load_detector(

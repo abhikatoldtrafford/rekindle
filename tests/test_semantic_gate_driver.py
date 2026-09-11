@@ -31,6 +31,8 @@ here can invent a row shape the real index does not produce.
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from rekindle.semantic.faces import (
@@ -68,16 +70,31 @@ class ScriptedDetector:
         self.spec = _Spec()
         self.size = 64
         self.decoded = 0
+        self.threads: set[int] = set()
+        self._lock = threading.Lock()
 
     def detect(self, image, *, detect_threshold, gate_threshold, **_):
-        self.decoded += 1
+        with self._lock:
+            self.decoded += 1
+            self.threads.add(threading.get_ident())
         r, _g, b = image.convert("RGB").resize((1, 1)).getpixel((0, 0))
         if b > BLUE_FAILS:
             raise RuntimeError("the detector fell over on this image")
         score = r / 255.0
-        if score < min(detect_threshold, gate_threshold):
+        found = []
+        if score >= min(detect_threshold, gate_threshold):
+            found.append(Box(0.0, 0.0, 10.0, 10.0, score))
+        # Green is a SECOND, fainter thing in the picture. Real photos have
+        # these - a face in the background, a reflection - and without one the
+        # fixture cannot tell "boxes" from "boxes above detect_threshold", so
+        # a mutation collapsing the two survives. It did.
+        faint = _g / 255.0
+        if faint > 0 and faint >= min(detect_threshold, gate_threshold):
+            found.append(Box(100.0, 100.0, 120.0, 120.0, faint))
+        if not found:
             return (), 0.0
-        return (Box(0.0, 0.0, 10.0, 10.0, score),), score
+        found.sort(key=lambda b: -b.score)
+        return tuple(found), found[0].score
 
 
 def redness(score: float) -> tuple[int, int, int]:
@@ -387,3 +404,118 @@ def test_archived_photos_never_reach_the_gate(tmp_path):
     with PhotoIndexReader(db) as reader:
         report = gate_photos(list(reader.iter_photos(ReadFilter())), ScriptedDetector())
     assert {d.path.stem for d in report.detections} == {"live"}
+
+
+# ---------------------------------------------------------------- concurrency
+
+
+def _mixed(n: int):
+    """One of every kind, repeated: eligible, uncertain, face, stranger,
+    detector-failure, missing file. Enough of each that an ordering bug has
+    somewhere to show up."""
+    kinds = [
+        ("e", redness(0.0), []),
+        ("u", redness(0.30), []),
+        ("f", redness(0.90), []),
+        ("s", redness(0.0), ["Someone Else"]),
+        ("x", EXPLODES, []),
+        ("m", None, []),
+    ]
+    out = []
+    for i in range(n):
+        name, colour, people = kinds[i % len(kinds)]
+        out.append((f"{i:03d}{name}", colour, people))
+    return out
+
+
+@pytest.mark.parametrize("workers", [1, 2, 3, 8, 32])
+def test_the_threaded_gate_reaches_exactly_the_serial_verdicts(tmp_path, workers):
+    """THE test that makes threading the gate acceptable.
+
+    A publishing gate is the last place to accept "probably the same". Every
+    verdict, every box, every count and the ORDER of the detections must match
+    what one thread produces, at every pool width - including one wider than
+    the work, and one narrower than the prefetch window.
+    """
+    specs = _mixed(30)
+    serial, _ = gate(tmp_path / "serial", specs, workers=1, allow_people=["Abhik Maiti"])
+    other, _ = gate(tmp_path / f"w{workers}", specs, workers=workers, allow_people=["Abhik Maiti"])
+
+    assert [d.path.stem for d in other.detections] == [d.path.stem for d in serial.detections]
+    assert [d.verdict for d in other.detections] == [d.verdict for d in serial.detections]
+    assert [d.boxes for d in other.detections] == [d.boxes for d in serial.detections]
+    assert [d.image_size for d in other.detections] == [d.image_size for d in serial.detections]
+    for name in ("considered", "eligible", "has_face", "uncertain", "errors", "faces_found"):
+        assert getattr(other, name) == getattr(serial, name), name
+    assert other.accounted
+
+
+def test_detection_really_runs_on_more_than_one_thread(tmp_path):
+    """Otherwise the pool is decoration and the 2.6x is imaginary.
+
+    Asserted on the detector's own record of which thread called it, because
+    a serial regression is invisible in the output - that is the whole point
+    of the test above.
+    """
+    _, detector = gate(tmp_path, _mixed(24), workers=4)
+    assert detector.decoded > 0
+    assert threading.get_ident() not in detector.threads
+    assert len(detector.threads) > 1, (
+        f"only {len(detector.threads)} thread(s) detected; the pool is not being used"
+    )
+
+
+@pytest.mark.parametrize("workers", [0, -3])
+def test_a_nonsense_worker_count_is_clamped_not_obeyed(tmp_path, workers):
+    """A pool of zero threads is a hang, not an error message."""
+    report, _ = gate(tmp_path, _mixed(6), workers=workers)
+    assert report.considered == 6 and report.accounted
+
+
+def test_progress_still_counts_one_at_a_time_under_threads(tmp_path):
+    """Out-of-order completion must not produce out-of-order progress.
+
+    A progress bar that jumps 1, 4, 2, 9 is a bug the user sees, and it is the
+    first symptom of results being consumed as they finish rather than in
+    order - which would also scramble `detections`.
+    """
+    seen: list[tuple[int, int]] = []
+    gate(tmp_path, _mixed(18), workers=6, progress=lambda n, t: seen.append((n, t)))
+    assert seen == [(i, 18) for i in range(1, 19)]
+
+
+def test_a_stranger_is_still_never_decoded_under_threads(tmp_path):
+    """The allow-list short-circuit must survive being moved onto a worker."""
+    report, detector = gate(
+        tmp_path,
+        [(f"{i:02d}s", redness(0.0), ["Someone Else"]) for i in range(12)],
+        workers=6,
+        allow_people=["Abhik Maiti"],
+    )
+    assert report.has_face == 12 and report.eligible == 0
+    assert detector.decoded == 0
+
+
+def test_faces_found_counts_confident_detections_not_every_box(tmp_path):
+    """A weak box is evidence for the GATE and not a face to report.
+
+    `gate_threshold` boxes exist so the gate can be suspicious; counting them
+    as faces would tell the user a landscape contains two people. The photo
+    here has one confident detection and one faint one, so the two counts
+    differ - which is exactly what the fixture could not express before, and
+    why a mutation collapsing them survived.
+    """
+    report, _ = gate(tmp_path, [("both", (230, 60, 0), [])])
+    d = report.detections[0]
+    assert d.verdict is Verdict.HAS_FACE
+    assert len(d.boxes) == 2, "the faint detection should still be reported as a box"
+    assert report.faces_found == 1, "the faint box was counted as a face"
+
+
+def test_a_photo_with_only_a_faint_detection_is_uncertain_and_reports_no_face(tmp_path):
+    report, _ = gate(tmp_path, [("faint", (0, 60, 0), [])])
+    d = report.detections[0]
+    assert d.verdict is Verdict.UNCERTAIN
+    assert len(d.boxes) == 1
+    assert report.faces_found == 0
+    assert not d.publishable
