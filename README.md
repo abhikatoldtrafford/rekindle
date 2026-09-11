@@ -1,49 +1,133 @@
 # rekindle
 
-**Turn your photo library into memories.**
+**Your photos already remember. This helps them say it out loud.**
 
-rekindle finds the photos that belong together — a trip, an anniversary, a
-person over the years — and stitches them into a short montage. Everything it
-picks is chosen by rules over your own metadata, so the same library always
-produces the same memories.
+[![CI](https://github.com/abhikatoldtrafford/rekindle/actions/workflows/ci.yml/badge.svg)](https://github.com/abhikatoldtrafford/rekindle/actions)
+[![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![No cloud](https://img.shields.io/badge/runs-100%25%20local-brightgreen.svg)](#privacy)
 
-```bash
-uv run rekindle doctor ~/Pictures    # what metadata do you actually have?
-uv run rekindle index ~/Pictures     # build the local index
-uv run rekindle enrich ~/Pictures    # read Google Takeout JSON sidecars into the index
-uv run rekindle doctor ~/Pictures --from-index   # report on the stored index
-```
+Twenty thousand photos sitting in a folder is not a memory. It's a filing
+cabinet. Somewhere in there is the week in Kashmir, your kid going from
+crawling to running, every December you've ever photographed — and you will
+never scroll far enough to find them.
+
+**rekindle finds them for you and turns them into something you'd actually
+watch.** A trip. An anniversary. One person, aged across fifteen years in
+twenty-four frames. It picks every photo by rules over your own metadata, so
+the same library always produces the same memories — no model deciding what
+mattered, nothing uploaded, no API key, no account.
 
 Point it at a folder. That's the whole setup.
 
-Then build memories from it:
+---
+
+## 🎬 What comes out
+
+<!--
+  GALLERY SLOTS - drop a GIF in docs/assets/ and swap the line beneath it.
+  Every memory below is real output; see docs/gallery.md.
+-->
+
+|  |  |
+|---|---|
+| **Kashmir** · an album becomes a trip<br>_24 photos · May 2015_<br>`--recipe album_story --key "Kashmir"` | **Maa: then and now**<br>_2 photos · Dec 2010 → Sep 2026_<br>`--recipe then_and_now --key "Maa"` |
+| **Avyan over the years**<br>_24 photos · one child, every year_<br>`--recipe person_years --key "Avyan"` | **Every October**<br>_24 photos · 2013 → 2022_<br>`--recipe on_this_month --key "10"` |
+
+> 🚧 **Gallery GIFs land here.** The samples above are generated from a real
+> 19,480-photo library; the images are being selected for publication. Run the
+> commands on your own library and you'll get the equivalent in about a minute.
+
+---
+
+## 🧠 The eight kinds of memory
+
+Each one is a **recipe** — a small, self-contained rule for which photos belong
+together and in what order. Writing a new one is the best first contribution:
+one file, one protocol, one registry entry.
+
+| Recipe | What it finds | Example |
+|---|---|---|
+| 🗺️ **album_story** | A named album, told in order | `"Kashmir"`, `"Leh Ladakh"`, `"Diwali Kali Puja 22"` |
+| 📅 **on_this_day** | The same date, across every year you own | `"25 December"` — 2012 → 2021 |
+| 🗓️ **on_this_month** | The same month, when a single day is too thin | `"Every May"` — 2015 → 2026 |
+| 🌱 **person_years** | One person, aged across time | `"Avyan over the years"` |
+| 👥 **pair_years** | Two people, only where they appear *together* | `"Bapi and Maa"` |
+| ⏳ **then_and_now** | Earliest and latest, side by side | `"Maa: then and now"` |
+| 🎞️ **year_in_review** | One year, spread across its months | `"2016"` |
+| 📍 **place_cluster** | Trips, from GPS | `"A place you kept coming back to"` |
+
+---
+
+## ✨ Why it's built this way
+
+**Deterministic.** Same library in, same memories out — byte for byte. No
+randomness, no model deciding what mattered. You can re-run it in a year and
+get the same film.
+
+**It never hurts you.** Archived photos never surface. Dismiss any memory and
+it's gone for good, and it *stays* gone as your library grows. Exclude a
+person, a date range or an album and every recipe honours it — enforced at one
+chokepoint no recipe can route around.
+
+**It shows its working.** Every photo a guardrail rejects is counted with a
+reason. A memory that silently drops your favourite photo is indistinguishable
+from a bug, so it doesn't do that.
+
+**It's honest about what it can't do.** [Known limits](#known-limits) is a real
+section, not a disclaimer. Videos don't appear in memories yet. A photographed
+document can slip through. We write those down.
+
+**Nothing leaves your machine.** The default configuration makes no network
+calls at all.
+
+---
+
+## ⚡ Quick start
 
 ```bash
-uv run rekindle fingerprint                  # one-time pass, enables dedup
+uv sync
+uv run rekindle doctor ~/Pictures    # what metadata do you actually have?
+uv run rekindle index ~/Pictures     # build the local index
+uv run rekindle enrich ~/Pictures    # read Google Takeout sidecars, if you have them
+uv run rekindle fingerprint          # one-time pass; enables dedup
+```
+
+Then make something:
+
+```bash
 uv run rekindle memories                     # what could this library produce?
 uv run rekindle memory --recipe album_story --key "Kashmir"
 uv run rekindle memory --auto                # today's anniversary, if any
 uv run rekindle watch ~/Pictures             # foreground; prints, never renders
 ```
 
-A memory is a GIF (always) plus an MP4 (when ffmpeg is on PATH), written to
-`memories/` with the `MemorySpec` that produced it.
+A memory is a **GIF** (always) plus an **MP4** (when ffmpeg is on PATH),
+written to `memories/` alongside the `MemorySpec` that produced it — so you can
+see exactly which photos were chosen and why.
 
-**Freeform prompts** (`rekindle memory "our trip to the coast"`) need
-embeddings and are not built yet - v1 selection is deterministic and
-structured. `rekindle memories` lists everything available.
+### 🎵 Music
 
-Runs entirely on your machine — the default configuration makes no network
-calls at all, and needs no API key.
+```bash
+uv run rekindle music fetch     # the one command that touches the network
+```
+
+Fetches a small set of CC0 tracks. Or drop your own `.mp3` into `music/` —
+each memory picks a track deterministically, so the same memory always sounds
+the same. Silence is a perfectly good default.
+
+**Freeform prompts** (`rekindle memory "our trip to the coast"`) need embeddings
+and aren't built yet — v1 selection is deterministic and structured.
+`rekindle memories` lists everything available.
 
 > **Status: early development.** The memory engine is designed in
 > [the M2 spec](docs/superpowers/specs/2026-09-11-memories-design.md); the
 > wider architecture is in [the v1 spec](docs/superpowers/specs/2026-09-10-rekindle-design.md),
 > which went through an [independent adversarial review](docs/superpowers/specs/audit-v1-resolutions.md).
-> Issues and PRs welcome.
+> How it was actually built, including the bugs that shaped it, is in the
+> [decision log](docs/decision-log-memory-engine.md). Issues and PRs welcome.
 
 ---
-
 ## Getting your photos in
 
 **v1 reads a directory.** No accounts, no OAuth, no API keys, no vendor lock-in.
@@ -84,29 +168,10 @@ Immich, Apple Photos, Nextcloud and PhotoPrism all expose their libraries
 properly, and several give face regions that Google never did. Each is one
 `Source` implementation: [writing-sources.md](docs/writing-sources.md).
 
-## Quick start
 
-```bash
-git clone https://github.com/abhikatoldtrafford/rekindle
-cd rekindle
-uv sync
-
-uv run rekindle doctor ~/Pictures    # what metadata do you actually have?
-uv run rekindle index ~/Pictures     # build the local index
-uv run rekindle enrich ~/Pictures    # read Google Takeout JSON sidecars into the index
-uv run rekindle doctor ~/Pictures --from-index   # report on the stored index
-```
-
-`doctor` writes nothing at all, so it is safe to point at anything.
-`enrich` requires `index` to have run first — it reads the database, not the
-filesystem, so photo rows must already exist.
-
-No `.env` needed. The optional GPT captions are off by default and, in
-testing against the reference library, **added very little** — the model
-mostly returns the deterministic caption unchanged, because it is given only a
-fact sheet and forbidden from asserting anything the facts do not support. The
-deterministic captions are the product; the flag exists for people who want to
-experiment. See [the caption layer](#optional-gpt-captions).
+`doctor` writes nothing at all, so it is safe to point at anything. `enrich`
+requires `index` to have run first — it reads the database, not the filesystem,
+so photo rows must already exist.
 
 ## How it works
 
