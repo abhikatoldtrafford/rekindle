@@ -501,3 +501,43 @@ def test_folder_source_satisfies_the_source_protocol():
 
     _: Source = FolderSource()
     assert isinstance(FolderSource(), Source)
+
+
+def test_an_uppercase_metadata_json_is_album_metadata_not_an_orphan(tmp_path):
+    """`path.name != "metadata.json"` is case-SENSITIVE.
+
+    With `Metadata.json`, `FolderSource` reported `orphan_sidecars=1` and
+    `doctor` fired the loudest warning the tool has - "INCOMPLETE EXPORT: 1
+    metadata sidecars (50.0%) have no matching photo... your library will be
+    silently missing photos" - while `enrich.takeout.build_index` classified
+    the very same file as album metadata. Two implementations of one rule,
+    disagreeing, and the wrong one is the one that shouts. Google writes it
+    lowercase, so there are 0 live instances; `rekindle.sidecars` exists
+    precisely so this rule has one home.
+
+    MUTATION (run, not assumed): restore `if path.name != "metadata.json":`
+    in `FolderSource.scan` and this fails with `orphan_sidecars 1 != 0`, and
+    the INCOMPLETE EXPORT warning reappears.
+    """
+    from rekindle.doctor import diagnose
+
+    root = tmp_path / "Takeout"
+    album = root / "Goa Trip"
+    make_jpeg(album / "IMG_1.jpg")
+    (album / "IMG_1.jpg.supplemental-metadata.json").write_text(
+        '{"title": "IMG_1.jpg"}', encoding="utf-8"
+    )
+    (album / "Metadata.json").write_text('{"title": "Goa/ Trip"}', encoding="utf-8")
+
+    _photos, report = _scan(root)
+    assert report.json_sidecars == 2
+    assert report.orphan_sidecars == 0
+    assert not any("INCOMPLETE EXPORT" in w for w in diagnose(report).warnings)
+
+    # And the two passes agree about the same file.
+    from rekindle.enrich.takeout import EnrichReport, build_index
+
+    enrich_report = EnrichReport()
+    build_index(root, enrich_report)
+    assert enrich_report.album_metadata == 1
+    assert enrich_report.sidecars_seen == 1

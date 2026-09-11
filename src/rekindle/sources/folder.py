@@ -18,6 +18,7 @@ from rekindle.models import (
     TzSource,
     merge_meta,
 )
+from rekindle.sidecars import is_album_metadata
 from rekindle.sidecars import sidecar_target as _sidecar_target
 
 # Google localises the edited suffix, so this is a list, not a single string.
@@ -157,7 +158,16 @@ class FolderSource:
                     report.skip("sidecar_other")
                     continue
                 report.json_sidecars += 1
-                if path.name != "metadata.json":
+                # `is_album_metadata`, not `path.name != "metadata.json"`: the
+                # bare compare is case-SENSITIVE, so a `Metadata.json` is
+                # treated as a per-photo sidecar here while `build_index`
+                # correctly classifies the same file as album metadata. Two
+                # implementations of one rule, disagreeing - and the one that
+                # is wrong fires the loudest warning the tool has ("INCOMPLETE
+                # EXPORT ... your library will be silently missing photos").
+                # Google writes it lowercase, so there are 0 live instances;
+                # this module exists precisely so that rule has one home.
+                if not is_album_metadata(path.name):
                     sidecar_stems.append(_sidecar_target(path.name))
                 continue
 

@@ -1,6 +1,9 @@
+from pathlib import Path
+
 from typer.testing import CliRunner
 
 from rekindle.cli import app
+from rekindle.db import PhotoStore
 from tests.fixtures.gen import build_library
 
 runner = CliRunner()
@@ -239,3 +242,66 @@ def test_enrich_against_an_indexed_but_empty_folder_still_guards(tmp_path):
     result = runner.invoke(app, ["enrich", str(empty_root), "--data-dir", data])
     assert result.exit_code == 2
     assert "index is empty" in result.stdout.lower()
+
+
+def test_a_relative_root_is_stored_and_compared_as_an_absolute_path(tmp_path, monkeypatch):
+    """`rekindle index Takeout` used to store relative paths.
+
+    `FolderSource` stores whatever Path it is handed, so `FolderSource().scan(
+    Path("Takeout"))` stored `Takeout/Photos from 2019/A.jpg` and
+    `is_absolute()` was False - falsifying the comment in `cli.enrich` that
+    reads "Photo paths are absolute". The consequence was worse than the
+    wrong comment: `rekindle index Takeout` then `rekindle enrich Takeout`
+    FROM A DIFFERENT DIRECTORY compared two equal strings ("Takeout" ==
+    "Takeout"), fired no foreign-root warning, and matched nothing at all.
+
+    MUTATION (run, not assumed): change `_resolved` to `return root` and this
+    fails on `stored.is_absolute()`.
+    """
+    from tests.fixtures.takeout import build_takeout
+
+    build_takeout(tmp_path / "Takeout")
+    data = str(tmp_path / "data")
+
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(app, ["index", "Takeout", "--data-dir", data]).exit_code == 0
+
+    with PhotoStore(Path(data) / "rekindle.sqlite") as store:
+        stored = next(iter(store.iter_photos())).paths[0]
+        index_root = store.get_meta("index_root")
+    assert stored.is_absolute()
+    assert Path(index_root).is_absolute()
+    assert Path(index_root) == (tmp_path / "Takeout").resolve()
+
+    # Enriching the SAME folder from a DIFFERENT cwd must still match - this
+    # is the run that silently matched nothing before.
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    monkeypatch.chdir(other)
+    result = runner.invoke(app, ["enrich", str(tmp_path / "Takeout"), "--data-dir", data])
+    assert result.exit_code == 0
+    flat = " ".join(result.stdout.split())
+    assert "The index was built from" not in flat
+    assert "Photos enriched | 10" in flat.replace("│", "|")
+
+
+def test_a_relative_root_still_warns_when_it_resolves_somewhere_else(tmp_path, monkeypatch):
+    """The mirror of the above: two DIFFERENT folders that share a relative
+    spelling must still fire the foreign-root warning, which the raw string
+    compare could never do."""
+    from tests.fixtures.takeout import build_takeout
+
+    a = tmp_path / "A"
+    a.mkdir()
+    build_takeout(a / "Takeout")
+    b = tmp_path / "B"
+    b.mkdir()
+    (b / "Takeout").mkdir()
+    data = str(tmp_path / "data")
+
+    monkeypatch.chdir(a)
+    assert runner.invoke(app, ["index", "Takeout", "--data-dir", data]).exit_code == 0
+    monkeypatch.chdir(b)
+    result = runner.invoke(app, ["enrich", "Takeout", "--data-dir", data])
+    assert result.exit_code == 0
+    assert "index was built from" in " ".join(result.stdout.split())

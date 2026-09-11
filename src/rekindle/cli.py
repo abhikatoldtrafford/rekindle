@@ -26,6 +26,26 @@ def _check_root(root: Path) -> None:
         raise typer.Exit(code=2)
 
 
+def _resolved(root: Path) -> Path:
+    """Absolute and normalised, at the CLI boundary.
+
+    `FolderSource` stores whatever Path it is handed, so `rekindle index
+    Takeout` stores `Takeout/Photos from 2019/A.jpg` and `is_absolute()`
+    is False. That breaks two things at once: the "Photo paths are absolute"
+    claim the foreign-root warnings rest on, and the warnings themselves,
+    which are raw string compares - `rekindle index Takeout` followed by
+    `rekindle enrich Takeout` from a DIFFERENT directory compares two equal
+    strings, fires no warning, and then matches nothing at all, which is the
+    worst of both. Resolving here, before anything is stored and before
+    anything is compared, is what makes the claim true. Every command routes
+    its root through this, not just `enrich`.
+
+    `Path.resolve()` is non-strict, so it is safe on the `doctor --from-index`
+    path, where the root need not exist.
+    """
+    return root.resolve()
+
+
 def _version_callback(value: bool) -> None:
     if value:
         console.print(__version__)
@@ -51,6 +71,7 @@ def doctor(
     data_dir: DataDir = Path("./data"),
 ) -> None:
     """Report what metadata a library has. Writes nothing."""
+    root = _resolved(root)
     if from_index:
         # PhotoStore CREATES its database on open, so without this check
         # `doctor --from-index` on a machine that has never indexed would
@@ -81,6 +102,7 @@ def index(
     data_dir: DataDir = Path("./data"),
 ) -> None:
     """Scan a folder and store its photos in the local index."""
+    root = _resolved(root)
     _check_root(root)
     photos, report = FolderSource().scan(root)
     with PhotoStore(data_dir / "rekindle.sqlite") as store:
@@ -99,6 +121,7 @@ def enrich(
     data_dir: DataDir = Path("./data"),
 ) -> None:
     """Read Google Takeout JSON sidecars into an index that already exists."""
+    root = _resolved(root)
     _check_root(root)
     # Same reasoning as `doctor --from-index`: PhotoStore creates its file on
     # open, so without this check up front, running `enrich` before `index`
