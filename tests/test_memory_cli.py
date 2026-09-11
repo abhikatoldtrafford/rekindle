@@ -1034,18 +1034,29 @@ def test_an_empty_prompt_is_refused(tmp_path):
     assert "empty prompt" in result.output
 
 
-def test_an_unembedded_library_says_so_and_is_not_an_empty_query(tmp_path):
-    """Distinct from SKIP_EMPTY on purpose. "Run `rekindle semantic embed`" and
-    "that prompt found nothing" are different problems with different fixes."""
-    pytest.importorskip("numpy")
+def test_a_library_that_cannot_be_searched_says_which_problem_it_is(tmp_path):
+    """Three different failures, three different fixes, never folded together.
+
+    Without the extra: install it. With the extra but no embeddings: run
+    `rekindle semantic embed`. Neither may look like SKIP_EMPTY, which means
+    "your prompt found nothing" and would send the user off rewording a prompt
+    that was never searched.
+    """
     data = _festival_library(tmp_path)
     result = runner.invoke(
         app,
         ["memory", "a beach", "--no-mp4", "--out", str(tmp_path / "o"), "--data-dir", str(data)],
     )
+    flat = " ".join(result.output.split())
     assert result.exit_code in (2, 3), result.output
-    assert "semantic embed" in result.output or "semantic extra" in result.output
-    assert "no_candidates" not in result.output
+    if result.exit_code == 3:
+        # The extra is missing. The message names the command that installs it.
+        assert "uv sync --extra semantic" in flat
+    else:
+        # The extra is here; the library has simply never been embedded.
+        assert "rekindle semantic embed" in flat
+    assert "no_candidates" not in flat
+    assert not list((tmp_path / "o").glob("*"))
 
 
 def test_the_judge_can_refuse_before_anything_is_built(tmp_path, monkeypatch, capsys):
