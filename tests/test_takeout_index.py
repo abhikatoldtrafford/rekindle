@@ -6,6 +6,7 @@ from rekindle.db import PhotoStore
 from rekindle.enrich.takeout import EnrichReport, TakeoutEnricher, build_index, resolve
 from rekindle.models import MediaType, Photo, PhotoMeta
 from rekindle.sources.folder import FolderSource
+from tests.fixtures.gen import make_jpeg
 from tests.fixtures.takeout import build_takeout
 
 
@@ -97,11 +98,11 @@ def test_build_index_buckets_every_json_file(tmp_path):
     report = EnrichReport()
     build_index(root, report)
     assert report.json_files_seen == len(list(root.rglob("*.json")))
-    assert report.json_files_seen == 22
-    assert report.files_accounted == 22
-    # DSC00107 x2, AMBIG x2, SHARED x2, IMG_ALBUM, IMG_EDIT, PXL_1.MP.jpg,
-    # IMG_MISSING, IMG_FLAGS, IMG_U0, IMG_U1
-    assert report.sidecars_seen == 13
+    assert report.json_files_seen == 23
+    assert report.files_accounted == 23
+    # DSC00107 x2, AMBIG x2, SHARED x2, IMG_ALBUM, IMG_EDIT, IMG_CAPTION,
+    # PXL_1.MP.jpg, IMG_MISSING, IMG_FLAGS, IMG_U0, IMG_U1
+    assert report.sidecars_seen == 14
     # root, Goa Trip, Untitled, Untitled(1), No Name
     assert report.album_metadata == 5
     # user-generated-memory-titles.json, shared_album_comments.json
@@ -134,9 +135,45 @@ def test_the_sidecar_accounting_identity_holds(tmp_path):
 
     MUTATION (run, not assumed): delete `claimed.get(key) != "ambiguous"`
     from `TakeoutEnricher.enrich` and this test fails on
-    `assert report.ambiguous == 1` with ambiguous 0, superseded 2.
+    `assert report.ambiguous == 2` with ambiguous 1, superseded 2.
+
+    That mutation alone is only half the guarantee: `enrich()` sorts photos
+    ascending, and SHARED.jpg's refusal (Kolkata Trip) is reached BEFORE its
+    exact match (Photos from 2011) in that order - "kolkata trip" <
+    "photos from 2011". Flip the sort to `reverse=True` and SHARED.jpg's
+    ambiguous outcome is reached SECOND instead, which always overwrites
+    `claimed` regardless of the guard (the guard only blocks a later
+    downgrade AWAY FROM "ambiguous", never a later assignment TO it) - so the
+    guard's deletion becomes invisible again under that order alone. Guarded
+    against here by SHARED2.jpg, built below: same shape, but with directory
+    names reversed relative to SHARED.jpg, so its refusal (Zanzibar Trip) is
+    reached AFTER its exact match ascending and BEFORE it descending -
+    exactly the order SHARED.jpg cannot cover. Together the two groups make
+    the guard's deletion visible in both sort directions.
     """
     root = build_takeout(tmp_path / "Takeout")
+    year = root / "Photos from 2011"
+
+    # A second shared-name group, the mirror image of SHARED.jpg: its
+    # own-directory exact match sorts BEFORE its no-local-candidate refusal
+    # ascending ("photos from 2011" < "zanzibar trip"), so descending order
+    # reaches the refusal first - the one guard-critical order SHARED.jpg,
+    # sorting the other way, cannot exercise. See the docstring above.
+    make_jpeg(year / "SHARED2.jpg", size=(38, 38))
+    _write_sidecar_json(
+        year / "SHARED2.jpg.supplemental-metadata.json",
+        title="SHARED2.jpg",
+        photoTakenTime={"timestamp": "1150000000"},
+        people=[{"name": "Ada"}],
+    )
+    _write_sidecar_json(
+        root / "Goa Trip" / "SHARED2.jpg.supplemental-metadata.json",
+        title="SHARED2.jpg",
+        photoTakenTime={"timestamp": "1550000000"},
+        people=[{"name": "Grace"}],
+    )
+    make_jpeg(root / "Zanzibar Trip" / "SHARED2.jpg", size=(39, 39))
+
     photos, _ = FolderSource().scan(root)
     store = PhotoStore(tmp_path / "data" / "rekindle.sqlite")
     store.upsert_many(photos)
@@ -144,16 +181,16 @@ def test_the_sidecar_accounting_identity_holds(tmp_path):
 
     assert report.sidecars_seen == report.sidecars_accounted
     assert report.orphaned == 1  # IMG_MISSING
-    # SHARED.jpg's Kolkata Trip photo is genuinely refused - and the refusal
-    # SURVIVES even though a different photo (Photos from 2011) sharing the
-    # same target name resolved exact for it.
-    assert report.ambiguous == 1
+    # SHARED.jpg's Kolkata Trip photo and SHARED2.jpg's Zanzibar Trip photo
+    # are each genuinely refused - and each refusal SURVIVES even though a
+    # different photo sharing the same target name resolved exact for it.
+    assert report.ambiguous == 2
     # AMBIG has two candidates; one is applied, the other is SUPERSEDED. The
     # first draft of this plan credited both to `matched`, which inflated it
     # by 3,358 on a real export.
     assert report.superseded == 1
     assert report.matched == report.photos_enriched
-    assert report.matched == 10
+    assert report.matched == 12
     store.close()
 
 

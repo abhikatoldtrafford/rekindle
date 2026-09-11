@@ -282,7 +282,7 @@ def test_a_relative_root_is_stored_and_compared_as_an_absolute_path(tmp_path, mo
     assert result.exit_code == 0
     flat = " ".join(result.stdout.split())
     assert "The index was built from" not in flat
-    assert "Photos enriched | 10" in flat.replace("│", "|")
+    assert "Photos enriched | 11" in flat.replace("│", "|")
 
 
 def test_a_relative_root_still_warns_when_it_resolves_somewhere_else(tmp_path, monkeypatch):

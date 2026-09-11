@@ -103,6 +103,69 @@ def test_merge_meta_earliest_real_date_wins():
     assert conflict is True
 
 
+def test_merge_meta_earliest_wins_when_old_is_the_earlier_side():
+    """Residual 5: the test above puts the earlier date on `new`, where
+    `keep = new` (the exact bug this tiebreak guards against) happens to
+    pick the SAME side as the real earliest-wins rule - mutating the
+    tiebreak to unconditional `keep = new` left the FULL SUITE green,
+    258 passed. Swapping which side is earlier is the only way the two
+    can be told apart.
+
+    MUTATION (run, not assumed): replace `keep = old if old.taken_at_utc <=
+    new.taken_at_utc else new` with `keep = new` and this fails on
+    `merged.taken_at_utc == earlier` (reads `later` instead).
+    """
+    earlier = datetime(2020, 1, 1, tzinfo=UTC)
+    later = datetime(2021, 1, 1, tzinfo=UTC)
+    old = PhotoMeta(taken_at_utc=earlier, tz_source=TzSource.EXIF_OFFSET)
+    new = PhotoMeta(taken_at_utc=later, tz_source=TzSource.EXIF_OFFSET)
+
+    merged, conflict = merge_meta(old, new)
+
+    assert merged.taken_at_utc == earlier
+    assert merged.tz_source is TzSource.EXIF_OFFSET
+    assert conflict is True
+
+
+def test_merge_meta_an_enriched_new_side_wins_symmetrically():
+    """Residual 5: `elif _enriched(new) and not _enriched(old): keep = new`
+    is unreachable through either shipped call site (`db._merge` and
+    `FolderSource.scan` always pass a folder-scanned `new`, and no shipped
+    `Source` can make `_enriched` true) - replacing it with `elif False:`
+    left the full suite green too. Called directly, bypassing both call
+    sites, it is the exact mirror of the `_enriched(old)` branch just above
+    it in `merge_meta`.
+
+    MUTATION (run, not assumed): replace the branch condition with `elif
+    False:` and this fails on `merged.taken_at_utc == enriched_instant`
+    (falls through to the earliest-wins tiebreak instead, reading the
+    camera's un-arbitrated date).
+    """
+    # `new` is the enriched side: Google's arbitrated instant, plus the EXIF
+    # instant enrichment had already displaced. `old` is a re-scan of the
+    # UNENRICHED side whose own EXIF instant has since moved (a camera clock
+    # correction, or a different bytes-copy) - the exact disagreement
+    # `_exif_instant(new) != old.taken_at_utc` exists to catch.
+    displaced_exif = datetime(2016, 6, 24, 9, 47, 33, tzinfo=UTC)
+    moved_exif = datetime(2016, 6, 25, 9, 47, 33, tzinfo=UTC)
+    google_instant = datetime(2020, 3, 14, 14, 17, 31, tzinfo=UTC)
+    old = PhotoMeta(taken_at_utc=moved_exif, tz_source=TzSource.EXIF_OFFSET)
+    new = PhotoMeta(
+        taken_at_utc=google_instant,
+        tz_source=TzSource.TAKEOUT,
+        exif_taken_at_utc=displaced_exif,
+    )
+
+    merged, conflict = merge_meta(old, new)
+
+    assert merged.taken_at_utc == google_instant
+    assert merged.tz_source is TzSource.TAKEOUT
+    # The enriched side's displaced EXIF instant disagrees with the OTHER
+    # side's raw date - a real conflict, not the crude exact-equality check
+    # `_exif_instant`'s docstring warns against.
+    assert conflict is True
+
+
 def test_merge_meta_real_date_beats_file_mtime_fallback_even_if_earlier():
     # The folder source always populates taken_at_utc via mtime fallback.
     # A naive "whichever is set" or "earliest wins regardless of source"

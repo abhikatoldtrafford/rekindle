@@ -179,6 +179,31 @@ def build_takeout(root: Path) -> Path:
         geoDataExif={"latitude": 22.5, "longitude": 88.3, "altitude": 9.0},
     )
 
+    # --- a derivative that inherits a description AND a favourite ----------
+    # Same shape as IMG_EDIT/IMG_EDIT-edited above, but the donor's sidecar
+    # also carries `description` and `favorited: true` - `propagate_to_
+    # derivatives`'s own `descriptions_added`/`favourites_added` increments
+    # (as opposed to `apply_sidecar`'s copies, already exercised by
+    # IMG_FLAGS.jpg below) have no fixture data to write without this: no
+    # OTHER derivative here carries either field, and neither does the real
+    # export - both totals read 142 and 3 before and after the wave with no
+    # derivative contribution at all.
+    # Sized differently from every other fixture photo here: `make_jpeg`'s
+    # default color makes two same-size images BYTE-IDENTICAL with no EXIF to
+    # differentiate them, which content-hash dedup then merges into ONE
+    # Photo with two names - reusing (28, 28)/(29, 29) here collided this
+    # pair with IMG_EDIT/IMG_EDIT-edited and inflated `ambiguous` by 2.
+    make_jpeg(year / "IMG_CAPTION.jpg", size=(40, 40))
+    make_jpeg(year / "IMG_CAPTION-edited.jpg", size=(41, 41))
+    _sidecar(
+        year / "IMG_CAPTION.jpg.supplemental-metadata.json",
+        title="IMG_CAPTION.jpg",
+        photoTakenTime={"timestamp": "1450000000"},
+        people=[{"name": "Grace"}],
+        description="a captioned original",
+        favorited=True,
+    )
+
     # --- an orphan: a sidecar whose photo is in an un-extracted part -------
     _sidecar(year / "IMG_MISSING.jpg.supplemental-metadata.json", title="IMG_MISSING.jpg")
 

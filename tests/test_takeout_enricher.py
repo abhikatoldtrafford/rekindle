@@ -767,13 +767,21 @@ def test_every_reported_total_equals_the_rows_actually_changed(tmp_path):
     and a user can catch it with the product's own two commands -
     `doctor --from-index` reads `with_gps` 1,993 before and 2,330 after.
 
-    `build_takeout` has two derivatives (IMG_EDIT-edited.jpg and PXL_1.MP),
-    and PXL_1.MP.jpg's sidecar carries real coordinates, so the GPS row here
-    is exactly the one that was wrong on the real export.
+    `build_takeout` has three derivatives (IMG_EDIT-edited.jpg, PXL_1.MP and
+    IMG_CAPTION-edited.jpg); PXL_1.MP.jpg's sidecar carries real coordinates,
+    so the GPS row here is exactly the one that was wrong on the real
+    export, and IMG_CAPTION.jpg's sidecar carries a description and
+    `favorited: true` so its derivative's inherited copies make
+    `descriptions_added`/`favourites_added` non-vacuous too - both totals
+    read 142 and 3 before and after the wave with no derivative ever
+    contributing to either.
 
     MUTATION (run, not assumed): drop `report.gps_added += 1` from
     `propagate_to_derivatives` and this fails with `gps_added 1 != 2`; drop
-    `report.people_added += ...` there and it fails on the people total.
+    `report.people_added += ...` there and it fails on the people total; drop
+    `report.descriptions_added += 1` there and it fails with
+    `descriptions_added 1 != 2`; drop `report.favourites_added += 1` there
+    and it fails with `favourites_added 1 != 2`.
     """
     root, store = _indexed(tmp_path)
 
@@ -805,8 +813,12 @@ def test_every_reported_total_equals_the_rows_actually_changed(tmp_path):
     assert report.gps_added == written_gps
     assert report.descriptions_added == written_desc
     assert report.favourites_added == written_favs
-    # Not a vacuous pass: the derivative really did contribute to the GPS row.
+    # Not a vacuous pass: the derivative really did contribute to the GPS row,
+    # and to the description/favourite rows too - the two other derivative
+    # counters `propagate_to_derivatives` credits (Residual 2).
     assert written_gps == 2
+    assert written_desc >= 1
+    assert written_favs >= 1
     store.close()
 
 

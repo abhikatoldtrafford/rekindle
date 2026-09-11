@@ -323,3 +323,20 @@ def test_render_enrich_labels_ambiguous_as_a_sidecar_count(tmp_path):
     flat = " ".join(console.export_text().split())
     assert "ambiguous sidecars (refused)" in flat
     assert "'ambiguous sidecars (refused)' count above (7)" in flat
+
+
+def test_render_enrich_shows_the_conflicts_retracted_row(tmp_path):
+    """Residual 6: this repeats exactly the shape Fix 7 existed to close -
+    a counter computed and never asserted as rendered. Deleting
+    `("EXIF/Google conflicts retracted", report.conflicts_retracted)` from
+    `render_enrich` left the suite green, 258 passed.
+
+    MUTATION (run, not assumed): delete that row from `render_enrich` and
+    this fails - the row is simply absent from the output.
+    """
+    report = EnrichReport(conflicts=5, conflicts_retracted=2)
+    console = Console(record=True, width=200)
+    render_enrich(report, console)
+    output = console.export_text()
+    row = next(ln for ln in output.splitlines() if "EXIF/Google conflicts retracted" in ln)
+    assert row.split("│")[2].strip() == "2"

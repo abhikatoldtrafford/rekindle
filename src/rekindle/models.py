@@ -168,6 +168,13 @@ def merge_meta(old: PhotoMeta, new: PhotoMeta) -> tuple[PhotoMeta, bool]:
             keep = old
             conflict = _exif_instant(old) != new.taken_at_utc
         elif _enriched(new) and not _enriched(old):
+            # Unreachable through any call site shipped today: `merge_meta` is
+            # called as `(stored, incoming-from-a-Source)` in `db._merge` and
+            # as `(existing, new)` in `FolderSource.scan`, so `new` is always
+            # folder-scanned and no shipped `Source` can make `_enriched(new)`
+            # true. Kept for the symmetry a future enriching `Source` would
+            # need - see `tests/test_models.py` for a direct unit test that
+            # calls this branch without going through either call site.
             keep = new
             conflict = _exif_instant(new) != old.taken_at_utc
         else:
