@@ -23,7 +23,7 @@ from rekindle.models import (
     merge_meta,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -60,7 +60,10 @@ CREATE TABLE IF NOT EXISTS photos (
     takeout_people TEXT NOT NULL DEFAULT '[]',
     archived      INTEGER NOT NULL DEFAULT 0,
     trashed       INTEGER NOT NULL DEFAULT 0,
-    sidecar_match TEXT NOT NULL DEFAULT 'none'
+    sidecar_match TEXT NOT NULL DEFAULT 'none',
+    phash         INTEGER,
+    sharpness     REAL,
+    phash_error   TEXT
 );
 
 -- `paths` is a JSON blob and therefore unqueryable, so this table exists to
@@ -90,6 +93,20 @@ CREATE INDEX IF NOT EXISTS idx_photos_edited ON photos(edited_of);
 CREATE INDEX IF NOT EXISTS idx_photo_paths_name ON photo_paths(name_cf);
 """
 
+# Indexes over columns that a pre-migration database does not have yet.
+#
+# These CANNOT live in `_SCHEMA`. That script runs first thing in `__init__`,
+# before `_migrate`, and on an OLD database `CREATE TABLE IF NOT EXISTS photos`
+# is a no-op that leaves the v1 column set in place - so a
+# `CREATE INDEX ... ON photos(phash)` in `_SCHEMA` raises "no such column:
+# phash" and every v1 database becomes unopenable. Found by the existing v1
+# migration tests, which is exactly what they are for.
+_LATE_INDEXES = """
+-- `rekindle fingerprint` resumes by asking for the rows it has not done yet.
+-- Without this it is a full scan of every row on every resume.
+CREATE INDEX IF NOT EXISTS idx_photos_phash ON photos(phash, phash_error);
+"""
+
 # Column additions, in order, applied to a database created before them.
 # ALTER TABLE ADD COLUMN is the only schema change SQLite does cheaply and it
 # is all this migration needs.
@@ -100,6 +117,44 @@ _V2_COLUMNS = (
     ("trashed", "INTEGER NOT NULL DEFAULT 0"),
     ("sidecar_match", "TEXT NOT NULL DEFAULT 'none'"),
 )
+
+# v3: the perceptual fingerprint that burst dedup needs. All nullable - a row
+# that has never been fingerprinted is a normal, expected state, not a defect.
+_V3_COLUMNS = (
+    ("phash", "INTEGER"),
+    ("sharpness", "REAL"),
+    ("phash_error", "TEXT"),
+)
+
+
+_SIGN_BIT = 1 << 63
+_U64 = 1 << 64
+
+
+def _signed64(value: int | None) -> int | None:
+    """Reinterpret an unsigned 64-bit value as SQLite's SIGNED 64-bit INTEGER.
+
+    A dHash is 64 unsigned bits and roughly half of all images set the top
+    one, so `phash >= 2**63` is the ordinary case, not an exotic one - and
+    handing such a value to sqlite3 raises `OverflowError: Python int too
+    large to convert to SQLite INTEGER`. Storing the hash as TEXT would avoid
+    the conversion but costs the integer index and 16 bytes a row for nothing.
+
+    In-memory, `PhotoMeta.phash` is ALWAYS unsigned: Hamming distance is
+    computed as `bin(a ^ b).count("1")`, and Python's arbitrary-precision
+    negative integers have a notional infinite run of sign bits that makes
+    that expression silently wrong. The reinterpretation therefore lives
+    here, at the storage boundary, and nowhere else.
+    """
+    if value is None:
+        return None
+    return value - _U64 if value & _SIGN_BIT else value
+
+
+def _unsigned64(value: int | None) -> int | None:
+    if value is None:
+        return None
+    return value + _U64 if value < 0 else value
 
 
 def _dt(value: datetime | None) -> str | None:
@@ -136,6 +191,13 @@ class PhotoStore:
         # check is the only thing standing between a schema change and a
         # baffling OperationalError on the next write.
         found = self.schema_version()
+        if found == SCHEMA_VERSION:
+            # Only now are the v3 columns guaranteed to exist - on a fresh
+            # database because _SCHEMA created them, on an old one because
+            # _migrate just added them. Guarded on the version so a database
+            # about to be REJECTED below is not written to on the way out.
+            self._conn.executescript(_LATE_INDEXES)
+            self._conn.commit()
         if found != SCHEMA_VERSION:
             # A raise here means __init__ never returns, so the caller gets no
             # handle to close the connection - it would otherwise stay open
@@ -154,24 +216,56 @@ class PhotoStore:
             )
 
     def _migrate(self) -> None:
-        """v1 -> v2. Additive only: no row is ever rewritten or dropped.
+        """Walk the version LADDER, one known step at a time.
 
-        Guards on the EXACT starting version (1), not `< SCHEMA_VERSION`: a
-        `>=` guard plus an unconditional bump to `SCHEMA_VERSION` would stamp
-        any older database - including a hypothetical pre-v1 schema this
-        step knows nothing about - straight to v2 and declare success. That
-        leaves the friendly "no migration exists" error in __init__
-        unreachable now, and means a future v3 step would silently skip
-        migrating a v1 database that was never bumped. A database at any
-        version other than 1 is left untouched for __init__'s version check
-        to reject with its explicit error message.
+        v2 shipped a single `if self.schema_version() != 1: return` step. That
+        guard was right about the thing it was defending - a `< SCHEMA_VERSION`
+        guard plus an unconditional bump to `SCHEMA_VERSION` would stamp any
+        older database, including a hypothetical pre-v1 schema this code knows
+        nothing about, straight to the current version and declare success -
+        but its own comment predicted what would break next: "a future v3 step
+        would silently skip migrating a v1 database". v3 is that step, and a v1
+        database opened by this code would have exited the old guard at v2 with
+        `__init__` then rejecting it as unmigratable.
+
+        The ladder keeps the property and drops the defect. Each entry migrates
+        FROM its key TO the next version, and only versions with an entry are
+        touched: a database at an unknown version matches no step, the loop
+        stops immediately, and `__init__`'s explicit error message rejects it
+        exactly as before. Each step commits its own bump, so an interrupted
+        two-step migration resumes from the rung it reached rather than
+        restarting or, worse, re-running an already-applied step.
         """
-        if self.schema_version() != 1:
-            return
+        steps = {1: self._to_v2, 2: self._to_v3}
+        while (version := self.schema_version()) != SCHEMA_VERSION:
+            step = steps.get(version)
+            if step is None:
+                return
+            step()
+            # A step that does not advance the version would spin forever.
+            # Cheaper to assert than to debug a hung `rekindle index`.
+            if self.schema_version() == version:
+                raise RuntimeError(f"migration step from v{version} did not advance the version")
+
+    def _bump(self, to: int) -> None:
+        self._conn.execute("UPDATE meta SET value = ? WHERE key = 'schema_version'", (str(to),))
+        self._conn.commit()
+
+    def _add_columns(self, columns: tuple[tuple[str, str], ...]) -> None:
+        """ALTER TABLE ADD COLUMN is the only schema change SQLite does cheaply.
+
+        Additive only: no row is ever rewritten or dropped. The `existing`
+        check matters because `_SCHEMA` above uses CREATE TABLE IF NOT EXISTS
+        with the CURRENT column list, so a freshly created database already has
+        every column while an old one does not.
+        """
         existing = {r["name"] for r in self._conn.execute("PRAGMA table_info(photos)")}
-        for name, decl in _V2_COLUMNS:
+        for name, decl in columns:
             if name not in existing:
                 self._conn.execute(f"ALTER TABLE photos ADD COLUMN {name} {decl}")
+
+    def _to_v2(self) -> None:
+        self._add_columns(_V2_COLUMNS)
         # photo_paths was created empty by _SCHEMA above; backfill it from the
         # JSON blob that was the only path record in v1.
         # fetchall(), not a live cursor: writing through the same connection
@@ -180,11 +274,16 @@ class PhotoStore:
         for row in rows:
             for raw in json.loads(row["paths"]):
                 self._index_path(self._conn, row["file_hash"], Path(raw))
-        self._conn.execute(
-            "UPDATE meta SET value = ? WHERE key = 'schema_version'",
-            (str(SCHEMA_VERSION),),
-        )
-        self._conn.commit()
+        self._bump(2)
+
+    def _to_v3(self) -> None:
+        """Fingerprint columns. Nothing to backfill: every existing row is
+        legitimately "not fingerprinted yet", which is what NULL already says.
+        `rekindle fingerprint` fills them in and is resumable precisely so
+        this migration does not have to do six minutes of work inside an
+        `__init__`."""
+        self._add_columns(_V3_COLUMNS)
+        self._bump(3)
 
     @staticmethod
     def _index_path(cur: sqlite3.Connection | sqlite3.Cursor, digest: str, path: Path) -> None:
@@ -257,6 +356,45 @@ class PhotoStore:
                 "SELECT file_hash FROM photo_paths WHERE name_cf = ?", (name.casefold(),)
             )
         }
+
+    def iter_unfingerprinted(self) -> Iterator[Photo]:
+        """Rows with neither a phash nor a recorded reason they lack one.
+
+        This is what makes `rekindle fingerprint` resumable: a row that has
+        been done, and a row that was TRIED and failed, are both excluded, so
+        an interrupted six-minute pass resumes instead of restarting and a
+        permanently undecodable file is not re-decoded on every run.
+
+        Same live-cursor hazard as `iter_photos`: a caller that writes must
+        materialise first.
+        """
+        for row in self._conn.execute(
+            "SELECT * FROM photos WHERE phash IS NULL AND phash_error IS NULL"
+        ):
+            yield self._row_to_photo(row)
+
+    def set_fingerprints(
+        self, rows: Iterable[tuple[str, int | None, float | None, str | None]]
+    ) -> int:
+        """Write (file_hash, phash, sharpness, phash_error) tuples, one
+        transaction.
+
+        A targeted UPDATE, deliberately not `update_many`: that path rewrites
+        every column of the row plus its whole `photo_paths` block, so a
+        fingerprint pass would rewrite 19,480 full rows to store one integer
+        each - and would silently clobber any enrichment written since the
+        Photo objects were loaded. This touches three columns and nothing else.
+        """
+        cur = self._conn.cursor()
+        n = 0
+        for digest, phash, sharpness, error in rows:
+            cur.execute(
+                "UPDATE photos SET phash = ?, sharpness = ?, phash_error = ? WHERE file_hash = ?",
+                (phash, sharpness, error, digest),
+            )
+            n += cur.rowcount
+        self._conn.commit()
+        return n
 
     def upsert_many(self, photos: Iterable[Photo]) -> tuple[int, int]:
         """Insert or merge. Returns (inserted, updated). One transaction."""
@@ -353,14 +491,14 @@ class PhotoStore:
                 gps_lon, gps_alt, people, face_regions, keywords, description,
                 favorite, camera_make, camera_model, width, height, source,
                 metadata_conflict, exif_taken_at_utc, takeout_people, archived,
-                trashed, sidecar_match)
+                trashed, sidecar_match, phash, sharpness, phash_error)
                VALUES
                (:file_hash,:media_type,:paths,:albums,:edited_of,:first_seen,
                 :last_seen,:taken_at_utc,:taken_at_local,:tz_source,:gps_lat,
                 :gps_lon,:gps_alt,:people,:face_regions,:keywords,:description,
                 :favorite,:camera_make,:camera_model,:width,:height,:source,
                 :metadata_conflict,:exif_taken_at_utc,:takeout_people,:archived,
-                :trashed,:sidecar_match)""",
+                :trashed,:sidecar_match,:phash,:sharpness,:phash_error)""",
             {
                 "file_hash": p.file_hash,
                 "media_type": str(p.media_type),
@@ -396,6 +534,9 @@ class PhotoStore:
                 "archived": int(m.archived),
                 "trashed": int(m.trashed),
                 "sidecar_match": p.sidecar_match,
+                "phash": _signed64(m.phash),
+                "sharpness": m.sharpness,
+                "phash_error": m.phash_error,
             },
         )
         cur.execute("DELETE FROM photo_paths WHERE file_hash = ?", (p.file_hash,))
@@ -431,6 +572,9 @@ class PhotoStore:
             takeout_people=json.loads(row["takeout_people"]),
             archived=bool(row["archived"]),
             trashed=bool(row["trashed"]),
+            phash=_unsigned64(row["phash"]),
+            sharpness=row["sharpness"],
+            phash_error=row["phash_error"],
         )
         return Photo(
             file_hash=row["file_hash"],

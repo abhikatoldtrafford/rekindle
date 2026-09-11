@@ -228,7 +228,11 @@ def test_v1_database_migrates_without_losing_rows(tmp_path):
     _write_v1_database(db_path)
 
     with PhotoStore(db_path) as store:
-        assert store.schema_version() == SCHEMA_VERSION == 2
+        # v1 -> v2 -> v3 in ONE open. This is the ladder's whole reason to
+        # exist: the single-step `!= 1` guard it replaced would have run the
+        # v2 step, left the database at v2, and then had __init__ reject it as
+        # unmigratable - turning every M0 database into "delete and re-index".
+        assert store.schema_version() == SCHEMA_VERSION == 3
         assert store.count() == 2
         photo = store.get("abc")
         assert photo is not None
@@ -340,11 +344,14 @@ def test_takeout_is_a_real_tz_source():
 
 
 def test_pre_v1_database_raises_instead_of_being_silently_stamped(tmp_path):
-    """`_migrate` guards on the EXACT starting version (1), not `< 2`. A
-    `>=` guard plus an unconditional bump to SCHEMA_VERSION would stamp any
-    older database - including one this migration step knows nothing about
-    - straight to v2 and declare success, making __init__'s friendly
-    "no migration exists" error unreachable.
+    """The ladder only walks KNOWN versions, and 0 is not one of them.
+
+    A `>=` guard plus an unconditional bump to SCHEMA_VERSION would stamp any
+    older database - including one no migration step knows anything about -
+    straight to the current version and declare success, making __init__'s
+    friendly "no migration exists" error unreachable. The ladder preserves
+    that property by looking each version up in its step table and stopping
+    when there is no entry.
     """
     db_path = tmp_path / "data" / "rekindle.sqlite"
     _write_v1_database(db_path)

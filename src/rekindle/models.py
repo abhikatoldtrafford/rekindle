@@ -80,6 +80,21 @@ class PhotoMeta:
     # both do. If a Takeout run ever reports a non-zero count here, Google has
     # changed the export layout and the exclusion needs revisiting.
     trashed: bool = False
+    # --- schema v3: perceptual fingerprint, for burst dedup ---
+    # 64-bit dHash of the decoded pixels. None means "not computed": either
+    # `rekindle fingerprint` has never run, or it ran and failed (see
+    # phash_error). Never guess a value - dedup treats unknown as NOT similar.
+    phash: int | None = None
+    # Relative focus measure; see memory.fingerprint.sharpness for what it is
+    # and is not. Comparable WITHIN a burst from one camera, meaningless as an
+    # absolute quality score across cameras.
+    sharpness: float | None = None
+    # Why phash is None, so a re-run does not redo a known failure. "video"
+    # (never decoded by design), "unreadable", "undecodable". None means it
+    # was simply never attempted - which is what distinguishes "not indexed
+    # yet" from "tried and could not", exactly as `enriched_at` does for
+    # enrichment.
+    phash_error: str | None = None
 
     @classmethod
     def empty(cls) -> PhotoMeta:
@@ -211,6 +226,15 @@ def merge_meta(old: PhotoMeta, new: PhotoMeta) -> tuple[PhotoMeta, bool]:
         takeout_people=list(old.takeout_people or new.takeout_people),
         archived=old.archived or new.archived,
         trashed=old.trashed or new.trashed,
+        # A re-index must never destroy a fingerprint. `new` is a folder scan
+        # and never computes one, so a wholesale `new.phash` would silently
+        # throw away a six-minute pass on every `rekindle index`. This is the
+        # same trap that destroyed enrichment before `exif_taken_at_utc` was
+        # added to this list - a field not named here is deleted by the next
+        # index run.
+        phash=old.phash if old.phash is not None else new.phash,
+        sharpness=old.sharpness if old.sharpness is not None else new.sharpness,
+        phash_error=old.phash_error or new.phash_error,
     )
     return merged, conflict
 
