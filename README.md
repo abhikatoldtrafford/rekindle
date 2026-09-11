@@ -100,6 +100,7 @@ Then make something:
 uv run rekindle memories                     # what could this library produce?
 uv run rekindle memory --recipe album_story --key "Kashmir"
 uv run rekindle memory --auto                # today's anniversary, if any
+uv run rekindle ui                           # edit a memory in your browser
 uv run rekindle watch ~/Pictures             # foreground; prints, never renders
 ```
 
@@ -235,6 +236,49 @@ the licence of everything rekindle can fetch.
 Without the extra, these commands print what to install and exit — nothing
 else changes, and the default `uv sync` stays small.
 
+### 🖼️ Editing a memory by hand
+
+```bash
+uv run rekindle ui
+```
+
+Opens a page on `127.0.0.1` where you can see what a memory is made of and
+change it: **drop a shot**, **see what the guardrails rejected and overrule
+it**, **drag to reorder**, **pick a different frame from a burst**, **pull in
+the rest of that afternoon**, set the pace and the music, and render.
+
+**The CLI stays fully capable and the page is a lens onto it.** It selects
+nothing of its own — candidates come from the same recipes, guardrail counts
+from the same `compose` and `collapse`, chosen shots from the same
+`engine.build` — and **it cannot show you a photo the CLI would refuse**,
+because every lookup goes through the same `MemoryIndex` chokepoint. An
+archived photo has no thumbnail, cannot be searched for and cannot be added.
+
+When you render, it hands you the command that rebuilds exactly what you made:
+
+```bash
+rekindle render memories/2026-09-12-album_story-kashmir/memory.json --frame-ms 1100
+```
+
+That is `rekindle render`, a first-class command: no browser, no server, no
+selection re-run. An afternoon of editing becomes something repeatable. And
+because the spec names photos by hash and the renderer resolves them through
+the index, excluding someone tomorrow removes them from every memory you have
+already saved — without editing a single file.
+
+**No new dependency.** The server is `http.server` from the standard library
+and the page is one HTML file with no build step, so `uv sync` stays at four
+packages and CI runs the tests rather than skipping them. Prompt search inside
+the page needs the `semantic` extra; without it the page still opens and
+everything else works, and the prompt box says what to install.
+
+Nothing is fetched from the network — no CDN, no font, no analytics, enforced
+by a `default-src 'self'` policy on every response. The URL carries a token
+that changes every run, `Host` and `Origin` are checked, and request logging is
+off by default, because a request log is a record of which of your photographs
+you looked at. How it was built, and the three controls that were cut, is in
+[the decision log](docs/decision-log-memory-builder.md).
+
 ## How it works
 
 ```
@@ -253,6 +297,9 @@ a folder of photos
   engine                 dedup → rank → cap → order
         ↓
   MemorySpec (JSON)  →  GIF (always)  |  MP4 (when ffmpeg is present)
+                     ↑
+  rekindle ui        |  a local page that edits the spec, and hands back
+                        `rekindle render <spec>` to rebuild it
 ```
 
 Photo selection is **deterministic Python** — an LLM never picks your photos,

@@ -31,6 +31,11 @@ from rekindle.models import Photo
 
 DB_NAME = "rekindle.sqlite"
 
+#: `f(text_or_hash, k) -> [(file_hash, score), ...]`, best first. The same
+#: shape `memory.prompt.Retriever` expects, so the prompt path takes one
+#: unchanged.
+Retrieve = Callable[[str, int], list[tuple[str, float]]]
+
 STATE_LOADING = "loading"
 STATE_READY = "ready"
 STATE_FAILED = "failed"
@@ -58,8 +63,8 @@ class Library:
         self.index: MemoryIndex | None = None
         self._ready = threading.Event()
         self._semantic_lock = threading.Lock()
-        self._retriever: Callable[[str, int], list[tuple[str, float]]] | None = None
-        self._similar: Callable[[str, int], list[tuple[str, float]]] | None = None
+        self._retriever: Retrieve | None = None
+        self._similar: Retrieve | None = None
         self.semantic_note = ""
         self.semantic_error = ""
 
@@ -162,7 +167,7 @@ class Library:
 
         return probe().any
 
-    def retriever(self) -> Callable[[str, int], list[tuple[str, float]]]:
+    def retriever(self) -> Retrieve:
         """The embedding-backed retriever, loaded once, on first use.
 
         Raises `LibraryError` carrying the install or embed command. The whole
@@ -175,7 +180,7 @@ class Library:
             assert self._retriever is not None
             return self._retriever
 
-    def similar(self) -> Callable[[str, int], list[tuple[str, float]]]:
+    def similar(self) -> Retrieve:
         with self._semantic_lock:
             if self._similar is None:
                 self._load_semantic()
@@ -194,7 +199,7 @@ class Library:
         from rekindle.semantic.availability import SemanticUnavailable, require
         from rekindle.semantic.encoder import load_encoder
         from rekindle.semantic.registry import embed_model
-        from rekindle.semantic.search import SemanticSearch, embed_query
+        from rekindle.semantic.search import SemanticSearch
         from rekindle.semantic.setup import cache_dir_for
         from rekindle.semantic.store import EmbeddingStore, store_root
 
@@ -226,26 +231,58 @@ class Library:
             )
             self.semantic_error = message
             raise LibraryError(message)
-        encoder = load_encoder(spec.key, device="auto", cache_dir=cache_dir_for(self.data_dir))
+        loaded = load_encoder(spec.key, device="auto", cache_dir=cache_dir_for(self.data_dir))
 
-        def retrieve(text: str, k: int) -> list[tuple[str, float]]:
-            hits = search.search_vector(embed_query(encoder.encoder, text), k=k)
-            return [(h.file_hash, h.score) for h in hits]
-
-        def neighbours(file_hash: str, k: int) -> list[tuple[str, float]]:
-            try:
-                hits = search.similar_to(file_hash, k=k)
-            except KeyError:
-                return []
-            return [(h.file_hash, h.score) for h in hits]
-
-        self._retriever = retrieve
-        self._similar = neighbours
+        self._retriever, self._similar = semantic_callables(search, loaded.encoder)
         self.semantic_note = (
             f"{len(search.matrix)} vectors, model {spec.key}, "
-            f"{encoder.runtime} on {encoder.device.device}"
+            f"{loaded.runtime} on {loaded.device.device}"
         )
         self.semantic_error = ""
+
+
+def semantic_callables(search, encoder) -> tuple[Retrieve, Retrieve]:
+    """`(retrieve, neighbours)` over an already-open search.
+
+    A free function, not a closure buried in `_load_semantic`, so that
+    `tests/test_web_semantic.py` can drive THIS code with a toy encoder and a
+    toy store. Building the pair inside the loader would leave the test
+    asserting against its own copy of the logic, which is the shape of a test
+    that cannot fail.
+
+    **`SemanticSearch.similar_to` is deliberately not used here**, and the
+    reason is a bug found by running the real UI against the real 18,201-vector
+    store. `similar_to` begins with `store.get(file_hash)`, which reads the
+    manifest over the `EmbeddingStore`'s own `sqlite3` connection - and a
+    `sqlite3` connection belongs to the thread that created it. The semantic
+    layer is loaded lazily by whichever request thread asks first, so the
+    second "more like this" landed on a different thread, raised
+    `ProgrammingError`, and closed the socket with no response at all. Text
+    search hid it completely, because `search_vector` reads only the in-memory
+    matrix.
+
+    So the vector is taken from that same in-memory matrix - whose rows are the
+    store's rows by construction, an invariant `load_matrix` validates - and
+    handed to the very function `similar_to` would have handed it to. Nothing
+    below touches a connection, so every request thread is safe.
+    """
+    from rekindle.semantic.search import embed_query
+
+    rows = {file_hash: i for i, file_hash in enumerate(search.matrix.hashes)}
+
+    def retrieve(text: str, k: int) -> list[tuple[str, float]]:
+        hits = search.search_vector(embed_query(encoder, text), k=k)
+        return [(h.file_hash, h.score) for h in hits]
+
+    def neighbours(file_hash: str, k: int) -> list[tuple[str, float]]:
+        row = rows.get(file_hash)
+        if row is None:
+            return []
+        hits = search.search_vector(search.matrix.data[row].tolist(), k=k + 1)
+        # A photo is its own nearest neighbour at cosine 1.0.
+        return [(h.file_hash, h.score) for h in hits if h.file_hash != file_hash][:k]
+
+    return retrieve, neighbours
 
 
 def _metadata_match(photo: Photo, needle: str) -> str:

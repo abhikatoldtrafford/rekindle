@@ -331,12 +331,22 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("X-Accel-Buffering", "no")
         self._privacy_headers()
         self.end_headers()
-        for event in events:
-            frame = (
-                f"event: {event['event']}\n"
-                f"data: {json.dumps(event['data'], ensure_ascii=False)}\n\n"
-            )
-            self.wfile.write(frame.encode("utf-8"))
+
+        def frame(name: str, data: dict) -> bytes:
+            return f"event: {name}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode()
+
+        try:
+            for event in events:
+                self.wfile.write(frame(event["event"], event["data"]))
+                self.wfile.flush()
+        except ConnectionError:  # pragma: no cover - the tab was closed
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # A stream that ends without a terminal event is a stream the
+            # browser RECONNECTS to, which re-runs the whole build - so an
+            # unexpected failure has to arrive as an event rather than as a
+            # dropped connection. `app.js` closes the EventSource on `error`.
+            self.wfile.write(frame("error", {"message": f"The build failed: {exc}", "hint": ""}))
             self.wfile.flush()
 
     def _thumb(self, file_hash: str, width_raw: str) -> None:

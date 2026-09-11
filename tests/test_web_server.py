@@ -354,6 +354,22 @@ def test_an_unknown_recipe_ends_the_stream_with_an_error(running):
     assert "nope" in events[-1]["data"]["message"]
 
 
+def test_a_stream_that_blows_up_still_ends_with_a_terminal_event(running, monkeypatch):
+    """A stream that just stops is a stream the browser RECONNECTS to, which
+    silently re-runs the whole build. Every failure has to arrive as an
+    event."""
+    app, _ = running
+    from rekindle.web import api as api_module
+
+    def explode(*_args, **_kwargs):
+        raise RuntimeError("the disk caught fire")
+
+    monkeypatch.setattr(api_module, "session_state", explode)
+    events = client(app).stream(f"/api/build?recipe=album_story&key={ALBUM}&t=test-token")
+    assert events[-1]["event"] == "error"
+    assert "disk caught fire" in events[-1]["data"]["message"]
+
+
 # ------------------------------------------------------------------- editing
 
 

@@ -160,8 +160,14 @@ def render_cmd(
         _report_drops(result)
         raise typer.Exit(code=1)
 
+    # `shots` is what the MEMORY holds; the preview holds the first
+    # `--preview-frames` of them. Reporting the preview's count as the
+    # memory's printed a 24-shot memory as "16 of 16 shots".
+    preview = ""
+    if result.preview_rendered < result.shots:
+        preview = f", first {result.preview_rendered} in the preview"
     line = (
-        f"[green]{spec.title}[/green] - {result.rendered} of {result.requested} shots, "
+        f"[green]{spec.title}[/green] - {result.shots} shots{preview}, "
         f"{result.preview_size[0]}x{result.preview_size[1]} preview "
         f"(WebP {result.webp_bytes // 1024} KB, GIF {result.gif_bytes // 1024} KB)"
     )
@@ -179,7 +185,7 @@ def render_cmd(
         console.print(f"  [yellow]![/yellow] {result.mp4_skipped}")
     if result.padded:
         console.print(
-            f"  [dim]{result.padded} of {result.rendered} shots were below the "
+            f"  [dim]{result.padded} of {result.preview_rendered} preview frames were below the "
             f"{result.canvas[0]}x{result.canvas[1]} canvas and are shown at native size.[/dim]"
         )
     _report_drops(result)

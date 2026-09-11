@@ -71,8 +71,13 @@ class RenderResult:
     webp_bytes: int = 0
     gif_bytes: int = 0
     mp4_bytes: int = 0
-    rendered: int = 0
-    requested: int = 0
+    #: How many shots the SPEC names. Not how many are in the preview: the
+    #: WebP and GIF stop at `preview_frames` (16 by default) while the MP4
+    #: carries every shot, and reporting the preview's count as the memory's
+    #: made a 24-shot memory print as "16 of 16 shots".
+    shots: int = 0
+    preview_rendered: int = 0
+    video_rendered: int = 0
     padded: int = 0
     dropped: dict[str, int] = field(default_factory=dict)
     examples: dict[str, str] = field(default_factory=dict)
@@ -82,7 +87,7 @@ class RenderResult:
 
     @property
     def ok(self) -> bool:
-        return self.rendered > 0
+        return self.preview_rendered > 0
 
     @property
     def withheld(self) -> int:
@@ -100,8 +105,9 @@ class RenderResult:
             "webp_bytes": self.webp_bytes,
             "gif_bytes": self.gif_bytes,
             "mp4_bytes": self.mp4_bytes,
-            "rendered": self.rendered,
-            "requested": self.requested,
+            "shots": self.shots,
+            "preview_rendered": self.preview_rendered,
+            "video_rendered": self.video_rendered,
             "padded": self.padded,
             "dropped": dict(self.dropped),
             "examples": dict(self.examples),
@@ -128,7 +134,7 @@ def render_spec(
     """
     options = options or RenderOptions()
     folder.mkdir(parents=True, exist_ok=True)
-    result = RenderResult(folder=folder)
+    result = RenderResult(folder=folder, shots=len(spec.shots))
 
     if options.write_spec:
         (folder / SPEC_NAME).write_text(spec.dumps(), encoding="utf-8")
@@ -146,8 +152,7 @@ def render_spec(
         locate=index.resolve_path,
         limit=options.preview_frames,
     )
-    result.requested = report.requested
-    result.rendered = report.rendered
+    result.preview_rendered = report.rendered
     result.dropped = dict(report.dropped)
     result.examples = dict(report.names)
     result.padded = report.placement.get(FIT_PAD, 0)
@@ -170,6 +175,7 @@ def render_spec(
     mp4_frames, mp4_report = build_frames(
         spec, video_size, resolve=index.get, locate=index.resolve_path
     )
+    result.video_rendered = mp4_report.rendered
     bed = resolve_music(options.music, memory_id=memory_id(spec.recipe, spec.key))
     result.music_used = bed
     outcome = write_mp4(

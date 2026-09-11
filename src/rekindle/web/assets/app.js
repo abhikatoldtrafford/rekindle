@@ -442,7 +442,7 @@ $("render").addEventListener("click", async () => {
     adopt(await post("/api/render", { session_id: state.session_id, no_mp4: $("no-mp4").checked }));
     const result = state.last_render;
     say($("render-note"),
-      `${result.rendered} of ${result.requested} shots · WebP ${Math.round(result.webp_bytes / 1024)} KB` +
+      `${result.shots} shots (${result.preview_rendered} in the preview) · WebP ${Math.round(result.webp_bytes / 1024)} KB` +
       (result.mp4 ? ` · MP4 ${Math.round(result.mp4_bytes / 1024)} KB` : result.mp4_skipped ? " · no MP4 (ffmpeg not on PATH)" : "") +
       (result.withheld ? ` · ${result.withheld} shots withheld by the guardrails` : "") +
       ` → ${result.folder}`);
