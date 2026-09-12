@@ -569,3 +569,390 @@ $("prompt-form").addEventListener("submit", (event) => {
 });
 
 loadStatus();
+
+/* --------------------------------------------------------------- calibrate
+ *
+ * A guided sequence, not a settings screen. One question at a time, "4 of 9"
+ * in the header, and an end.
+ *
+ * The page holds NO calibration logic. It does not know which photograph
+ * comes next, what the answers derive to, or whether the publishing gate may
+ * be widened - it asks and it renders. That is what lets the whole flow be
+ * tested by calling functions, and it is what stops the safeguard existing on
+ * the terminal side only.
+ *
+ * The measured value behind each photograph is never sent to the browser. A
+ * blind judgement stops being blind the moment the page can render the
+ * number, and one debugging console.log is all that would take.
+ */
+
+let cal = null;        // the last /api/calibrate payload
+let calStep = null;    // the step being worked on
+let calMode = "";      // blind | slider | default
+let calValue = null;   // the number the slider or a derivation is proposing
+
+const calFail = (error) => say($("cal-area"), error.message, true);
+
+function calStepFor(setting) {
+  return (cal.steps || []).find((s) => s.setting === setting) || null;
+}
+
+async function calStatus() {
+  cal = await api("/api/calibrate");
+  const offer = cal.offer || {};
+  $("calibrate-offer").hidden = !offer.show;
+  text($("calibrate-headline"), offer.headline);
+  return cal;
+}
+
+function calNextTodo() {
+  return (cal.steps || []).find((s) => s.state === "todo") || null;
+}
+
+async function calBegin() {
+  cal = await post("/api/calibrate/begin", {});
+  $("calibrate-offer").hidden = true;
+  $("calibrate").hidden = false;
+  await calGo(calNextTodo());
+}
+
+async function calGo(step) {
+  if (!step) return calSummarise();
+  calStep = step;
+  calValue = null;
+  $("cal-finish").hidden = true;
+  $("cal-refusal").hidden = true;
+  text($("cal-title"), step.title);
+  text($("cal-progress"), step.position + " of " + cal.total_steps);
+  text($("cal-area"), step.area + ". " + step.what);
+  calRenderModes(step);
+  await calSetMode(step.modes[0]);
+}
+
+function calRenderModes(step) {
+  const labels = {
+    blind: "show me photographs",
+    slider: "let me pick a number",
+    default: "what does rekindle's value do?",
+  };
+  const box = $("cal-modes");
+  box.replaceChildren();
+  step.modes.forEach((mode) => {
+    const chip = element("button", "chip", labels[mode] || mode);
+    chip.type = "button";
+    chip.addEventListener("click", () => calSetMode(mode).catch(calFail));
+    box.appendChild(chip);
+  });
+}
+
+async function calSetMode(mode) {
+  calMode = mode;
+  Array.from($("cal-modes").children).forEach((chip, i) =>
+    chip.classList.toggle("on", calStep.modes[i] === mode)
+  );
+  $("cal-blind").hidden = mode !== "blind";
+  $("cal-slider").hidden = mode !== "slider";
+  $("cal-default").hidden = mode !== "default";
+  $("cal-apply").hidden = true;
+  if (mode === "blind") return calAsk();
+  if (mode === "slider") return calSlider();
+  return calDefault();
+}
+
+/* -- blind judgement */
+
+function calShow(payload) {
+  text($("cal-confidence"), payload.confidence || "");
+  if (payload.derived !== null && payload.derived !== undefined) calPropose(payload.derived);
+  if (payload.exhausted) {
+    text($("cal-question"), "That is every example this library can offer.");
+    $("cal-photos").replaceChildren();
+    return;
+  }
+  text($("cal-question"), payload.question);
+  text($("cal-note"), calStep.note || "");
+  text($("cal-caption"), payload.caption || "");
+  text($("cal-yes"), payload.yes);
+  text($("cal-no"), payload.no);
+  const photos = $("cal-photos");
+  photos.replaceChildren();
+  payload.hashes.forEach((hash) => {
+    const img = document.createElement("img");
+    img.src = thumb(hash, 900);
+    img.alt = "";
+    photos.appendChild(img);
+  });
+}
+
+async function calAsk() {
+  calShow(await api("/api/calibrate/example?setting=" + encodeURIComponent(calStep.setting)));
+}
+
+async function calAnswer(saidYes) {
+  calShow(await post("/api/calibrate/answer", { setting: calStep.setting, said_yes: saidYes }));
+}
+
+/* -- slider, with the effect recomputed as it moves */
+
+async function calSlider() {
+  const step = calStep;
+  const range = $("cal-range");
+  const lo = step.minimum === null ? step.default / 4 : step.minimum;
+  const hi = step.maximum === null ? step.default * 4 : step.maximum;
+  // 200 stops across whatever range the setting declares, so a float
+  // threshold gets real resolution and an int one still lands on integers
+  // once the server floors it.
+  range.min = lo;
+  range.max = hi;
+  range.step = (hi - lo) / 200;
+  range.value = step.value;
+  text($("cal-tradeoff"), "Raising it: " + step.raising + "  ·  Lowering it: " + step.lowering);
+  await calShowConsequence(Number(range.value));
+}
+
+let calConsequenceTimer = null;
+function calSliderMoved() {
+  const value = Number($("cal-range").value);
+  text($("cal-value"), value.toPrecision(4));
+  // Debounced: the consequence runs the REAL composition gate over the whole
+  // library, and firing it on every pixel of a drag would make the slider
+  // feel broken.
+  clearTimeout(calConsequenceTimer);
+  calConsequenceTimer = setTimeout(() => calShowConsequence(value).catch(calFail), 180);
+}
+
+async function calShowConsequence(value) {
+  calPropose(value);
+  text($("cal-value"), Number(value).toPrecision(4));
+  const payload = await api(
+    "/api/calibrate/consequence?setting=" + encodeURIComponent(calStep.setting) + "&value=" + value
+  );
+  if (!payload.countable) {
+    text($("cal-consequence"), payload.why);
+    $("cal-effect").replaceChildren();
+    return;
+  }
+  text($("cal-consequence"), payload.sentence);
+  const box = $("cal-effect");
+  box.replaceChildren();
+  const show = (hashes, className, label) =>
+    hashes.forEach((hash) => {
+      const figure = element("figure");
+      const img = document.createElement("img");
+      img.src = thumb(hash, 320);
+      img.alt = "";
+      img.className = className;
+      figure.appendChild(img);
+      figure.appendChild(element("figcaption", null, label));
+      box.appendChild(figure);
+    });
+  show(payload.newly_dropped, "dropped", "would be dropped");
+  show(payload.newly_kept, "kept", "would be kept");
+}
+
+/* -- show the default's effect, accept or nudge */
+
+async function calDefault() {
+  const step = calStep;
+  text($("cal-default-value"), "rekindle's value is " + step.default + " (" + step.unit + ").");
+  text($("cal-measured"), step.measured);
+  const payload = await api(
+    "/api/calibrate/consequence?setting=" +
+      encodeURIComponent(step.setting) +
+      "&value=" +
+      step.default
+  );
+  text(
+    $("cal-default-effect"),
+    payload.countable
+      ? "On your library that keeps " + payload.kept_now.toLocaleString() + " photographs."
+      : payload.why
+  );
+}
+
+/* -- committing */
+
+function calPropose(value) {
+  calValue = value;
+  const button = $("cal-apply");
+  button.hidden = false;
+  text(button, "Use " + Number(value).toPrecision(4));
+}
+
+async function calApply() {
+  if (calValue === null) return;
+  const payload = await post("/api/calibrate/choose", {
+    setting: calStep.setting,
+    value: calValue,
+  });
+  if (payload.refused) return calRefuse(payload.refused);
+  cal = payload;
+  await calGo(calNextTodo());
+}
+
+/* -- THE SAFEGUARD.
+ *
+ * The server refuses; the page shows the refusal and asks for the sentence
+ * back. There is no boolean anywhere on this path, which is the point: a
+ * drag-and-release sends a number, and a number can never widen this gate.
+ */
+
+function calRefuse(refusal) {
+  $("cal-refusal").hidden = false;
+  text($("cal-refusal-meaning"), refusal.meaning);
+  text($("cal-refusal-phrase"), refusal.phrase);
+  $("cal-refusal-input").value = "";
+  $("cal-refusal-input").focus();
+}
+
+async function calConfirm() {
+  const payload = await post("/api/calibrate/confirm", {
+    setting: calStep.setting,
+    phrase: $("cal-refusal-input").value,
+  });
+  if (!payload.confirmed) {
+    text($("cal-refusal-meaning"), "That is not the sentence. Nothing has been changed.");
+    return;
+  }
+  $("cal-refusal").hidden = true;
+  await calApply();
+}
+
+/* -- the way out */
+
+function calSummarise() {
+  $("cal-blind").hidden = true;
+  $("cal-slider").hidden = true;
+  $("cal-default").hidden = true;
+  $("cal-apply").hidden = true;
+  $("cal-modes").replaceChildren();
+  $("cal-finish").hidden = false;
+  text($("cal-title"), "Done");
+  text($("cal-progress"), "");
+  const overrides = cal.overrides || {};
+  const names = Object.keys(overrides);
+  const box = $("cal-summary");
+  box.replaceChildren();
+  if (!names.length) {
+    box.appendChild(
+      element(
+        "p",
+        null,
+        "You kept every one of rekindle's defaults. That is a real result: they " +
+          "were derived from a different library and they fit yours."
+      )
+    );
+    return;
+  }
+  const table = document.createElement("table");
+  names.forEach((name) => {
+    const step = calStepFor(name);
+    const row = table.insertRow();
+    row.insertCell().textContent = name;
+    row.insertCell().textContent = step ? step.default : "";
+    row.insertCell().textContent = overrides[name];
+    const why = row.insertCell();
+    why.textContent = step ? step.confidence : "";
+    why.className = "muted";
+  });
+  box.appendChild(table);
+}
+
+async function calWrite() {
+  const written = await post("/api/calibrate/finish", {});
+  const box = $("cal-affected");
+  box.replaceChildren();
+  box.appendChild(
+    element("p", null, "Written to " + written.written + ". The previous file is at " + written.backup + ".")
+  );
+  const waiting = element(
+    "p",
+    "muted",
+    "Re-running selection for every memory you have built — no frames, no encoding…"
+  );
+  box.appendChild(waiting);
+  const report = await api("/api/calibrate/affected");
+  waiting.remove();
+  box.appendChild(element("p", null, report.sentence));
+  if (report.affected.length) {
+    const list = document.createElement("ul");
+    report.affected.forEach((change) => {
+      const bits = [];
+      if (change.gained) bits.push("+" + change.gained);
+      if (change.lost) bits.push("−" + change.lost);
+      list.appendChild(
+        element(
+          "li",
+          null,
+          change.memory_id + ": " + change.before + " → " + change.after + "  " + bits.join(" ")
+        )
+      );
+    });
+    box.appendChild(list);
+    box.appendChild(
+      element(
+        "p",
+        "muted",
+        "Rebuilding is the expensive half. Only these are worth redoing; everything " +
+          "else would come out of the renderer byte-identical."
+      )
+    );
+  }
+  report.uncheckable.forEach((change) =>
+    box.appendChild(element("p", "muted", change.memory_id + ": " + change.note))
+  );
+}
+
+$("calibrate-start").addEventListener("click", () => calBegin().catch(calFail));
+$("calibrate-later").addEventListener("click", () => {
+  $("calibrate-offer").hidden = true;
+});
+$("calibrate-never").addEventListener("click", () =>
+  post("/api/calibrate/not-now", {})
+    .then(() => {
+      $("calibrate-offer").hidden = true;
+    })
+    .catch(calFail)
+);
+$("cal-quit").addEventListener("click", () => {
+  $("calibrate").hidden = true;
+});
+$("cal-yes").addEventListener("click", () => calAnswer(true).catch(calFail));
+$("cal-no").addEventListener("click", () => calAnswer(false).catch(calFail));
+$("cal-range").addEventListener("input", calSliderMoved);
+$("cal-apply").addEventListener("click", () => calApply().catch(calFail));
+$("cal-accept").addEventListener("click", () =>
+  post("/api/calibrate/choose", { setting: calStep.setting, accept: true })
+    .then((payload) => {
+      cal = payload;
+      return calGo(calNextTodo());
+    })
+    .catch(calFail)
+);
+$("cal-skip").addEventListener("click", () =>
+  post("/api/calibrate/skip", { setting: calStep.setting })
+    .then((payload) => {
+      cal = payload;
+      return calGo(calNextTodo());
+    })
+    .catch(calFail)
+);
+$("cal-redo").addEventListener("click", () =>
+  post("/api/calibrate/reset", { setting: calStep.setting })
+    .then((payload) => {
+      cal = payload;
+      return calGo(calStepFor(calStep.setting));
+    })
+    .catch(calFail)
+);
+$("cal-refusal-go").addEventListener("click", () => calConfirm().catch(calFail));
+$("cal-refusal-cancel").addEventListener("click", () => {
+  $("cal-refusal").hidden = true;
+});
+$("cal-write").addEventListener("click", () => calWrite().catch(calFail));
+
+calStatus().catch(() => {
+  /* The library is still loading, or this build has no calibration state.
+     Either way the offer simply does not appear - it must never be the thing
+     that stops someone opening their photographs. */
+});

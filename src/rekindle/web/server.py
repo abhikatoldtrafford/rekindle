@@ -62,6 +62,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
 from rekindle.web import api
+from rekindle.web import calibrate_api as calibrate
 from rekindle.web.library import Library, LibraryError
 from rekindle.web.thumbs import GRID, SIZES, ThumbnailCache, ThumbnailError
 
@@ -111,6 +112,9 @@ class App:
             max_shots=config.max_shots,
         )
         self.thumbs = ThumbnailCache(config.data_dir / "cache" / "thumbs")
+        # Built lazily inside itself: the library loads on a background thread
+        # and a calibration session needs its photographs.
+        self.calibration = calibrate.CalibrationRoom(self.library, memories_root=config.out_dir)
 
     @property
     def origins(self) -> set[str]:
@@ -241,6 +245,20 @@ class Handler(BaseHTTPRequestHandler):
                 )
             if path == "/api/day":
                 return self._json(api.capture_day(workshop, file_hash=one("hash")))
+            if path == "/api/calibrate":
+                return self._json(calibrate.status(self.app.calibration))
+            if path == "/api/calibrate/example":
+                return self._json(calibrate.example(self.app.calibration, setting=one("setting")))
+            if path == "/api/calibrate/consequence":
+                return self._json(
+                    calibrate.consequence(
+                        self.app.calibration,
+                        setting=one("setting"),
+                        value=_float(one("value")),
+                    )
+                )
+            if path == "/api/calibrate/affected":
+                return self._json(calibrate.affected(self.app.calibration))
             if path.startswith("/api/session/"):
                 return self._json(
                     api.session_state(workshop, workshop.get(path[len("/api/session/") :]))
@@ -256,6 +274,49 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(api.render(workshop, _need(body, "session_id"), body))
             if path == "/api/dismiss":
                 return self._json(api.dismiss(workshop, _need(body, "session_id")))
+            if path == "/api/calibrate/begin":
+                return self._json(calibrate.begin(self.app.calibration))
+            if path == "/api/calibrate/answer":
+                # The VERDICT only. The browser never sends back the measured
+                # value: a hand-crafted POST could then place a judgement
+                # anywhere on the scale, and the server already knows which
+                # example it handed out.
+                return self._json(
+                    calibrate.answer(
+                        self.app.calibration,
+                        setting=_need(body, "setting"),
+                        said_yes=bool(body.get("said_yes")),
+                    )
+                )
+            if path == "/api/calibrate/choose":
+                return self._json(
+                    calibrate.choose(
+                        self.app.calibration,
+                        setting=_need(body, "setting"),
+                        value=(None if body.get("value") is None else float(body["value"])),
+                        accept=bool(body.get("accept")),
+                    )
+                )
+            if path == "/api/calibrate/confirm":
+                return self._json(
+                    calibrate.confirm(
+                        self.app.calibration,
+                        setting=_need(body, "setting"),
+                        phrase=str(body.get("phrase", "")),
+                    )
+                )
+            if path == "/api/calibrate/skip":
+                return self._json(
+                    calibrate.skip(self.app.calibration, setting=_need(body, "setting"))
+                )
+            if path == "/api/calibrate/reset":
+                return self._json(
+                    calibrate.reset(self.app.calibration, setting=_need(body, "setting"))
+                )
+            if path == "/api/calibrate/finish":
+                return self._json(calibrate.finish(self.app.calibration))
+            if path == "/api/calibrate/not-now":
+                return self._json(calibrate.dismiss_offer(self.app.calibration))
 
         self._json({"error": f"no route for {method} {path}"}, status=404)
 
@@ -456,6 +517,19 @@ def _int(raw: str | None, default: int, low: int, high: int) -> int:
     except (TypeError, ValueError):
         return default
     return max(low, min(value, high))
+
+
+def _float(raw: str | None) -> float:
+    """A query-string number, or a refusal naming the parameter.
+
+    Not clamped here: `config.Setting.clamp_error` owns the range, and a
+    second range check in the HTTP layer is a second thing to keep in step
+    with `defaults.toml`.
+    """
+    try:
+        return float(raw or "")
+    except (TypeError, ValueError):
+        raise api.ApiError("`value` must be a number.") from None
 
 
 def _need(body: dict, field: str) -> str:

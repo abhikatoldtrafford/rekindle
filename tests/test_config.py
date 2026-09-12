@@ -271,8 +271,7 @@ def _p_lambda_penalty(_):
     # `a` is the best photo and looks like the anchor; the `b`s are worse and
     # look nothing like it. Lambda alone decides which kind wins.
     candidates = [_photo("a", phash=0xFF, colour=_hist(0), sharpness=9.0)] + [
-        _photo(f"b{i}", phash=0xFFFFFFFFFFFF, colour=_hist(40), sharpness=8.0 - i)
-        for i in range(3)
+        _photo(f"b{i}", phash=0xFFFFFFFFFFFF, colour=_hist(40), sharpness=8.0 - i) for i in range(3)
     ]
     got, _ = pick(
         candidates, 1, rank=lambda ps: sorted(ps, key=lambda p: -p.meta.sharpness), already=chosen
@@ -538,6 +537,7 @@ def test_every_setting_reaches_the_code_that_reads_it(key):
 
 def test_the_engine_reads_every_selection_setting(tmp_path):
     from rekindle.memory import engine
+
     photos = [
         _photo(f"p{i:02d}", phash=i << 9, colour=_hist(i), sharpness=0.5 + i / 100, at=i * 3600)
         for i in range(12)

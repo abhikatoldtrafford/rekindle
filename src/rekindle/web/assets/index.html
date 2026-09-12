@@ -14,6 +14,90 @@
   <div id="library" class="muted">reading your library&hellip;</div>
 </header>
 
+<!-- The first-run offer. Hidden until /api/calibrate says to show it, and
+     once dismissed or finished it never appears again: `should_offer` on the
+     server is the single place that decides. -->
+<aside id="calibrate-offer" class="banner" hidden>
+  <div id="calibrate-headline"></div>
+  <div class="controls" style="margin-top:0.6rem">
+    <button id="calibrate-start" type="button" class="primary">Calibrate to my photographs</button>
+    <button id="calibrate-later" type="button">Not now</button>
+    <button id="calibrate-never" type="button">Don&rsquo;t ask again</button>
+  </div>
+</aside>
+
+<section id="calibrate" hidden>
+  <div class="cal-head">
+    <h2 id="cal-title">Calibrating</h2>
+    <span id="cal-progress" class="pill"></span>
+    <button id="cal-quit" type="button">Stop &mdash; my answers are saved</button>
+  </div>
+  <p class="muted" id="cal-area"></p>
+
+  <div id="cal-modes" class="chips"></div>
+
+  <!-- blind judgement -->
+  <div id="cal-blind" hidden>
+    <p id="cal-question" class="cal-question"></p>
+    <p class="muted" id="cal-note"></p>
+    <div id="cal-photos" class="cal-photos"></div>
+    <p class="muted" id="cal-caption"></p>
+    <div class="controls">
+      <button id="cal-yes" type="button" class="danger"></button>
+      <button id="cal-no" type="button" class="primary"></button>
+    </div>
+    <p class="muted" id="cal-confidence"></p>
+  </div>
+
+  <!-- slider, with the consequence recomputed as it moves -->
+  <div id="cal-slider" hidden>
+    <p class="muted" id="cal-tradeoff"></p>
+    <div class="controls">
+      <input id="cal-range" type="range" aria-label="Threshold">
+      <output id="cal-value" class="pill"></output>
+    </div>
+    <p id="cal-consequence"></p>
+    <div id="cal-effect" class="cal-effect"></div>
+  </div>
+
+  <!-- show the default's effect, accept or nudge -->
+  <div id="cal-default" hidden>
+    <p id="cal-default-value"></p>
+    <p class="muted" id="cal-measured"></p>
+    <p id="cal-default-effect"></p>
+  </div>
+
+  <!-- the safeguard. Shown only when the server refuses a widening. -->
+  <div id="cal-refusal" class="cal-refusal" hidden>
+    <h3>This widens the publishing gate</h3>
+    <p id="cal-refusal-meaning"></p>
+    <p class="muted">Type this sentence exactly to continue. Anything else cancels.</p>
+    <p><code id="cal-refusal-phrase"></code></p>
+    <div class="controls">
+      <input id="cal-refusal-input" type="text" size="60" aria-label="Confirmation sentence">
+      <button id="cal-refusal-go" type="button" class="danger">Widen it</button>
+      <button id="cal-refusal-cancel" type="button">Leave it alone</button>
+    </div>
+  </div>
+
+  <div class="controls" style="margin-top:1rem">
+    <button id="cal-apply" type="button" class="primary" hidden>Use this</button>
+    <button id="cal-accept" type="button">Keep rekindle&rsquo;s value</button>
+    <button id="cal-skip" type="button">Skip this one</button>
+    <button id="cal-redo" type="button">Start this one again</button>
+  </div>
+
+  <!-- the way out -->
+  <div id="cal-finish" hidden>
+    <h3>What you changed</h3>
+    <div id="cal-summary" class="report"></div>
+    <div class="controls">
+      <button id="cal-write" type="button" class="primary">Write rekindle.toml</button>
+    </div>
+    <div id="cal-affected"></div>
+  </div>
+</section>
+
 <section id="ask">
   <form id="prompt-form" autocomplete="off">
     <input id="prompt" type="text" placeholder="durga puja over the years" aria-label="Describe a memory">

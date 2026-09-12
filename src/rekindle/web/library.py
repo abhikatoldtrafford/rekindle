@@ -37,6 +37,10 @@ DB_NAME = "rekindle.sqlite"
 #: unchanged.
 Retrieve = Callable[[str, int], list[tuple[str, float]]]
 
+#: Distinguishes "never looked" from "looked and there is none", so the
+#: 60 MB matrix load is attempted exactly once.
+_UNSET = object()
+
 STATE_LOADING = "loading"
 STATE_READY = "ready"
 STATE_FAILED = "failed"
@@ -65,6 +69,7 @@ class Library:
         self._ready = threading.Event()
         self._semantic_lock = threading.Lock()
         self._retriever: Retrieve | None = None
+        self._support: object = _UNSET
         self._similar: Retrieve | None = None
         self.semantic_note = ""
         self.semantic_error = ""
@@ -171,6 +176,25 @@ class Library:
         from rekindle.semantic.availability import probe
 
         return probe().any
+
+    def semantic_support(self):
+        """The embedding store as a diversity/dedup signal, or None.
+
+        Distinct from `retriever`: that one needs the TEXT encoder, which is a
+        1.7 GB CLIP model. This needs only the stored image vectors, so a
+        library that was embedded on another machine can still be calibrated
+        and its memories re-selected here. Never raises - "no embeddings" is a
+        supported configuration.
+        """
+        with self._semantic_lock:
+            if self._support is _UNSET:
+                try:
+                    from rekindle.semantic.diversity import open_support
+
+                    self._support = open_support(self.data_dir)
+                except Exception:  # noqa: BLE001 - any failure means "not available"
+                    self._support = None
+            return self._support
 
     def retriever(self) -> Retrieve:
         """The embedding-backed retriever, loaded once, on first use.

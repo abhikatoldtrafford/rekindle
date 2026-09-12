@@ -474,6 +474,54 @@ where it can't guarantee that:
 - **No memory renders itself.** `rekindle watch` prints the command; you run
   it. Unprompted memories are where the real risk lives.
 
+## 🎚️ Tuning it to your photographs
+
+Every threshold rekindle ships was derived by hand from **one** library — a
+Bengali family archive spanning 2000–2026. Sharpness 0.12, burst 30 s, dedup
+cosine 0.92. Each was measured carefully; none of them knows anything about
+your photographs.
+
+So they are visible, and you can re-derive them the same way they were derived:
+
+```bash
+rekindle config list                              # every value, and what you changed
+rekindle config explain composition.min_sharpness # what it does, and where 0.12 came from
+rekindle calibrate                                # derive them from YOUR photographs
+```
+
+`rekindle calibrate` is a guided sequence, not a settings page. It shows you
+photographs from your own library, chosen near the current cut, and asks a
+plain question about each — *"too blurry to use?"*, *"same moment, or two
+different photographs?"* You never see a number. You can also pick a number
+directly and watch the effect, or just look at what rekindle's default does
+and accept it. It runs once; finishing is a real state and it does not ask
+again. Stop any time — your answers are saved.
+
+Three things it will always do:
+
+- **Show the consequence before writing.** "This collapses 3,264 MORE
+  photographs away as duplicates." Then it writes.
+- **Say what a number rests on.** "Rests on 7 judgements, but only ONE of them
+  fell on the other side of the line, so the whole threshold is resting on a
+  single photograph."
+- **Tell you which memories would actually change.** On the way out it re-runs
+  *selection* for every memory you have built — no frames, no encoding — and
+  diffs the shot lists: *"Your changes affect 14 of 189 memories. 11 gain
+  photos, 3 lose one."* Rebuild those, rebuild everything, or nothing.
+
+Your choices land in `rekindle.toml` beside the index. Only what you changed
+is in it, so an upgrade improves the values you did *not* choose. It contains
+numbers and nothing else — no paths, no names — so it is safe to commit.
+
+**The face gate is different.** It decides what may reach a public repository
+and it is calibratable, but tightening it is free and widening it needs a
+separate confirmation in which you type out, in plain words, that more
+photographs of other people will become publishable. A drag of a slider can
+never widen it.
+
+The same flow is in `rekindle ui`, where you see the photographs in the page
+rather than opening the paths it prints.
+
 ### Known limits
 
 We'd rather tell you than let you find out:

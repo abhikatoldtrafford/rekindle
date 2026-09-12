@@ -205,3 +205,39 @@ footer { padding: 1.5rem; }
   section, main { padding: 0 0.8rem; }
   .grid { grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); }
 }
+
+/* ---------------------------------------------------------- calibration */
+
+#calibrate { margin: 0 1.5rem 1.2rem; padding: 1rem 1.2rem; background: var(--panel);
+             border: 1px solid var(--edge); border-radius: var(--radius); }
+.cal-head { display: flex; align-items: baseline; gap: 0.8rem; flex-wrap: wrap; }
+.cal-head h2 { margin: 0; }
+.cal-head button { margin-left: auto; }
+.cal-question { font-size: 1.15rem; margin: 0.8rem 0 0.2rem; }
+
+/* Two photographs side by side for a sameness question, one for a quality
+   one. `auto-fit` rather than a count, so the pair stacks on a narrow
+   window instead of shrinking both to postage stamps. */
+.cal-photos { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+              gap: 0.8rem; margin: 0.8rem 0; }
+.cal-photos img { width: 100%; border-radius: 8px; display: block; background: #000; }
+
+.cal-effect { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr));
+              gap: 0.4rem; margin-top: 0.7rem; }
+.cal-effect img { width: 100%; border-radius: 6px; display: block; }
+.cal-effect .kept { outline: 2px solid var(--good); }
+.cal-effect .dropped { outline: 2px solid var(--bad); }
+.cal-effect figure { margin: 0; }
+.cal-effect figcaption { font-size: 0.72rem; color: var(--dim); }
+
+#cal-range { flex: 1 1 20rem; }
+
+/* The safeguard is styled to be READ, not clicked past. */
+.cal-refusal { margin-top: 1rem; padding: 0.9rem 1rem; border-radius: var(--radius);
+               border: 2px solid var(--bad); background: rgba(212, 112, 95, 0.08); }
+.cal-refusal h3 { color: var(--bad); margin-top: 0; }
+.cal-refusal code { display: block; padding: 0.5rem 0.7rem; background: #000;
+                    border-radius: 6px; font-size: 0.85rem; overflow-wrap: anywhere; }
+
+#cal-affected { margin-top: 0.8rem; font-size: 0.86rem; }
+#cal-affected ul { margin: 0.4rem 0 0; padding-left: 1.1rem; color: var(--dim); }

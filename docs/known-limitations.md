@@ -849,3 +849,73 @@ the fake returns real strings that are really verified - it is not a mock
 asserting it was called. But no key was available while this was built, so
 **the live path is untested since the payload changed.** The first thing to do
 with a key is run one memory with `--captions gpt` and read what comes back.
+
+### The exit question takes about three minutes on 189 memories, not seconds
+
+Selection really is cheap next to rendering, but "cheap" is not "instant" and
+the difference matters to a progress message. Measured on the reference
+library - 19,480 photos, 189 memories under `memories/general`, with the
+embedding store loaded:
+
+| | |
+|---|---|
+| Re-running selection for all 189 memories | **190 s** |
+| The same with a smaller `max_shots`, so the diversity pick does less | 133 s |
+| Rendering those 189 memories | hours |
+
+The cost is not the composition gates. It is `recipe.select` scanning the
+index once per offer plus, where a memory has enough embedded photos,
+`semantic.diversity.calibrate` building a pairwise cosine matrix for that
+memory's pool. Both are per memory and neither is cached across memories.
+
+So the web UI's exit question is a single three-minute request. It says what
+it is doing while it waits and nothing is lost if the tab is closed - the
+configuration has already been written by then - but on a much larger library
+it wants to be a stream of events like `/api/build` already is, and it is not
+one yet.
+
+### Blind judgement converges slowly when the user answers almost all one way
+
+`judge.next_probe` bisects the interval between the most extreme rejection and
+the least extreme acceptance. That is the right interval, and it halves every
+answer - but only while both sides have evidence. Nine "fine" answers and one
+"too blurry" produce a cut sitting a hair away from that single photograph,
+and the derivation is then a statement about one image.
+
+`Derived.confidence` now says so in those words ("only ONE of them fell on the
+other side of the line, so the whole threshold is resting on a single
+photograph") and `Derived.thin` exposes it to callers. What it does NOT do is
+go and look for more evidence on the sparse side: a second sampling strategy
+that deliberately probes the extremes would be better, and would have made the
+reference library's own blur calibration - 10 answers, 2 of them rejections -
+rest on more than it does.
+
+### A blind judgement derived a dedup threshold that would have deleted 18% of the library
+
+Four honest blind judgements about real within-30-second pairs from the
+reference library derived `dedup.phash_distance = 21`. Both pairs judged "the
+same moment" sat at distance 18 and 20; both judged "two different
+photographs" sat at 22 and 27. The answers separate cleanly. The number is
+still wrong:
+
+| threshold | photographs collapsed away | of 18,201 |
+|---|---|---|
+| **6** (shipped) | 2,077 | 11.41% |
+| 12 | 3,396 | 18.66% |
+| **21** (derived from four answers) | **5,341** | **29.34%** |
+
+The shipped 6 came from measuring the FALSE-POSITIVE rate over 414 photos -
+0.033% of unrelated pairs at 6, 0.133% at 12. Four pairs cannot see that, and
+no number of blind judgements about pairs the sampler chose can, because the
+sampler chooses pairs that are already inside the time gate.
+
+Two things came out of this. `preview` now counts deletions for the dedup
+thresholds and phrases them as deletions, and the slider mode was added to
+`dedup.phash_distance` so the whole ladder is visible before a value is
+chosen. Both are in the flow now; neither existed when the number was derived,
+and without them 21 would have been written.
+
+**The remaining gap is real**: nothing in the calibration flow measures a
+false-positive rate against unrelated pairs. Until it does, a blind judgement
+about sameness is evidence about the pairs shown and not about the threshold,
+and the deletion count is the only thing standing between the two.

@@ -9,6 +9,7 @@ import typer
 from rich.console import Console
 
 from rekindle import __version__
+from rekindle.calibrate.cli import register as register_calibrate
 from rekindle.config.cli import register as register_config
 from rekindle.db import PhotoStore
 from rekindle.doctor import diagnose, diagnose_index, render, render_enrich, render_index
@@ -37,6 +38,10 @@ register_semantic(app)
 # Same shape for `rekindle config`. It reads nothing but a TOML file, so it
 # costs `rekindle --help` nothing.
 register_config(app)
+
+# And `rekindle calibrate`, which imports Pillow and a model for nothing:
+# every heavy import inside it is function-local.
+register_calibrate(app)
 
 DataDir = Annotated[Path, typer.Option("--data-dir", help="Where rekindle stores its index.")]
 
