@@ -19,6 +19,7 @@ from rekindle.cli import app
 from rekindle.db import PhotoStore
 from rekindle.memory.history import MemoryState
 from rekindle.models import MediaType, Photo, PhotoMeta
+from tests.helpers import unwrapped
 
 runner = CliRunner()
 T0 = datetime(2020, 5, 1, 12, 0, tzinfo=UTC)
@@ -865,6 +866,51 @@ def test_captions_gpt_without_a_key_falls_back_cleanly(tmp_path, monkeypatch):
     assert result.exit_code == 0, result.output
     assert "OPENAI_API_KEY is not set" in result.output
     assert (next(iter(out.iterdir())) / "memory.gif").is_file()
+
+
+def test_gpt_captions_say_so_when_nothing_grounded_them(tmp_path, monkeypatch):
+    """A high acceptance rate with no grounding LOOKS like success.
+
+    The first live run of this path reported "24/24 accepted" while the model
+    cache was a dangling symlink into a deleted worktree. Every caption was
+    written from the fact sheet alone - a date and a name - and the only
+    signal was one dim line several screens earlier, under a page of warnings
+    from the model library. The acceptance count now carries the caveat.
+    """
+    from rekindle.memory import llm
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-not-a-real-key")
+    monkeypatch.setattr(
+        llm,
+        "captioner_from_env",
+        lambda: llm.GptCaptioner(
+            "sk-not-a-real-key",
+            transport=lambda payload, api_key: {"output_text": "A day out"},
+        ),
+    )
+    data = _library(tmp_path)
+    out = tmp_path / "o"
+    result = runner.invoke(
+        app,
+        [
+            "memory",
+            "--captions",
+            "gpt",
+            "--recipe",
+            "album_story",
+            "--key",
+            "Kashmir",
+            "--no-mp4",
+            "--out",
+            str(out),
+            "--data-dir",
+            str(data),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    said = unwrapped(result.output)
+    assert unwrapped("GPT captions:") in said
+    assert unwrapped("UNGROUNDED") in said
 
 
 def test_deleting_the_llm_module_leaves_a_working_product(tmp_path, monkeypatch):

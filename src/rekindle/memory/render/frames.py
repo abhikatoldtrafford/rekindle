@@ -17,6 +17,7 @@ from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
+from rekindle.memory.captions import renderable
 from rekindle.memory.composition import FIT_PAD, plan_placement
 from rekindle.memory.spec import MemorySpec
 from rekindle.meta.exif import open_upright
@@ -148,6 +149,12 @@ def caption_frame(frame: Image.Image, text: str) -> Image.Image:
     """
     if not text:
         return frame
+    # The last line of defence, not the fix. `memory.llm` folds a model's
+    # typography before the caption is ever cached; this catches a caption
+    # that reached the renderer by some other road - an older cache row, a
+    # hand-edited spec - because the failure is silent: FreeType draws a
+    # filled rectangle for a missing glyph rather than raising.
+    text = renderable(text)
     size = max(14, frame.height // 22)
     draw = ImageDraw.Draw(frame)
     font = _font(size)
@@ -192,6 +199,11 @@ def title_card(title: str, subtitle: str, canvas: tuple[int, int]) -> Image.Imag
     All three are no-ops when the subtitle already fits, so nothing about the
     default 1280px canvas changes.
     """
+    # Folded before anything is MEASURED, not just before it is drawn: the
+    # fold changes the width of the string, and wrapping the unfolded one
+    # would lay the card out for characters that never appear on it.
+    title = renderable(title)
+    subtitle = renderable(subtitle)
     frame = Image.new("RGB", canvas, BACKGROUND)
     draw = ImageDraw.Draw(frame)
     title_size = max(18, canvas[1] // 10)

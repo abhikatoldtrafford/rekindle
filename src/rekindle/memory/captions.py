@@ -14,6 +14,7 @@ lat/lon we cannot resolve is exactly the failure this rule exists to prevent.
 
 from __future__ import annotations
 
+import unicodedata
 from datetime import datetime
 
 from rekindle.models import Photo
@@ -143,3 +144,81 @@ def describe_people(photos: list[Photo], *, limit: int = 3) -> str:
     if len(ranked) == 1:
         return ranked[0]
     return f"{', '.join(ranked[:-1])} and {ranked[-1]}"
+
+
+# ---------------------------------------------------------------------------
+# What the renderer can actually draw
+# ---------------------------------------------------------------------------
+#
+# rekindle ships no font file. `render.frames` draws with Pillow's bundled
+# Aileron, which is a SUBSET face: it has no glyph for any dash but the ASCII
+# hyphen, no accented Latin letter, and no non-breaking space. A character it
+# lacks is not skipped - FreeType draws `.notdef`, a filled rectangle, so the
+# caption shows a tofu box where the character should be.
+#
+# Nothing rekindle computes can produce one. The deterministic captions are
+# dates and names copied from metadata, the CLIP vocabulary is ASCII, and this
+# library's 19,480 rows carry no non-ASCII character in any album, person or
+# keyword. The GPT layer can and does: 3 of 167 cached captions came back with
+# an en or em dash, including `9 August 2025 - Paramita`, which rendered a box
+# in the middle of the line.
+#
+# The table is MEASURED, not guessed - `test_captions.py` renders every key
+# through the bundled font and asserts it draws `.notdef`, and renders every
+# value and asserts it does not. That test fails if Pillow's bundled face ever
+# changes in either direction, which is the only way to keep this honest.
+#
+# Some characters that look like they belong here deliberately do not: the
+# ellipsis, the smart quotes, the middle dot, the degree sign and `©` all draw
+# correctly, so folding them would lose typography for nothing.
+_FOLD = {
+    "‐": "-",  # hyphen
+    "‑": "-",  # non-breaking hyphen
+    "‒": "-",  # figure dash
+    "–": "-",  # en dash        <- the one that shipped
+    "—": "-",  # em dash
+    "―": "-",  # horizontal bar
+    "‚": "'",  # single low-9 quote
+    "„": '"',  # double low-9 quote
+    "′": "'",  # prime
+    "″": '"',  # double prime
+    "•": "·",  # bullet -> middle dot, which draws
+    "×": "x",  # multiplication sign
+    " ": " ",  # no-break space
+    " ": " ",  # figure space
+    " ": " ",  # thin space
+    " ": " ",  # narrow no-break space
+}
+
+
+def renderable(text: str) -> str:
+    """`text` with characters the bundled font cannot draw folded into ones it
+    can, where an exact equivalent exists.
+
+    Two passes. The table above handles punctuation and spacing, where the
+    fold is exact - an en dash between two facts means the same thing as a
+    hyphen. Then any remaining character with a canonical decomposition is
+    stripped of its combining marks, so an accented Latin letter degrades to
+    the letter (`Jose`, not `Jos` plus a box).
+
+    **Anything else is returned unchanged.** A Bengali or Chinese title still
+    draws as boxes, and that is the honest outcome: this function folds
+    characters, it cannot invent glyphs. Transliterating a script would be
+    inventing a name, which is the one thing captions may never do.
+    """
+    if text.isascii():
+        return text
+    folded = "".join(_FOLD.get(ch, ch) for ch in text)
+    if folded.isascii():
+        return folded
+    out = []
+    for ch in folded:
+        if ch.isascii():
+            out.append(ch)
+            continue
+        decomposed = unicodedata.normalize("NFD", ch)
+        stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
+        # Only accept the decomposition when it lands entirely in ASCII;
+        # a partial fold is a different word, not a degraded one.
+        out.append(stripped if stripped and stripped.isascii() else ch)
+    return "".join(out)

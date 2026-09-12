@@ -39,6 +39,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
+from rekindle.memory import captions
 from rekindle.memory.spec import FactSheet, MemorySpec, Shot
 
 API_URL = "https://api.openai.com/v1/responses"
@@ -481,6 +482,11 @@ def apply_captions(
         facts = context(shot) if context is not None else None
         cached = cache.get(shot.file_hash) if cache is not None else None
         if cached is not None:
+            # Folded on the way OUT as well as in. Rows written before the
+            # fold existed still hold an en dash, and a cached caption is
+            # never regenerated - without this, three captions in this
+            # author's index would draw a box forever.
+            cached = captions.renderable(cached)
             # A cached caption was verified before it was written. Re-verifying
             # is not paranoia about the cache: the memory around a photograph
             # changes, and a caption naming a person who is still in this
@@ -505,6 +511,13 @@ def apply_captions(
             report.reject(REJECT_EMPTY)
             shots.append(shot)
             continue
+        # Before the verifier, so what is checked is what is drawn. Models
+        # reach for an en dash between a date and a name and the bundled font
+        # has no glyph for one; see `captions.renderable`. This is the only
+        # repair in this module and it is deliberate: it changes typography,
+        # never a claim. A fold cannot turn an unsubstantiated caption into a
+        # substantiated one - it introduces no letter and no digit.
+        candidate = captions.renderable(candidate)
         reason = substantiated(candidate, spec.facts, facts)
         if reason is not None:
             report.reject(reason)

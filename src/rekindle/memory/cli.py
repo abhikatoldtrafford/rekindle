@@ -553,6 +553,20 @@ def _maybe_caption(
         + (f"; rejected {detail}" if detail else "")
         + "[/dim]"
     )
+    if vision is None:
+        # Said HERE, next to the acceptance count, and not left to the one
+        # line printed by `_vision_support` several screens earlier.
+        #
+        # The first live run of this path reported "24/24 accepted" while the
+        # model cache was missing, so every caption was written from the fact
+        # sheet alone - a date and a name, no richer than the deterministic
+        # caption it replaced. A high acceptance rate with no grounding is the
+        # WORST-looking failure this layer has, because it looks like success.
+        console.print(
+            "[yellow]![/yellow] Those captions are UNGROUNDED: nothing told the "
+            "model what is in the photograph, so it had only the dates and "
+            "names. Fix the message above to get the layer this flag promises."
+        )
     return out
 
 

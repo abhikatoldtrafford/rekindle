@@ -1012,3 +1012,41 @@ Full measurements in
   default-only and record no judgement at all, and 2 of the remaining 6 need
   an extra installed. `labels.jsonl` accumulates across sittings so the number
   can grow, but one sitting will not get there.
+
+## Carried forward from the first live GPT caption run
+
+The `--captions gpt` path had never been executed against the real service —
+the agent that built it had no key, so every test used a fake transport. One
+run of `rekindle memory --recipe album_story --key Gopalpur --captions gpt`
+found both of these. Neither was visible from the code.
+
+- **A caption can still draw a box, and nothing detects it.** rekindle ships
+  no font file; `render.frames` draws with Pillow's bundled Aileron, which has
+  no glyph for any dash but the ASCII hyphen, none for an accented Latin
+  letter, and none for any non-Latin script. FreeType renders a missing glyph
+  as `.notdef` — a filled rectangle — and raises nothing.
+
+  `captions.renderable` now folds every character the model actually reaches
+  for (measured: 3 of 167 cached GPT captions carried an en or em dash) and
+  degrades an accented letter to the letter. **A non-Latin script is returned
+  unchanged and still draws as boxes.** That is deliberate: transliterating
+  would invent a name. It costs nothing on this library — 19,480 rows carry no
+  non-ASCII character in any album, person or keyword — and it would cost a
+  great deal on a library whose album titles are in Bengali or Chinese. The
+  fix for that user is a font file, which is a packaging decision (the whole
+  default install is four dependencies) and not a code change.
+
+- **The grounding layer can fail without the run looking any different.** The
+  model cache lived at `data/models`, which had become a dangling symlink into
+  a deleted agent worktree. `_vision_support` caught the failure, printed one
+  dim line, and the run continued: `transformers` then printed a page of its
+  own warnings above it, and the summary said `GPT captions: 24/24 accepted`.
+  Twenty of the twenty-four captions were a date and a name — no richer than
+  the deterministic caption each one replaced.
+
+  A high acceptance rate with no grounding is the worst-looking failure this
+  layer has, because it looks exactly like success. The summary line now
+  carries the caveat when nothing grounded it. What is still true is that the
+  **captions are cached**, so an ungrounded run writes thin captions that are
+  never regenerated; recovering means deleting the `gpt` rows from
+  `photo_captions` by hand.
