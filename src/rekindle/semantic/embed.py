@@ -37,10 +37,79 @@ paragraph above over the table there.
 
 ACCOUNTING
 ----------
-`EmbedReport` obeys `considered == already + embedded + missing + unreadable`,
+`EmbedReport` obeys
+`considered == already + embedded + missing + unreadable + deferred`,
 asserted by a test. M1's decision log is unambiguous about why: a pipeline that
 silently drops input is a bug, and the accounting identity is what makes the
-drop impossible to hide.
+drop impossible to hide. `deferred` is new and is the reason the loop no longer
+stops early on `--limit`: see WHAT `--limit` NOW MEANS below.
+
+STALENESS: WHAT "THE PIXELS CHANGED" ACTUALLY KEYS ON
+-----------------------------------------------------
+`embed_photos` used to skip any hash the store already held, full stop. That
+is how **2,503 vectors stayed sideways through the fix that was meant to
+repair them** (docs/known-limitations.md, "Carried: 2,503 stored vectors were
+computed from sideways pixels"). Recovery cost two whole re-embeds, and a
+re-embed is three minutes on this machine's GPU and **five hours** on a
+contributor's CPU.
+
+The trap in fixing it is choosing the wrong key. A content hash of the file
+does not move when an **orientation verdict** changes - and an orientation
+verdict is exactly what caused the incident. The bytes are byte-for-byte
+identical; what changed is how `open_upright` decodes them. Key on the file
+and the feature silently does nothing, which is worse than not shipping it.
+
+So `decode_key` names the DECODE INPUTS, and only the ones the file hash does
+not already pin down:
+
+  * **the orientation verdict** - `raw` when `meta.orientation` has proved
+    this file's EXIF tag stale and `open_upright` is therefore handing back
+    the stored pixels, `exif` when the tag is being applied. This is the term
+    that varies at RUNTIME, per file, without any code changing, and it is the
+    one the incident needed.
+  * **`target_px`** - the decode is drafted to a multiple of it, so a
+    different request size is a different decode.
+  * **`DECODE_REVISION`** - the blunt instrument, for a change to `_decode`
+    itself that no other term captures. Bumping it makes every vector stale.
+
+The EXIF orientation TAG is deliberately NOT in the key, and its absence is
+not an oversight. The tag lives in the file's bytes, `file_hash` is BLAKE2b of
+those bytes, and the store is already keyed by it - so `(file_hash, verdict)`
+determines the applied transform exactly. Putting the tag in as well would
+record a value that cannot vary independently, at the cost of an
+`Image.open()` per photo at planning time on 18,363 images.
+
+MEASURED ON THE REFERENCE LIBRARY
+---------------------------------
+18,201 images (the live index minus 162 archived), against the real
+`clip-vit-l14` store of 18,201 vectors, on a copy so the live store was not
+touched. Every vector was stamped with the key it would have had if it had
+been embedded BEFORE `rekindle semantic orient` ran, and then re-planned:
+
+    iterate the index                 0.23 s
+    `decode_key` for all 18,201       2.67 s
+    `EmbeddingStore.plan`             0.01 s
+    -> stale                            212
+    -> fresh                         17,989
+
+212 is exactly the set the index records as `orient_ignore_exif = 1`, verified
+by set equality against the database and not by count alone. Under the old
+code all 18,201 of those would have been skipped as "already embedded".
+
+The 2.67 s is `Path.resolve()` inside `orientation._key`, which is a real
+filesystem call per path. It is paid only on a library that HAS overrides:
+`ignores_exif` short-circuits on the empty table, so a library the orientation
+pass has never run on pays nothing. Against a re-embed of three minutes on
+this machine's GPU and five hours on a contributor's CPU, it is not a cost
+worth optimising.
+
+WHAT `--limit` NOW MEANS
+------------------------
+It used to break out of the scan, so a photo past the limit was never even
+counted. It now caps the WORK: every photo is examined and classified, and
+anything over the cap is reported as `deferred`. That is what the numbers
+above buy - being TOLD that 212 vectors are stale even on a run that has time
+to redo only fifty of them.
 """
 
 from __future__ import annotations
@@ -116,6 +185,36 @@ DEFAULT_WORKERS = 6
 #: decoded images: 384 at roughly 500x375 RGB, about 215 MB.
 PREFETCH_BATCHES = 12
 
+#: Bumped when `_decode` changes what pixels it produces in a way no other
+#: term of `decode_key` captures. **Every stored vector becomes stale.** It is
+#: the blunt instrument, so prefer adding a term that names the actual input.
+#:
+#: 1 - `open_upright` with a 2x draft hint, converted to RGB. The state of the
+#:     code as of the orientation fix; earlier vectors were computed without
+#:     `open_upright` at all, and no store still holds any (the live store was
+#:     deleted and rebuilt) so there is no revision 0 in the wild to catch.
+DECODE_REVISION = 1
+
+
+def decode_key(paths: Iterable[Path], *, target_px: int, revision: int = DECODE_REVISION) -> str:
+    """What a vector for this photo would be computed FROM, as a short string.
+
+    See STALENESS in the module docstring for what is in it and, just as
+    importantly, what is left out and why.
+
+    Takes every path the photo is known at, not just the one that will be
+    decoded. `meta.orientation` records its verdict against a file HASH and
+    installs it for every path that hash has, so all of a photo's paths agree
+    - but a library re-indexed from a second folder can briefly know a path
+    the override table does not, and `any` fails towards "the verdict
+    applies", which redoes a vector unnecessarily rather than keeping a wrong
+    one. Pure dict work: no file is opened, no EXIF is read.
+    """
+    from rekindle.meta import orientation
+
+    ignore = any(orientation.ignores_exif(p) for p in paths)
+    return f"v{revision}|px{target_px}|{'raw' if ignore else 'exif'}"
+
 
 @dataclass
 class EmbedReport:
@@ -124,12 +223,36 @@ class EmbedReport:
     embedded: int = 0
     missing_file: int = 0
     unreadable: int = 0
+    #: Work `--limit` cut. Not "skipped": the run knows about these and chose
+    #: not to do them, which is a different thing from never having looked.
+    deferred: int = 0
     elapsed_s: float = 0.0
     model_key: str = ""
     model_revision: str = ""
     runtime: str = ""
     device: str = ""
     failures: list[tuple[Path, str]] = field(default_factory=list)
+
+    # -- what the plan found, before `--limit` and `--redo` touched it. These
+    # -- are DIAGNOSTICS, not buckets: they overlap `already_embedded` and
+    # -- `embedded`, and are outside the accounting identity on purpose.
+    #: Held a vector whose recorded decode key matches the current one.
+    fresh: int = 0
+    #: Held a vector computed from pixels this build no longer produces.
+    stale: int = 0
+    #: Held a vector written before the store recorded provenance.
+    unverified: int = 0
+    #: The same hash offered twice by the reader (two paths, one file).
+    duplicates: int = 0
+    #: Of `embedded`: how many had no vector at all beforehand.
+    newly_embedded: int = 0
+    #: Of `embedded`: how many replaced a vector that was stale, unverified or
+    #: named on `--redo`.
+    recomputed: int = 0
+    #: `--redo` hashes the reader never offered, so nothing could be done
+    #: about them. Reported rather than swallowed - a typo in a hash is
+    #: otherwise indistinguishable from a hash that was already fresh.
+    redo_unknown: list[str] = field(default_factory=list)
 
     @property
     def images_per_s(self) -> float:
@@ -139,7 +262,11 @@ class EmbedReport:
     def accounted(self) -> bool:
         """Every considered photo landed in exactly one bucket."""
         return self.considered == (
-            self.already_embedded + self.embedded + self.missing_file + self.unreadable
+            self.already_embedded
+            + self.embedded
+            + self.missing_file
+            + self.unreadable
+            + self.deferred
         )
 
 
@@ -184,26 +311,58 @@ def embed_photos(
     progress: Callable[[int, int], None] | None = None,
     runtime: str = "",
     device: str = "",
+    redo: Iterable[str] = (),
+    redo_unverified: bool = False,
+    decode_revision: int = DECODE_REVISION,
 ) -> EmbedReport:
-    """Embed every photo that has no vector yet. Resumable; safe to re-run."""
+    """Embed every photo with no vector, plus every photo whose vector is stale.
+
+    Resumable and safe to re-run: a second run with nothing to do writes
+    nothing and reports `fresh == considered`.
+
+    `redo` forces specific hashes whatever the plan says - the escape hatch
+    for a photo somebody knows is wrong for a reason this code cannot see.
+    `redo_unverified` additionally recomputes vectors written before the store
+    recorded provenance; it is opt-in because on a pre-existing store that is
+    every vector, and a full re-embed is five hours on CPU.
+    """
     report = EmbedReport(
         model_key=store.model_key,
         model_revision=store.model_revision,
         runtime=runtime,
         device=device,
     )
-    candidates: list[IndexedPhoto] = []
-    have = store.hashes()
-    seen: set[str] = set()
+    by_hash: dict[str, IndexedPhoto] = {}
+    wanted: list[tuple[str, str]] = []
+    keys: dict[str, str] = {}
     for photo in photos:
         report.considered += 1
-        if photo.file_hash in have or photo.file_hash in seen:
-            report.already_embedded += 1
-            continue
-        seen.add(photo.file_hash)
-        candidates.append(photo)
-        if limit is not None and len(candidates) >= limit:
-            break
+        key = decode_key(photo.paths, target_px=target_px, revision=decode_revision)
+        keys.setdefault(photo.file_hash, key)
+        by_hash.setdefault(photo.file_hash, photo)
+        wanted.append((photo.file_hash, key))
+
+    plan = store.plan(wanted)
+    report.fresh = plan.fresh
+    report.stale = len(plan.stale)
+    report.unverified = len(plan.unverified)
+    report.duplicates = plan.duplicates
+
+    forced = list(dict.fromkeys(redo))
+    report.redo_unknown = [h for h in forced if h not in by_hash]
+    todo = list(
+        dict.fromkeys(
+            [h for h in forced if h in by_hash] + plan.to_embed(include_unverified=redo_unverified)
+        )
+    )
+    if limit is not None:
+        report.deferred = max(0, len(todo) - max(0, limit))
+        todo = todo[: max(0, limit)]
+    # Everything the scan saw that this run will not touch. Derived, not
+    # counted, so a bucket cannot be forgotten in a branch.
+    report.already_embedded = report.considered - len(todo) - report.deferred
+    new_hashes = set(plan.missing)
+    candidates: list[IndexedPhoto] = [by_hash[h] for h in todo]
 
     if not candidates:
         return report
@@ -248,9 +407,20 @@ def embed_photos(
                     [
                         (photo.file_hash, vec)
                         for photo, vec in zip(work.photos, vectors, strict=True)
-                    ]
+                    ],
+                    # The provenance is written in the SAME transaction as the
+                    # vector. Stamping it afterwards would leave a window in
+                    # which a crash produces the exact state this feature
+                    # exists to detect - a vector nobody can date - and would
+                    # do it on the crash path, which is the one nobody tests.
+                    decode_keys={p.file_hash: keys[p.file_hash] for p in work.photos},
                 )
                 report.embedded += len(work.photos)
+                for photo in work.photos:
+                    if photo.file_hash in new_hashes:
+                        report.newly_embedded += 1
+                    else:
+                        report.recomputed += 1
             work.close()
             done += work.size
             if progress is not None:

@@ -25,11 +25,45 @@ ON-DISK LAYOUT
 `store_id` is the model key, so two models can be embedded side by side and
 compared - which is exactly how this milestone chose its model.
 
-NO STALENESS PROBLEM. `file_hash` is BLAKE2b-128 of the file bytes, so the
-content behind a hash cannot change. A vector is therefore valid forever for
-its (hash, model, revision) triple. The manifest records the model revision so
-that swapping a model invalidates everything by landing in a different
-directory, not by silently mixing two embedding spaces.
+THE STALENESS PROBLEM, AND WHY THE FILE HASH DOES NOT SOLVE IT
+--------------------------------------------------------------
+This docstring used to say "NO STALENESS PROBLEM": `file_hash` is BLAKE2b-128
+of the file bytes, so the content behind a hash cannot change, so a vector is
+valid forever for its (hash, model, revision) triple.
+
+That is false, and it cost two full re-embeds. **A vector is computed from
+DECODED PIXELS, not from bytes.** 2,503 of the reference library's images
+carry an axis-swapping EXIF orientation tag, and `meta.orientation` can prove
+such a tag STALE from image content - at which point `open_upright` stops
+applying it and hands back different pixels for *byte-identical* input. The
+hash does not move. Neither does the model, nor its revision. The vector is
+nevertheless wrong, and nothing in this store could say so: `embed_photos`
+skips any hash the store already holds, so 13.8% of the live store stayed
+sideways through the fix that was supposed to repair it.
+
+So each row now records a **decode key**: an opaque short string, supplied by
+the caller, naming everything the decode depended on that the file hash does
+NOT already pin down. `semantic.embed.decode_key` builds it; see there for
+what goes in it and why the EXIF tag itself does not need to. This store only
+compares the strings - it has no opinion about decoding, and must not, since
+it is the stdlib-only module.
+
+`decode_key` is NULLABLE, and NULL means "written before this store recorded
+provenance", not "fresh". `plan()` reports those separately as `unverified`
+rather than pretending either way; redoing them is the caller's explicit
+choice, because on a contributor's CPU a full re-embed is five hours.
+
+Adding the column did NOT bump `STORE_SCHEMA_VERSION`. That counter means
+"an older reader would MISREAD this store", and an older reader would not:
+`vectors.f32` is byte-identical, and the old manifest statements
+(`INSERT INTO vectors(file_hash, row, embedded_at)`, `SELECT file_hash, row`)
+are all still valid against the wider table. Bumping it would instead have
+made every existing store refuse to open and demand the very full rebuild
+this feature exists to avoid.
+
+The manifest still records the model revision so that swapping a model
+invalidates everything by landing in a different directory, not by silently
+mixing two embedding spaces.
 
 STDLIB ONLY. numpy is an optional extra; this module is how `rekindle` reports
 on a store, and reporting must work on a default install. Bulk maths lives in
@@ -41,7 +75,8 @@ from __future__ import annotations
 import sqlite3
 import sys
 from array import array
-from collections.abc import Iterable, Iterator, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from types import TracebackType
@@ -61,7 +96,10 @@ CREATE TABLE IF NOT EXISTS meta (
 CREATE TABLE IF NOT EXISTS vectors (
     file_hash   TEXT PRIMARY KEY,
     row         INTEGER NOT NULL UNIQUE,
-    embedded_at TEXT NOT NULL
+    embedded_at TEXT NOT NULL,
+    -- What the vector was computed FROM, beyond the bytes the hash pins.
+    -- NULL on rows written before this column existed: unknown, not fresh.
+    decode_key  TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_vectors_row ON vectors(row);
@@ -99,6 +137,35 @@ def _from_le(raw: bytes) -> list[float]:
     return buf.tolist()
 
 
+@dataclass
+class EmbedPlan:
+    """What a re-embed would have to do, split by WHY.
+
+    Three buckets, not two, because "has no vector" and "has a vector computed
+    from pixels we no longer produce" are different costs, and "has a vector
+    and we cannot tell" is a third thing that must not be quietly folded into
+    either.
+    """
+
+    #: No vector at all.
+    missing: list[str] = field(default_factory=list)
+    #: A vector exists and its recorded decode key DISAGREES with the current one.
+    stale: list[str] = field(default_factory=list)
+    #: A vector exists but predates provenance recording. Unknown, not fresh.
+    unverified: list[str] = field(default_factory=list)
+    #: A vector exists and its recorded decode key matches. Nothing to do.
+    fresh: int = 0
+    #: Hashes offered more than once in one call.
+    duplicates: int = 0
+
+    def to_embed(self, *, include_unverified: bool = False) -> list[str]:
+        """The work, in a stable order: missing first, then stale."""
+        out = [*self.missing, *self.stale]
+        if include_unverified:
+            out.extend(self.unverified)
+        return out
+
+
 class EmbeddingStore:
     """Append-only vectors keyed by `file_hash`, with a manifest beside them."""
 
@@ -126,6 +193,7 @@ class EmbeddingStore:
         self._conn = sqlite3.connect(self.manifest_path)
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
+        self._migrate()
         self._conn.commit()
         try:
             self._init_meta(dim, model_key, model_revision, normalized)
@@ -138,6 +206,22 @@ class EmbeddingStore:
             raise
 
     # ---------------------------------------------------------------- setup
+
+    def _migrate(self) -> None:
+        """Add columns a store written by an older rekindle does not have.
+
+        Additive only, and idempotent. `executescript(_SCHEMA)` above uses
+        `CREATE TABLE IF NOT EXISTS`, which does exactly nothing to a table
+        that already exists - so a column added to `_SCHEMA` never reaches a
+        store somebody already has. That is the bug this method exists to
+        avoid, and it is the same shape as the one `db.py` solved with its
+        `_COLUMN_ADDITIONS` ladder.
+
+        Deliberately NOT a version bump: see the module docstring.
+        """
+        found = {r["name"] for r in self._conn.execute("PRAGMA table_info(vectors)")}
+        if "decode_key" not in found:
+            self._conn.execute("ALTER TABLE vectors ADD COLUMN decode_key TEXT")
 
     def _init_meta(
         self,
@@ -292,6 +376,59 @@ class EmbeddingStore:
                 out.append(h)
         return out
 
+    # ------------------------------------------------------------ provenance
+
+    def decode_key_of(self, file_hash: str) -> str | None:
+        """What this vector was computed from, or None if it predates the column."""
+        row = self._conn.execute(
+            "SELECT decode_key FROM vectors WHERE file_hash = ?", (file_hash,)
+        ).fetchone()
+        return row["decode_key"] if row else None
+
+    def decode_keys(self) -> dict[str, str | None]:
+        """Every held hash mapped to its decode key. One query, not one per hash."""
+        return {
+            r["file_hash"]: r["decode_key"]
+            for r in self._conn.execute("SELECT file_hash, decode_key FROM vectors")
+        }
+
+    def unverified_hashes(self) -> set[str]:
+        """Hashes whose vector predates provenance recording."""
+        return {
+            r["file_hash"]
+            for r in self._conn.execute("SELECT file_hash FROM vectors WHERE decode_key IS NULL")
+        }
+
+    def plan(self, wanted: Iterable[tuple[str, str]]) -> EmbedPlan:
+        """Sort `(file_hash, decode_key)` into what must be recomputed and what must not.
+
+        `decode_key` is what the CALLER would compute for that photo right
+        now. A row whose recorded key differs was computed from different
+        pixels and is `stale`; a row with no recorded key at all is
+        `unverified` and is neither claimed fresh nor silently redone.
+
+        Order-preserving and deduped, for the same reason `missing` is.
+        """
+        held = self.decode_keys()
+        plan = EmbedPlan()
+        seen: set[str] = set()
+        for file_hash, key in wanted:
+            if file_hash in seen:
+                plan.duplicates += 1
+                continue
+            seen.add(file_hash)
+            if file_hash not in held:
+                plan.missing.append(file_hash)
+                continue
+            recorded = held[file_hash]
+            if recorded is None:
+                plan.unverified.append(file_hash)
+            elif recorded != key:
+                plan.stale.append(file_hash)
+            else:
+                plan.fresh += 1
+        return plan
+
     # ----------------------------------------------------------------- rows
 
     def _next_row(self) -> int:
@@ -304,7 +441,12 @@ class EmbeddingStore:
         ).fetchone()
         return int(row["row"]) if row else None
 
-    def add_many(self, items: Iterable[tuple[str, Sequence[float]]]) -> int:
+    def add_many(
+        self,
+        items: Iterable[tuple[str, Sequence[float]]],
+        *,
+        decode_keys: Mapping[str, str] | None = None,
+    ) -> int:
         """Write vectors for `items`, returning how many rows were written.
 
         Bytes first, then the manifest, in ONE manifest transaction. The order
@@ -312,6 +454,13 @@ class EmbeddingStore:
         orphan tail that `_reconcile` truncates on the next open. The reverse
         order would leave a manifest row pointing past the end of the file,
         which `_reconcile` can only refuse.
+
+        `decode_keys` says what each vector was computed from. A hash absent
+        from it is stored with a NULL key, INCLUDING when it overwrites a row
+        that had one: a caller who will not say what it decoded has made the
+        row unverified, and carrying the old key forward would assert a
+        provenance nobody vouched for. That is precisely the failure this
+        column exists to prevent, so it is not weakened here for convenience.
         """
         batch = list(items)
         if not batch:
@@ -338,10 +487,12 @@ class EmbeddingStore:
                 fh.write(raw)
             fh.flush()
         stamp = _now()
+        keys = decode_keys or {}
         self._conn.executemany(
-            "INSERT INTO vectors(file_hash, row, embedded_at) VALUES(?, ?, ?) "
-            "ON CONFLICT(file_hash) DO UPDATE SET embedded_at = excluded.embedded_at",
-            [(h, row, stamp) for h, row, _ in assignments],
+            "INSERT INTO vectors(file_hash, row, embedded_at, decode_key) VALUES(?, ?, ?, ?) "
+            "ON CONFLICT(file_hash) DO UPDATE SET embedded_at = excluded.embedded_at, "
+            "decode_key = excluded.decode_key",
+            [(h, row, stamp, keys.get(h)) for h, row, _ in assignments],
         )
         self._conn.commit()
         return len(assignments)

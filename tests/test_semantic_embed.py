@@ -10,7 +10,13 @@ from __future__ import annotations
 
 import pytest
 
-from rekindle.semantic.embed import DEFAULT_BATCH, embed_photos
+from rekindle.meta import orientation
+from rekindle.semantic.embed import (
+    DECODE_REVISION,
+    DEFAULT_BATCH,
+    decode_key,
+    embed_photos,
+)
 from rekindle.semantic.photos import PhotoIndexReader, ReadFilter
 from rekindle.semantic.store import EmbeddingStore
 from tests.fixtures.semantic import (
@@ -247,3 +253,227 @@ def test_decode_draft_does_not_change_the_embedding_much(tmp_path):
     with Image.open(big) as im:
         full = encoder.encode_images([im.convert("RGB")])[0]
     assert drafted == pytest.approx(full, abs=2e-2)
+
+
+# ------------------------------------------------------- staleness detection
+#
+# THE TRAP THESE TESTS EXIST TO CATCH. The bug being fixed cost two full
+# re-embeds because `embed_photos` skipped any hash the store already held.
+# The obvious fix - "notice when the file changed" - does nothing here: the
+# file does NOT change. Its bytes are identical before and after; what moves
+# is the orientation verdict, and therefore the decode.
+#
+# So every test below keeps the bytes fixed and moves only the verdict, and
+# asserts the VECTOR THAT CAME OUT, not that a counter was incremented.
+
+
+@pytest.fixture
+def rotated(tmp_path):
+    """One real JPEG carrying EXIF orientation 6, indexed, with no vector yet.
+
+    The four-colour quadrant marker is used rather than a solid colour on
+    purpose: a solid square embeds to the same vector whichever way up it is,
+    so a solid-colour fixture could not tell a working detector from a broken
+    one.
+    """
+    from tests.fixtures.oriented import write_oriented
+
+    path = tmp_path / "lib" / "rotated.jpg"
+    write_oriented(path, 6)
+    photo = make_photo("a".ljust(32, "a"), path)
+    db = tmp_path / "data" / "rekindle.sqlite"
+    make_index(db, [photo])
+    store = EmbeddingStore(tmp_path / "store", dim=TOY_DIM, model_key="toy")
+    orientation.clear_overrides()
+    yield db, store, path
+    orientation.clear_overrides()
+    store.close()
+
+
+def test_a_CHANGED_ORIENTATION_VERDICT_makes_the_vector_stale_and_redoes_it(rotated):
+    """The incident, reproduced and then caught.
+
+    Embed with the EXIF tag applied. Then let `meta.orientation` prove that
+    tag stale, exactly as `rekindle semantic orient` does. The file on disk is
+    untouched - same bytes, same hash, same model, same revision - and the
+    vector in the store is now wrong. `embed` must notice and replace it.
+    """
+    db, store, path = rotated
+    with PhotoIndexReader(db) as reader:
+        first = embed_photos(reader.iter_photos(), ToyEncoder(), store)
+    assert first.embedded == 1
+    assert first.newly_embedded == 1
+    tagged_vector = store.get("a".ljust(32, "a"))
+
+    before = path.read_bytes()
+    orientation.load_overrides([path])  # the verdict changes; the file does not
+    assert path.read_bytes() == before, "the bytes must not move - that is the trap"
+
+    with PhotoIndexReader(db) as reader:
+        # PhotoIndexReader re-installs the index's overrides on open, and this
+        # index has none, so re-apply after opening it.
+        photos = list(reader.iter_photos())
+    orientation.load_overrides([path])
+    second = embed_photos(photos, ToyEncoder(), store)
+
+    assert second.stale == 1, "the store failed to notice the decode moved"
+    assert second.embedded == 1
+    assert second.recomputed == 1
+    assert second.newly_embedded == 0
+    assert second.accounted
+
+    raw_vector = store.get("a".ljust(32, "a"))
+    assert raw_vector != pytest.approx(tagged_vector), (
+        "the vector was rewritten but is unchanged - the decode did not really move"
+    )
+    # And it is the RIGHT vector: what the encoder gives for the raw pixels.
+    from PIL import Image
+
+    with Image.open(path) as im:
+        expected = ToyEncoder().encode_images([im.convert("RGB")])[0]
+    assert raw_vector == pytest.approx(expected, abs=3e-2)
+
+
+def test_the_file_hash_alone_would_have_missed_it(rotated):
+    """Guards the design, not the code: prove the key is NOT the file.
+
+    If a future change keys staleness on file content, this fails - the hash
+    and the bytes are provably identical across the verdict change.
+    """
+    db, store, path = rotated
+    from rekindle.identity import file_hash as hash_file
+
+    before_hash = hash_file(path)
+    with PhotoIndexReader(db) as reader:
+        embed_photos(reader.iter_photos(), ToyEncoder(), store)
+        photos = list(reader.iter_photos())
+    orientation.load_overrides([path])
+    assert hash_file(path) == before_hash
+    assert embed_photos(photos, ToyEncoder(), store).stale == 1
+
+
+def test_an_UNCHANGED_verdict_leaves_the_vector_alone(rotated):
+    """The other half: a detector that fires on everything is also broken."""
+    db, store, _ = rotated
+    with PhotoIndexReader(db) as reader:
+        embed_photos(reader.iter_photos(), ToyEncoder(), store)
+        again = embed_photos(reader.iter_photos(), ToyEncoder(), store)
+    assert again.stale == 0
+    assert again.fresh == 1
+    assert again.embedded == 0
+    assert again.already_embedded == 1
+    assert again.accounted
+
+
+def test_a_verdict_on_ANOTHER_file_does_not_make_this_one_stale(rotated):
+    db, store, path = rotated
+    with PhotoIndexReader(db) as reader:
+        embed_photos(reader.iter_photos(), ToyEncoder(), store)
+        photos = list(reader.iter_photos())
+    orientation.load_overrides([path.with_name("someone-else.jpg")])
+    report = embed_photos(photos, ToyEncoder(), store)
+    assert report.stale == 0
+    assert report.fresh == 1
+
+
+def test_bumping_the_decode_revision_makes_every_vector_stale(setup):
+    """The blunt instrument, for a decode change no other term captures."""
+    db, store, encoder = setup
+    with PhotoIndexReader(db) as reader:
+        embed_photos(reader.iter_photos(), encoder, store)
+        photos = list(reader.iter_photos())
+    report = embed_photos(photos, encoder, store, decode_revision=DECODE_REVISION + 1)
+    assert report.stale == 5
+    assert report.embedded == 5
+    assert report.recomputed == 5
+
+
+def test_a_different_target_size_is_a_different_decode(setup):
+    db, store, encoder = setup
+    with PhotoIndexReader(db) as reader:
+        embed_photos(reader.iter_photos(), encoder, store, target_px=224)
+        photos = list(reader.iter_photos())
+    assert embed_photos(photos, encoder, store, target_px=336).stale == 5
+
+
+def test_decode_key_names_the_verdict_and_nothing_that_cannot_vary(tmp_path):
+    """The EXIF TAG is deliberately absent: it lives in the bytes the hash
+    already pins. What must be present is the verdict, which does not."""
+    path = tmp_path / "x.jpg"
+    orientation.clear_overrides()
+    with_tag = decode_key([path], target_px=224)
+    orientation.load_overrides([path])
+    without = decode_key([path], target_px=224)
+    orientation.clear_overrides()
+    assert with_tag != without
+    assert decode_key([path], target_px=224) != decode_key([path], target_px=336)
+    assert decode_key([path], target_px=224, revision=1) != decode_key(
+        [path], target_px=224, revision=2
+    )
+
+
+def test_an_unverified_vector_is_not_redone_unless_asked(setup):
+    """Five hours on a contributor's CPU is not a default."""
+    db, store, encoder = setup
+    with PhotoIndexReader(db) as reader:
+        photos = list(reader.iter_photos())
+    # A store written by an older rekindle: vectors, no provenance.
+    store.add_many([(p.file_hash, [0.0] * TOY_DIM) for p in photos])
+    quiet = embed_photos(photos, encoder, store)
+    assert quiet.unverified == 5
+    assert quiet.embedded == 0
+    assert quiet.already_embedded == 5
+    assert quiet.accounted
+
+    asked = embed_photos(photos, encoder, store, redo_unverified=True)
+    assert asked.embedded == 5
+    assert asked.recomputed == 5
+    assert store.get(photos[0].file_hash) != pytest.approx([0.0] * TOY_DIM)
+    # And once recomputed they are verified, so a third run does nothing.
+    assert embed_photos(photos, encoder, store).fresh == 5
+
+
+def test_redo_forces_a_fresh_vector_to_be_recomputed(setup):
+    db, store, encoder = setup
+    with PhotoIndexReader(db) as reader:
+        embed_photos(reader.iter_photos(), encoder, store)
+        photos = list(reader.iter_photos())
+    target = photos[2].file_hash
+    store.add_many([(target, [0.0] * TOY_DIM)], decode_keys={target: store.decode_key_of(target)})
+    assert store.get(target) == pytest.approx([0.0] * TOY_DIM)
+
+    report = embed_photos(photos, encoder, store, redo=[target])
+    assert report.embedded == 1
+    assert report.recomputed == 1
+    assert report.fresh == 5, "redo must not pretend the plan found work"
+    assert store.get(target) != pytest.approx([0.0] * TOY_DIM)
+    assert report.accounted
+
+
+def test_redo_reports_a_hash_the_index_never_offered(setup):
+    """A typo in a hash is otherwise indistinguishable from a hash that was
+    already fresh, and the user would believe the redo happened."""
+    db, store, encoder = setup
+    with PhotoIndexReader(db) as reader:
+        photos = list(reader.iter_photos())
+    report = embed_photos(photos, encoder, store, redo=["deadbeef"])
+    assert report.redo_unknown == ["deadbeef"]
+    assert report.accounted
+
+
+def test_limit_DEFERS_the_rest_rather_than_never_looking(setup):
+    """The count of stale vectors is the thing the incident needed to know,
+    and it must survive a run that has time to fix only some of them."""
+    db, store, encoder = setup
+    with PhotoIndexReader(db) as reader:
+        photos = list(reader.iter_photos())
+    report = embed_photos(photos, encoder, store, limit=2)
+    assert report.considered == 5
+    assert report.embedded == 2
+    assert report.deferred == 3
+    assert report.accounted
+    assert store.count() == 2
+    rest = embed_photos(photos, encoder, store)
+    assert rest.embedded == 3
+    assert rest.deferred == 0
+    assert store.count() == 5

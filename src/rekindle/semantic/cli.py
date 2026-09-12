@@ -277,13 +277,37 @@ def semantic_embed(
             "This is the throughput knob; --batch is not.",
         ),
     ] = PREFETCH_BATCHES,
-    limit: Annotated[int | None, typer.Option("--limit", help="Stop after N new photos.")] = None,
+    limit: Annotated[
+        int | None, typer.Option("--limit", help="Do at most N photos; report the rest.")
+    ] = None,
+    redo: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--redo",
+            help="Recompute these file hashes whatever the plan says. Repeatable.",
+        ),
+    ] = None,
+    redo_unverified: Annotated[
+        bool,
+        typer.Option(
+            "--redo-unverified",
+            help="Also recompute vectors written before the store recorded "
+            "what they were decoded from. On a pre-existing store that is all "
+            "of them.",
+        ),
+    ] = False,
     include_archived: Annotated[
         bool, typer.Option("--include-archived", help="Embed archived photos too.")
     ] = False,
     data_dir: DataDir = Path("./data"),
 ) -> None:
-    """Embed every indexed photo that has no vector yet. Resumable."""
+    """Embed every indexed photo with no vector, and every photo whose vector is STALE.
+
+    A vector is stale when the pixels it was computed from are not the pixels
+    this build now decodes - most often because `rekindle semantic orient`
+    has since proved that file's EXIF orientation tag a lie. The file's bytes
+    are unchanged, so its hash is unchanged; only the decode moved. Resumable.
+    """
     from rekindle.semantic.embed import embed_photos
     from rekindle.semantic.encoder import load_encoder
     from rekindle.semantic.photos import ReadFilter
@@ -328,16 +352,42 @@ def semantic_embed(
                 progress=tick,
                 runtime=loaded.runtime,
                 device=loaded.device.device,
+                redo=redo or (),
+                redo_unverified=redo_unverified,
             )
         store.close()
     finally:
         reader.close()
 
     console.print(
-        f"\n[green]Embedded[/green] {report.embedded} new "
-        f"({report.images_per_s:.1f} img/s on {report.device}). "
+        f"\n[green]Embedded[/green] {report.embedded} "
+        f"({report.newly_embedded} new, {report.recomputed} recomputed, "
+        f"{report.images_per_s:.1f} img/s on {report.device}). "
         f"{report.already_embedded} already had vectors."
     )
+    # The plan, always - including when it is all zeroes. A staleness detector
+    # that never fires looks exactly like one with nothing to do, and the only
+    # way to tell them apart is for the tool to say what it examined.
+    console.print(
+        f"  provenance: {report.fresh} fresh, {report.stale} stale, "
+        f"{report.unverified} unverified"
+        + (f", {report.duplicates} duplicate hash(es)" if report.duplicates else "")
+    )
+    if report.unverified and not redo_unverified:
+        console.print(
+            f"  [yellow]![/yellow] {report.unverified} vector(s) predate provenance "
+            "recording, so staleness cannot be judged for them. "
+            "`--redo-unverified` recomputes them."
+        )
+    if report.deferred:
+        console.print(
+            f"  [yellow]![/yellow] --limit deferred {report.deferred} photo(s) that need work."
+        )
+    if report.redo_unknown:
+        console.print(
+            f"  [yellow]![/yellow] --redo named {len(report.redo_unknown)} hash(es) the index "
+            f"did not offer: {', '.join(report.redo_unknown[:5])}"
+        )
     if report.missing_file or report.unreadable:
         console.print(
             f"[yellow]![/yellow] {report.missing_file} file(s) missing, "
