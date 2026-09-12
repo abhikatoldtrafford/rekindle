@@ -247,6 +247,7 @@ def memory_cmd(
     music: Path | None,
     no_mp4: bool,
     limit: int,
+    force: bool = False,
     captions: str = "deterministic",
     preview_width: int = 0,
     mp4_width: int = 0,
@@ -308,7 +309,13 @@ def memory_cmd(
         #
         # DISMISSAL still applies. "Never show me this again" is deliberate
         # and permanent, and `rekindle undismiss` is how it is taken back.
-        named = bool(recipe and key)
+        # `--force` extends that same reasoning to a filtered or unfiltered
+        # build. Re-rendering after changing the code, the guardrails or the
+        # exclusion list is the commonest reason to rebuild in bulk, and the
+        # cooldown had no override at all - it refused 29 of 34 album stories
+        # on a deliberate rebuild. DISMISSAL is still honoured; only the
+        # resurfacing clock is bypassed.
+        named = bool(recipe and key) or force
         specs, report = engine.build_all(
             index,
             offers,

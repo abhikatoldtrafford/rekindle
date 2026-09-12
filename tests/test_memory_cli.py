@@ -270,6 +270,52 @@ def test_an_unnamed_build_still_respects_the_cooldown(tmp_path):
     assert "cooldown" in again.output, again.output
 
 
+def test_force_rebuilds_an_unnamed_build_that_the_cooldown_would_refuse(tmp_path):
+    """The gap between the two tests above. Naming ONE memory overrode the
+    cooldown; a bulk rebuild had no override at all, and refused 29 of 34
+    album stories on a deliberate re-render after the dedup code changed.
+    `--force` is that override. Without the flag this exact argv reports
+    "cooldown" and writes nothing, which is what the sibling test pins."""
+    data = _library(tmp_path)
+    out = tmp_path / "out"
+    base = ["memory", "--out", str(out), "--no-mp4", "--data-dir", str(data)]
+
+    assert runner.invoke(app, [*base, "--recipe", "album_story", "--key", "Kashmir"]).exit_code == 0
+    forced = runner.invoke(app, [*base, "--force"])
+    assert forced.exit_code == 0, forced.output
+    assert "cooldown" not in forced.output, forced.output
+    assert (out / next(iter(p.name for p in out.iterdir())) / "memory.json").is_file()
+
+
+def test_force_does_not_override_a_dismissal(tmp_path):
+    """`--force` bypasses the resurfacing clock and NOTHING else. If it also
+    resurrected dismissals, "never show me this again" would be undone by a
+    flag whose help text promises only to ignore a cooldown."""
+    data = _library(tmp_path)
+    assert (
+        runner.invoke(app, ["dismiss", "album_story", "Kashmir", "--data-dir", str(data)]).exit_code
+        == 0
+    )
+    out = tmp_path / "out"
+    result = runner.invoke(
+        app,
+        [
+            "memory",
+            "--recipe",
+            "album_story",
+            "--key",
+            "Kashmir",
+            "--force",
+            "--out",
+            str(out),
+            "--no-mp4",
+            "--data-dir",
+            str(data),
+        ],
+    )
+    assert not out.exists() or not any(out.iterdir()), result.output
+
+
 def test_a_dismissed_memory_is_still_refused_when_named(tmp_path):
     """Dismissal is deliberate and permanent; `undismiss` is how it is taken
     back. Only the automatic cooldown is overridden."""

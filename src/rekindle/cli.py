@@ -329,6 +329,16 @@ def memory(
         bool, typer.Option("--no-mp4", help="Skip the MP4 even if ffmpeg is here.")
     ] = False,
     limit: Annotated[int, typer.Option("--limit", help="Maximum memories to build.")] = 1,
+    force: Annotated[
+        bool,
+        typer.Option(
+            "--force",
+            help=(
+                "Rebuild even memories inside the resurfacing cooldown. "
+                "Dismissals are still honoured."
+            ),
+        ),
+    ] = False,
     captions: Annotated[
         str,
         typer.Option(
@@ -421,6 +431,7 @@ def memory(
         music,
         no_mp4,
         limit,
+        force,
         captions,
         preview_width,
         mp4_width,
