@@ -33,6 +33,16 @@ class XmpData:
     face_regions: tuple[FaceRegion, ...] = ()
     keywords: tuple[str, ...] = ()
     description: str | None = None
+    #: Why this sidecar yielded nothing, when the reason was a failure rather
+    #: than an empty file. Empty string means "read successfully".
+    #:
+    #: Without it an unparseable sidecar is INDISTINGUISHABLE from one
+    #: carrying no people, because both return an empty `XmpData` - so
+    #: `doctor` could report "With XMP sidecar: 100%, With people: 0%" and
+    #: send the user looking for a missing-person-data problem that was really
+    #: a pile of broken XML. `models.py` states the rule this breaks: a
+    #: failure has to land in a bucket.
+    error: str = ""
 
 
 def find_sidecar(image_path: Path) -> Path | None:
@@ -79,10 +89,22 @@ def _area_value(area, key: str) -> float | None:
 
 
 def read_xmp(path: Path) -> XmpData:
+    """Parse one sidecar. A failure returns an EMPTY `XmpData` carrying the
+    reason in `error`, and never raises: one malformed sidecar in a library of
+    twenty thousand must not stop an index.
+
+    The exception list is explicit. It was `except Exception`, which also
+    swallowed `MemoryError` and every bug in the parsing below it as "this
+    sidecar has no people" - a category of silence nothing could report.
+    """
     try:
         root = DefusedET.parse(path).getroot()
-    except Exception:
-        return XmpData()
+    except (OSError, ValueError, SyntaxError) as exc:
+        # `SyntaxError` is what `xml.etree`'s `ParseError` inherits from, and
+        # defusedxml's own refusals (an entity bomb, an external reference)
+        # derive from `ValueError`. Catching the base classes rather than the
+        # library's names keeps this working if either re-parents them.
+        return XmpData(error=f"{type(exc).__name__}: {exc}")
 
     people = _bag_items(root, "Iptc4xmpExt:PersonInImage")
     keywords = _bag_items(root, "dc:subject")

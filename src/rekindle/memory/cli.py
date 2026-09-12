@@ -496,14 +496,24 @@ def _maybe_caption(
             totals.unembedded += report.unembedded
             for facet, n in report.facets.items():
                 totals.facets[facet] = totals.facets.get(facet, 0) + n
-            out.append(
-                captioning.apply_clip(spec, found, store=store)
-                if mode == captioning.MODE_CLIP
-                else spec
-            )
+            # Grounded for BOTH modes, not only for `--captions clip`.
+            #
+            # The layers are documented as strict supersets - gpt is clip plus
+            # a model - and this is where that was untrue. In gpt mode the
+            # deterministic spec was handed to the model, so any caption the
+            # verifier refused fell all the way back to a bare year instead of
+            # to the grounded line already computed two lines above. That made
+            # `--captions gpt` WORSE than `--captions clip` for those shots,
+            # which is the one thing the layering promises cannot happen. The
+            # no-key path below already made this argument in a comment:
+            # grounded captions are strictly better and cost nothing more.
+            out.append(captioning.apply_clip(spec, found))
         console.print(f"[dim]{captioning.describe_grounding(totals)}[/dim]")
         if mode == captioning.MODE_CLIP:
             return out
+        # From here on the grounded specs ARE the specs: the model is asked to
+        # improve on the grounded caption, and a rejection falls back to it.
+        specs = out
 
     if mode != captioning.MODE_GPT:
         return specs
@@ -516,9 +526,8 @@ def _maybe_caption(
         console.print(f"[yellow]![/yellow] {markup_safe(str(exc))}")
         # Grounded captions are strictly better than the deterministic ones
         # and cost nothing more, so a missing key falls back to CLIP rather
-        # than all the way to the year.
-        if vision is not None:
-            return [captioning.apply_clip(s, groundings.get(s.key, {}), store=store) for s in specs]
+        # than all the way to the year. `specs` is already the grounded list
+        # when vision ran, so there is nothing left to do here.
         return specs
 
     cache = captioning.gpt_cache(store, MODEL) if store is not None else None

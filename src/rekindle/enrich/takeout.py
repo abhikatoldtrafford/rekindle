@@ -285,9 +285,17 @@ def build_index(root: Path, report: EnrichReport) -> SidecarIndex:
     EXCLUDED_DIRS is inherited from FolderSource: parsing Trash/'s sidecars
     and counting them against an index that correctly excludes those photos
     would inflate the orphan count on a perfectly complete library.
+
+    THE SUFFIX TEST IS CASE-INSENSITIVE, and `rglob("*.json")` is not - on
+    POSIX, where the pattern is matched case-sensitively, a `.JSON` sidecar
+    was simply invisible here. `sources/folder.py` has always compared
+    `suffix.casefold()`, so `doctor` counted such a file as a sidecar and this
+    pass did not read it: the two halves of the tool disagreeing about the
+    same file, on Linux only, which is the kind of split nobody finds by
+    running it on Windows.
     """
     index = SidecarIndex()
-    for path in sorted(root.rglob("*.json")):
+    for path in sorted(p for p in root.rglob("*") if p.suffix.casefold() == ".json"):
         report.json_files_seen += 1
         if any(part.casefold() in EXCLUDED_DIRS for part in path.relative_to(root).parts[:-1]):
             report.excluded_dirs += 1

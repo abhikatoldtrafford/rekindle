@@ -499,3 +499,49 @@ def test_casefolding_is_the_first_line_of_defence_not_the_only_one():
     """
     lowercase = FactSheet(title="christmas in midnapur", recipe="album_story", photo_count=3)
     assert substantiated("Midnapur in the evening", lowercase) == REJECT_UNKNOWN_PERSON
+
+
+def test_the_report_still_adds_up_when_the_service_dies_mid_memory():
+    """`accounted` was false for every run where something went wrong.
+
+    `requested` was incremented per iteration and the loop BREAKS on
+    `LLMUnavailable`, so the shot whose call raised landed in no bucket at
+    all - and a report that stops reconciling exactly when it is being read
+    for a diagnosis is worse than no report.
+
+    The captions themselves were never in doubt: every abandoned shot keeps
+    its deterministic caption, which is what this also pins.
+    """
+    from rekindle.memory.spec import FactSheet, MemorySpec, Shot
+
+    spec = MemorySpec(
+        recipe="album_story",
+        key="k",
+        title="A trip",
+        subtitle="",
+        shots=tuple(Shot(f"h{i}", "2025", "2025-01-01T00:00:00", True) for i in range(5)),
+        facts=FactSheet(title="A trip", recipe="album_story", photo_count=5, years=(2025,)),
+        public_safe=True,
+    )
+
+    calls = {"n": 0}
+
+    def transport(payload, api_key):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise llm.LLMUnavailable("the captioning service returned HTTP 500")
+        return {"output_text": "A day out"}
+
+    rewritten, report = llm.apply_captions(
+        spec,
+        llm.GptCaptioner("sk-not-a-real-key", transport=transport),
+        lambda shot: llm.ShotFacts(year=2025),
+    )
+
+    assert report.requested == 5, "requested describes the spec, not how far the loop got"
+    assert report.accepted == 1
+    assert report.abandoned == 4, "the shot that raised, plus the three never tried"
+    assert report.accounted
+    assert report.error
+    assert [s.caption for s in rewritten.shots][1:] == ["2025"] * 4
+    assert calls["n"] == 2, "it must stop asking after the first failure"

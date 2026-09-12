@@ -83,19 +83,37 @@ class SemanticSearch:
         if not len(self.matrix):
             return []
         scores = cosine_scores(self.matrix, query)
-        # Over-fetch when filtering, so a filter that rejects most of the top-k
-        # still returns k results rather than however many survived.
-        want = k if allowed is None else min(len(self.matrix), max(k * 20, k))
-        picks = top_k(scores, want)
+
+        # THE FILTER IS APPLIED BEFORE THE RANKING, not after it.
+        #
+        # This used to over-fetch `k * 20` by score and then discard whatever
+        # the filter rejected, which is only a heuristic: for k=24 that is the
+        # top 480 of 18,201 vectors, and a filter naming a 50-photo album has
+        # no reason to have anything in there at all. The result was an EMPTY
+        # search over an album that plainly contains photographs - not a worse
+        # ranking, no ranking. Multiplying 20 by something larger would move
+        # the failure rather than remove it.
+        #
+        # Restricting first is exact at any size and cheaper whenever the
+        # allowed set is small, which is the only case that reaches here.
+        if allowed is None:
+            picks = top_k(scores, k)
+            rows: list[int] = list(picks)
+        else:
+            candidates = [i for i, h in enumerate(self.matrix.hashes) if h in allowed]
+            if not candidates:
+                return []
+            # Ranked among themselves, so `k` of them come back whenever `k`
+            # of them exist.
+            candidates.sort(key=lambda i: (-float(scores[i]), i))
+            rows = candidates[:k]
+
         hits: list[tuple[str, float]] = []
-        for i in picks:
-            file_hash = self.matrix.hashes[i]
-            if allowed is not None and file_hash not in allowed:
-                continue
+        for i in rows:
             score = float(scores[i])
             if min_score is not None and score < min_score:
                 break
-            hits.append((file_hash, score))
+            hits.append((self.matrix.hashes[i], score))
             if len(hits) == k:
                 break
         return self._resolve(hits)

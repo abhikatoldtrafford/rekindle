@@ -182,3 +182,58 @@ def test_matrix_rows_line_up_with_hashes(world):
     matrix = load_matrix(store)
     for i, digest in enumerate(matrix.hashes):
         assert np.allclose(matrix.data[i], store.get(digest), atol=1e-6)
+
+
+def test_a_filtered_search_finds_an_album_that_ranks_nowhere_near_the_top():
+    """The over-fetch was a heuristic, and it failed on the shape it was for.
+
+    It took the top `k * 20` by score and then discarded whatever the filter
+    rejected. For k=24 that is the top 480 of 18,201 vectors, and a filter
+    naming a 50-photo album has no reason to have anything in there - so the
+    search returned NOTHING for an album that plainly contains photographs.
+    Not a worse ranking: no ranking.
+
+    Here the allowed rows are deliberately the WORST-scoring in the store, so
+    no fixed over-fetch short of the whole matrix would reach them.
+    """
+    np = pytest.importorskip("numpy")
+
+    from rekindle.semantic.search import SemanticSearch
+    from rekindle.semantic.vectors import Matrix
+
+    n, dim = 2000, 8
+    data = np.zeros((n, dim), dtype="float32")
+    # Row i points a little further from the query than row i-1, so score
+    # falls monotonically with the index.
+    for i in range(n):
+        angle = (i / n) * (np.pi / 2)
+        data[i, 0] = np.cos(angle)
+        data[i, 1] = np.sin(angle)
+    hashes = tuple(f"{i:032x}" for i in range(n))
+    matrix = Matrix(hashes=hashes, data=data)
+
+    query = [1.0] + [0.0] * (dim - 1)
+    search = SemanticSearch(store=None, reader=None, matrix=matrix)
+
+    # The fifty worst rows in the store.
+    allowed = set(hashes[-50:])
+    hits = search.search_vector(query, k=24, allowed=allowed)
+
+    assert len(hits) == 24, "an album with fifty photographs must return k of them"
+    assert {h.file_hash for h in hits} <= allowed
+    # And they are the best fifty-of-fifty, in order.
+    assert [h.file_hash for h in hits] == list(hashes[-50:])[:24]
+    assert [h.score for h in hits] == sorted((h.score for h in hits), reverse=True)
+
+
+def test_an_allowed_set_matching_nothing_returns_nothing():
+    np = pytest.importorskip("numpy")
+
+    from rekindle.semantic.search import SemanticSearch
+    from rekindle.semantic.vectors import Matrix
+
+    data = np.eye(4, dtype="float32")
+    matrix = Matrix(hashes=tuple(f"h{i}" for i in range(4)), data=data)
+    search = SemanticSearch(store=None, reader=None, matrix=matrix)
+
+    assert search.search_vector([1.0, 0.0, 0.0, 0.0], k=3, allowed={"nope"}) == []

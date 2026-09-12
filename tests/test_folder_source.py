@@ -541,3 +541,29 @@ def test_an_uppercase_metadata_json_is_album_metadata_not_an_orphan(tmp_path):
     build_index(root, enrich_report)
     assert enrich_report.album_metadata == 1
     assert enrich_report.sidecars_seen == 1
+
+
+def test_an_unparseable_xmp_sidecar_is_counted_and_not_silently_empty(tmp_path):
+    """`with_xmp` counts the sidecar being THERE, which is not the same as it
+    being read.
+
+    `read_xmp` returns an empty result for a broken sidecar, so a library of
+    unparseable XMP reported "With XMP sidecar: 100%, With people: 0%" and the
+    real cause - a pile of broken XML - landed in no bucket. The user goes
+    looking for missing person data that was never missing.
+    """
+    root = tmp_path / "lib"
+    root.mkdir()
+    # Different colours: identical bytes would dedupe into ONE photo.
+    make_jpeg(root / "broken.jpg", color=(200, 30, 30))
+    (root / "broken.jpg.xmp").write_text("<not-closed>", encoding="utf-8")
+    make_jpeg(root / "fine.jpg", color=(30, 200, 30))
+    (root / "fine.jpg.xmp").write_text(
+        '<?xml version="1.0"?><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"/>',
+        encoding="utf-8",
+    )
+
+    _photos, report = FolderSource().scan(root)
+
+    assert report.with_xmp == 2, "both sidecars are present"
+    assert report.xmp_unreadable == 1, "and exactly one of them could not be read"

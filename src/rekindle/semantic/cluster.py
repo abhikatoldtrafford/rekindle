@@ -81,8 +81,14 @@ class Cluster:
     centroid: tuple[float, ...]
     #: Mean cosine of a member to the centroid. High = a tight, coherent scene.
     cohesion: float
-    #: Mean cosine of the centroid to the NEXT-nearest centroid. Low = this
+    #: Cosine of this centroid to the NEAREST other centroid. Low = this
     #: cluster is well separated from its neighbours.
+    #:
+    #: Read "Mean cosine" until someone checked: the value is
+    #: `(centres @ centres.T)[j].max()` with the diagonal masked out, which is
+    #: the nearest neighbour and not a mean over anything. Harmless - nothing
+    #: computes with it beyond ordering a review queue - and wrong, which for
+    #: a number a human reads off a report is enough.
     separation: float
     label: str = ""
     label_score: float = 0.0

@@ -228,6 +228,15 @@ class CaptionReport:
     #: so a user can see that a second run of the same memory cost nothing,
     #: and so a cache that is silently never hit is visible as a zero.
     cached: int = 0
+    #: Shots that never got an outcome because the service went away
+    #: mid-memory: the one whose call raised, plus every shot after it.
+    #:
+    #: They keep their deterministic caption, which is the right behaviour and
+    #: was never in doubt - but they landed in no bucket, so `accounted` was
+    #: false for the whole class of runs where something went wrong. A report
+    #: that stops adding up exactly when it is being read is worse than no
+    #: report.
+    abandoned: int = 0
     rejected: dict[str, int] = field(default_factory=dict)
     error: str | None = None
 
@@ -240,7 +249,9 @@ class CaptionReport:
 
     @property
     def accounted(self) -> bool:
-        return self.requested == self.accepted + self.cached + self.total_rejected
+        return self.requested == (
+            self.accepted + self.cached + self.total_rejected + self.abandoned
+        )
 
 
 class CaptionCache(Protocol):
@@ -373,8 +384,33 @@ def substantiated(caption: str, facts: FactSheet, shot: ShotFacts | None = None)
     # place name under a photograph.
     if facts.title_substantiated:
         allowed_names |= set(facts.title.split())
+
+    # WHAT CLIP SAID ABOUT THIS PHOTOGRAPH IS A FACT ABOUT IT, so its words
+    # are substantiated for this shot and no other.
+    #
+    # Case-folded and kept in its own set: `phrase` capitalises the leading
+    # word, so the vocabulary's "clouds" arrives as "Clouds" and `_NAME`
+    # matches it. Without this the verifier refused five of the nineteen
+    # captions its own closed vocabulary can produce - `Clouds, 2019`,
+    # `Trees, 2019`, `Food, 2019`, `Indoors, 2019`, `Under a grey sky, 2019` -
+    # as `unsubstantiated_person`, which is both the wrong verdict and the
+    # wrong reason code. On this library those five cover 890 photographs.
+    #
+    # It cannot widen the check in the direction that matters: the vocabulary
+    # is closed, and `test_caption_vocab.py` asserts term by term that it
+    # contains no proper noun, no person and no relationship. A word from it
+    # can never be an invented place or an invented name - which is the whole
+    # reason a closed vocabulary was chosen over free description.
+    allowed_terms = {
+        part.casefold()
+        for term in (shot.terms if shot is not None else ())
+        for part in term.split()
+        if part
+    }
     for candidate in _NAME.findall(text):
         if candidate in _COMMON or candidate in allowed_names:
+            continue
+        if candidate.casefold() in allowed_terms:
             continue
         if shot is not None and any(
             candidate == part for person in facts.people for part in person.split()
@@ -484,9 +520,12 @@ def apply_captions(
     it a photograph is captioned once, ever.
     """
     report = CaptionReport()
+    # Set once, from the spec, rather than incremented per iteration: the loop
+    # can BREAK, and a `requested` that stops early cannot be reconciled
+    # against the shots that were abandoned. See `CaptionReport.abandoned`.
+    report.requested = len(spec.shots)
     shots: list[Shot] = []
     for shot in spec.shots:
-        report.requested += 1
         facts = context(shot) if context is not None else None
         cached = cache.get(shot.file_hash) if cache is not None else None
         if cached is not None:
@@ -512,8 +551,15 @@ def apply_captions(
         except LLMUnavailable as exc:
             # The whole run is over, not just this shot. Keep every remaining
             # deterministic caption and report once.
+            #
+            # `remaining` starts at THIS shot - it has not been appended yet -
+            # so it covers the one whose call raised as well as the untried
+            # ones after it. All of them are abandoned, and counting them is
+            # what keeps `accounted` true on the failure path.
             report.error = str(exc)
-            shots.extend(spec.shots[len(shots) :])
+            remaining = spec.shots[len(shots) :]
+            report.abandoned += len(remaining)
+            shots.extend(remaining)
             break
         if candidate is None:
             report.reject(REJECT_EMPTY)

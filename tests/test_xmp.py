@@ -115,11 +115,40 @@ def test_description_prefers_x_default_language(tmp_path):
     assert read_xmp(side).description == "the real one"
 
 
-def test_malformed_xmp_returns_empty_not_error(tmp_path):
+def test_malformed_xmp_returns_empty_and_says_why(tmp_path):
+    """Still no exception - one broken sidecar must not stop an index of
+    twenty thousand - but the failure is now RECORDED rather than erased.
+
+    An unparseable sidecar and a sidecar with no people used to be the same
+    empty value, so `doctor` could report "With XMP sidecar: 100%, With
+    people: 0%" and the real cause landed in no bucket. `SourceReport.
+    xmp_unreadable` counts these; this is where the reason comes from.
+    """
     bad = tmp_path / "bad.xmp"
     bad.write_text("<not-closed>", encoding="utf-8")
-    assert read_xmp(bad) == XmpData()
+
+    got = read_xmp(bad)
+
+    assert (got.people, got.face_regions, got.keywords, got.description) == ((), (), (), None)
+    assert "ParseError" in got.error
 
 
-def test_missing_file_returns_empty_not_error(tmp_path):
-    assert read_xmp(tmp_path / "nope.xmp") == XmpData()
+def test_missing_file_returns_empty_and_says_why(tmp_path):
+    got = read_xmp(tmp_path / "nope.xmp")
+    assert (got.people, got.face_regions, got.keywords, got.description) == ((), (), (), None)
+    assert "FileNotFoundError" in got.error
+
+
+def test_a_sidecar_that_parses_and_holds_nothing_records_NO_error(tmp_path):
+    """The other side of the same distinction, and the one that makes the
+    counter meaningful: an empty sidecar is not a broken one."""
+    empty = tmp_path / "empty.xmp"
+    empty.write_text(
+        '<?xml version="1.0"?><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"/>',
+        encoding="utf-8",
+    )
+
+    got = read_xmp(empty)
+
+    assert got == XmpData(), "a readable, empty sidecar is exactly the default"
+    assert got.error == ""

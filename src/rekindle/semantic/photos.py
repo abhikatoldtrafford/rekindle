@@ -34,7 +34,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from collections.abc import Iterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from types import TracebackType
 
@@ -241,7 +241,26 @@ class PhotoIndexReader:
         return row["value"] if row else None
 
     def count(self, where: ReadFilter | None = None) -> int:
-        sql, params = self._where(where or ReadFilter())
+        """How many photographs `where` selects. The SAME filter `iter_photos`
+        applies, including the album one.
+
+        `albums` is matched in Python because the column is a JSON blob, and
+        `count` used to build its SQL from `_where` alone - which never sees
+        it. So `count(ReadFilter(albums=("Kashmir",)))` answered with the whole
+        library: measured 18,201 against the 1,075 photographs the same filter
+        actually yields. A progress bar or a "no photos matched" check reading
+        that number is not wrong by a little.
+
+        Counting through `iter_photos` costs a full scan when an album is
+        named, which is the price of the blob and is paid only on that path.
+        """
+        f = where or ReadFilter()
+        if f.albums:
+            # Without the limit: `count` answers "how many are there", and a
+            # limit is the caller's separate business.
+            unlimited = replace(f, limit=None)
+            return sum(1 for _ in self.iter_photos(unlimited))
+        sql, params = self._where(f)
         return int(
             self._conn.execute(f"SELECT COUNT(*) AS n FROM photos WHERE {sql}", params).fetchone()[
                 "n"
@@ -275,14 +294,25 @@ class PhotoIndexReader:
         sql, params = self._where(f)
         cols = ", ".join(_COLUMNS)
         query = f"SELECT {cols} FROM photos WHERE {sql} ORDER BY file_hash"
-        if f.limit is not None:
+        # The SQL LIMIT applies only when SQL can see the whole filter.
+        # `albums` lives in a JSON blob and is matched below, in Python, so a
+        # LIMIT in the query would cut the candidates BEFORE the album test
+        # and yield a fraction of what was asked for: measured, `limit=200`
+        # over a real library returned 17 rows. With an album named, the limit
+        # is applied after the match instead.
+        if f.limit is not None and not f.albums:
             query += " LIMIT ?"
             params = [*params, f.limit]
+        wanted = set(f.albums)
+        yielded = 0
         for row in self._conn.execute(query, params):
             photo = self._to_photo(row)
-            if f.albums and not (set(f.albums) & set(photo.albums)):
+            if wanted and not (wanted & set(photo.albums)):
                 continue
             yield photo
+            yielded += 1
+            if f.limit is not None and yielded >= f.limit:
+                return
 
     def get(self, file_hash: str) -> IndexedPhoto | None:
         cols = ", ".join(_COLUMNS)

@@ -265,6 +265,14 @@ class SourceReport:
     with_gps: int = 0
     with_people: int = 0
     with_xmp: int = 0
+    #: XMP sidecars that were FOUND and would not parse.
+    #:
+    #: `with_xmp` counts the file being there, which is not the same thing.
+    #: `read_xmp` returns an empty result for a broken sidecar, so without
+    #: this a library of unparseable XMP reported "With XMP sidecar: 100%,
+    #: With people: 0%" and the real cause landed in no bucket at all - the
+    #: user would go looking for missing person data that was never missing.
+    xmp_unreadable: int = 0
     # Files that were INDEXED but could not be decoded. Deliberately not a
     # `skipped` reason: they are not skipped, and filing them there made
     # files_seen stop reconciling against the other buckets. Counted per

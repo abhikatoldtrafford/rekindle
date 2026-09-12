@@ -101,10 +101,23 @@ def cosine_scores(matrix: Matrix, query: list[float] | np.ndarray) -> np.ndarray
 
 
 def top_k(scores: np.ndarray, k: int) -> list[int]:
-    """Indices of the k highest scores, best first. Ties broken by index."""
+    """Indices of the k highest scores, best first. Ties broken by index.
+
+    The tie rule is now TRUE, and was not. `argpartition` gives the top k in
+    no defined order, and a stable sort of that preserves whatever order the
+    partition happened to produce - which is reproducible for one input and
+    is not index order. Two photographs with identical cosine could therefore
+    come back either way round depending on where they sat in the store, and
+    "ties broken by index" is exactly the kind of promise a caller builds a
+    determinism argument on.
+
+    `lexsort` reads its keys last-first, so this sorts by descending score and
+    then by ascending index.
+    """
     np = _numpy()
     if k <= 0 or not len(scores):
         return []
     k = min(k, len(scores))
     part = np.argpartition(-scores, k - 1)[:k]
-    return [int(i) for i in part[np.argsort(-scores[part], kind="stable")]]
+    order = np.lexsort((part, -scores[part]))
+    return [int(part[i]) for i in order]

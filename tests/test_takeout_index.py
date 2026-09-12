@@ -361,3 +361,32 @@ def test_a_favourite_only_disagreement_is_detected(tmp_path):
     _found, match, tie = resolve(_photo(year / "FAV_TIE.jpg"), index)
     assert match == "exact"
     assert tie is True
+
+
+def test_a_sidecar_with_an_uppercase_extension_is_found(tmp_path):
+    """`rglob("*.json")` matches case-SENSITIVELY on POSIX.
+
+    `sources/folder.py` has always compared `suffix.casefold()`, so on Linux a
+    `.JSON` sidecar was counted by `doctor` as a sidecar and was invisible to
+    `enrich` - the two halves of the tool disagreeing about the same file, on
+    one platform only. This test passes either way on Windows, where the glob
+    is case-insensitive, and is the one that fails on the CI legs that matter.
+    """
+    root = tmp_path / "lib"
+    root.mkdir()
+    for name in ("IMG_1.jpg.supplemental-metadata.JSON", "IMG_2.jpg.supplemental-metadata.json"):
+        (root / name).write_text(
+            json.dumps(
+                {
+                    "title": name.split(".jpg")[0] + ".jpg",
+                    "photoTakenTime": {"timestamp": "1300000000"},
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    report = EnrichReport()
+    index = build_index(root, report)
+
+    assert report.json_files_seen == 2
+    assert len(index.by_target) == 2

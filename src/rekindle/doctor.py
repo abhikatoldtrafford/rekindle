@@ -49,6 +49,13 @@ def diagnose(report: SourceReport) -> Diagnosis:
             f"{len(report.long_paths)} long paths found (>=260 chars). On Windows, "
             "enable LongPathsEnabled or some files may be unreadable."
         )
+    if report.xmp_unreadable:
+        warnings.append(
+            f"{report.xmp_unreadable} XMP sidecars are present but would not parse, so "
+            "their people, keywords and descriptions were not read. Without this line "
+            "the row above says the sidecars are there and the people row says nobody "
+            "is tagged, which reads like missing data rather than broken files."
+        )
     if report.orphan_sidecars:
         matched = max(report.json_sidecars - report.orphan_sidecars, 0)
         denom = matched + report.orphan_sidecars
@@ -87,6 +94,8 @@ def render(diagnosis: Diagnosis, console: Console) -> None:
     table.add_row("With GPS", str(r.with_gps), f"{diagnosis.pct(r.with_gps)}%")
     table.add_row("With people", str(r.with_people), f"{diagnosis.pct(r.with_people)}%")
     table.add_row("With XMP sidecar", str(r.with_xmp), f"{diagnosis.pct(r.with_xmp)}%")
+    if r.xmp_unreadable:
+        table.add_row("[yellow]XMP sidecars unreadable[/yellow]", str(r.xmp_unreadable), "")
     table.add_row("Duplicates merged", str(r.duplicates_merged), "")
     table.add_row("Edited variants linked", str(r.edited_linked), "")
     table.add_row("Motion photo pairs", str(r.motion_pairs), "")

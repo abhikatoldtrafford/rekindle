@@ -261,7 +261,9 @@ class FolderSource:
                 # The second copy must still be READ. In Takeout the sidecar
                 # frequently sits beside only one of the two copies, so
                 # skipping this silently loses the metadata half of dedupe.
-                meta, decode_error = self._read_meta(path, media_type, mtime, sidecar)
+                meta, decode_error, xmp_error = self._read_meta(path, media_type, mtime, sidecar)
+                if xmp_error:
+                    report.xmp_unreadable += 1
                 merged, conflict = merge_meta(existing.meta, meta)
                 existing.meta = merged
                 existing.metadata_conflict = existing.metadata_conflict or conflict
@@ -276,7 +278,9 @@ class FolderSource:
                 saw_xmp.add(digest)
                 report.with_xmp += 1
 
-            meta, decode_error = self._read_meta(path, media_type, mtime, sidecar)
+            meta, decode_error, xmp_error = self._read_meta(path, media_type, mtime, sidecar)
+            if xmp_error:
+                report.xmp_unreadable += 1
             note_undecodable(digest, path, decode_error)
             by_hash[digest] = Photo(
                 file_hash=digest,
@@ -345,13 +349,15 @@ class FolderSource:
         media_type: MediaType,
         mtime: datetime,
         sidecar: Path | None,
-    ) -> tuple[PhotoMeta, str | None]:
-        """Returns (meta, decode_error).
+    ) -> tuple[PhotoMeta, str | None, str]:
+        """Returns (meta, decode_error, xmp_error).
 
         The decode failure is HANDED BACK rather than reported here: only the
         caller knows this path's hash, and the failure has to be counted once
         per photo, not once per path. Reporting it in here also filed an
-        indexed file under `skipped`, which it plainly is not.
+        indexed file under `skipped`, which it plainly is not. `xmp_error`
+        rides along for the same reason and is the empty string when the
+        sidecar parsed or there was none.
         """
         exif = read_exif(path) if media_type is MediaType.IMAGE else None
         # Still index it - the file exists and the user should see it - but
@@ -380,7 +386,7 @@ class FolderSource:
             width=exif.width if exif else None,
             height=exif.height if exif else None,
         )
-        return meta, decode_error
+        return meta, decode_error, (xmp.error if xmp else "")
 
 
 def _split_edited(stem: str) -> tuple[str, str | None]:

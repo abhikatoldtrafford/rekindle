@@ -16,12 +16,18 @@ contributes nothing, a caption the index cannot substantiate is discarded in
 favour of the deterministic one. A dropped caption is a blank; a repaired one
 is a guess wearing a citation.
 
-**Generated once per photograph, then never again.** A caption is written to
-`photo_captions` in the index the first time it is produced and read back
-forever after, so the same library produces the same memory byte for byte -
-the promise the whole engine rests on, and the one thing a language model in
-the loop would otherwise break. The cache is personal data and lives in the
-index, which is gitignored.
+**A GPT caption is generated once per photograph, then never again.** It is
+written to `photo_captions` in the index the first time it is produced and
+read back forever after, so the same library produces the same memory byte for
+byte - the promise the whole engine rests on, and the one thing a language
+model in the loop would otherwise break. That cache is personal data and lives
+in the index, which is gitignored.
+
+The CLIP layer has NO cache and needs none. It is a lookup in a vocabulary
+against scores the embedding store already holds; the line it produces ends
+with the shot's deterministic caption, which differs between recipes, so a
+cached line would be wrong in the next memory anyway. There used to be a write
+here with no reader; see `GroundingReport`.
 """
 
 from __future__ import annotations
@@ -79,14 +85,28 @@ class GroundingReport:
 
     requested: int = 0
     grounded: int = 0
-    cached: int = 0
     unembedded: int = 0
     silent: int = 0
     facets: dict[str, int] = field(default_factory=dict)
 
+    #: There is no `cached` here, deliberately, and there was one that could
+    #: never be non-zero.
+    #:
+    #: `apply_clip` wrote a `source='clip'` row for every grounded shot and
+    #: NOTHING ever read one back: the only `_StoreCache` built anywhere is
+    #: `gpt_cache`, pinned to `SOURCE_GPT`. A counter documented as existing
+    #: so that a dead cache shows up as a zero was itself the dead thing.
+    #:
+    #: The write is gone rather than the read being added, because a cache
+    #: here cannot pay for itself. What `phrase` returns has the shot's
+    #: DETERMINISTIC caption appended - a year for one recipe, a full date for
+    #: another - so a line cached from one memory is wrong in the next, and
+    #: what a hit would save is `vocab.choose` over scores already in hand.
+    #: The expensive half is the embedding, and that has its own store.
+
     @property
     def accounted(self) -> bool:
-        return self.requested == self.grounded + self.cached + self.unembedded + self.silent
+        return self.requested == self.grounded + self.unembedded + self.silent
 
 
 @dataclass
@@ -176,14 +196,16 @@ def ground(
 def apply_clip(
     spec: MemorySpec,
     groundings: dict[str, vocab.Grounding],
-    *,
-    store=None,
 ) -> MemorySpec:
     """Replace each caption with its grounded phrase, where there is one.
 
     A shot CLIP declined to describe keeps its deterministic caption. The
     deterministic caption is appended to the grounded one when it fits - it is
     a year or a date, which is a fact and worth keeping.
+
+    NO `store` PARAMETER, and there was one. It wrote a `source='clip'` row
+    per grounded shot that nothing ever read; see `GroundingReport` for why a
+    cache at this layer cannot pay for itself.
     """
     shots = []
     for shot in spec.shots:
@@ -196,14 +218,6 @@ def apply_clip(
             # failing, which a mutation run found here.
             shots.append(shot)
             continue
-        if store is not None:
-            store.caption_put(
-                shot.file_hash,
-                SOURCE_CLIP,
-                line,
-                terms=[t.probe for t in grounding.terms],
-                vocab_version=VOCAB_VERSION,
-            )
         shots.append(
             Shot(
                 file_hash=shot.file_hash,

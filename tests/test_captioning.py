@@ -382,25 +382,34 @@ def test_apply_clip_changes_nothing_but_the_caption():
     assert out.public_safe == spec.public_safe
 
 
-def test_apply_clip_writes_the_cache(tmp_path):
-    """And writes ONLY what CLIP produced.
+def test_apply_clip_writes_no_cache_and_the_report_has_no_cached_counter():
+    """The write that had no reader, and the counter that could never move.
 
-    The silent shot keeps its deterministic caption, and that caption must not
-    be written to the caption cache: caching "2019" as a grounded caption
-    would make a later run with a better vocabulary read it back as one.
+    `apply_clip` wrote a `source='clip'` row per grounded shot; the only
+    `_StoreCache` built anywhere is `gpt_cache`, pinned to `SOURCE_GPT`, so
+    nothing ever read one back and `GroundingReport.cached` - documented as
+    existing so a dead cache would show up as a zero - was itself the dead
+    thing.
+
+    The write is gone rather than the read being added: the cached line ends
+    with the shot's DETERMINISTIC caption, which is a year for one recipe and
+    a full date for another, so a hit would be wrong in the next memory. This
+    test is what makes reintroducing it a decision rather than an accident.
     """
-    store = PhotoStore(tmp_path / "i.sqlite")
+    import inspect
+
+    assert "store" not in inspect.signature(captioning.apply_clip).parameters
+    assert not hasattr(captioning.GroundingReport(), "cached")
+
+
+def test_the_grounding_report_still_accounts_for_every_shot():
+    """`accounted` lost a term when `cached` went, so it is worth re-pinning
+    that the remaining three cover every requested shot."""
     spec = _spec()
     vision = _Vision({"hash-2011": _all_probes(**{_probe("sandy beach"): 0.99})})
-    found, _ = captioning.ground(spec, vision)
-    captioning.apply_clip(spec, found, store=store)
-    assert store.caption_get("hash-2011", "clip", vocab_version=captioning.VOCAB_VERSION) == (
-        "At the sea, 2011",
-        (_probe("sandy beach"),),
-    )
-    assert store.caption_get("hash-2019", "clip", vocab_version=captioning.VOCAB_VERSION) is None
-    assert store.caption_count("clip") == 1
-    store.close()
+    _found, report = captioning.ground(spec, vision)
+    assert report.requested == 2
+    assert report.accounted, (report.requested, report.grounded, report.unembedded, report.silent)
 
 
 @pytest.mark.parametrize("mode", captioning.MODES)

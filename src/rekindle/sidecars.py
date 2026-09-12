@@ -13,10 +13,34 @@ from pathlib import PurePosixPath
 
 # Verified against a real 24,248-sidecar export: exactly two schemes,
 # `.supplemental-metadata` (23,255) and `.supplemental-metadata(N)` (993),
-# with no truncated forms present. The `met[a-z]*` wildcard covers truncation
-# anyway - it is well documented elsewhere and costs nothing.
+# with no truncated forms present.
+#
+# TRUNCATION IS THE REASON THIS IS GENERATED. Google caps the whole sidecar
+# filename, so a long photo name loses the TAIL of the marker and produces
+# `.supplemental-me`, `.supplemental`, `.suppl`, and shorter. The pattern here
+# used to be the literal `supplemental-met` followed by `[a-z]*`, with a
+# comment claiming the wildcard covered truncation - it covers truncation only
+# AFTER those sixteen characters, so every shorter form fell through to
+# `_PLAIN_JSON_RE`, which strips `.json` and returns
+# `IMG_1234.jpg.supplemental-me` as the media file to look for. That file
+# cannot exist, so the sidecar is a permanent orphan and drives the INCOMPLETE
+# EXPORT warning on a library that is complete. Zero live instances on this
+# export, by the count above; widely reported on others.
+#
+# `_prefixes` builds "any non-empty prefix of the literal, and nothing else":
+# `s(?:u(?:p...)?)?`. Generated rather than typed so it cannot drift from the
+# word, and exact rather than a wildcard so a `photo.jpg.settings.json` is not
+# swallowed as a truncated marker.
+_MARKER = "supplemental-metadata"
+
+
+def _prefixes(word: str) -> str:
+    """A regex matching any non-empty prefix of `word`, exactly."""
+    return word[0] + "".join(f"(?:{c}" for c in word[1:]) + ")?" * (len(word) - 1)
+
+
 _SUPPLEMENTAL_RE = re.compile(
-    r"^(?P<base>.+?)\.supplemental-met[a-z]*(?:\((?P<counter>\d+)\))?\.json$",
+    rf"^(?P<base>.+?)\.{_prefixes(_MARKER)}(?:\((?P<counter>\d+)\))?\.json$",
     re.IGNORECASE,
 )
 _PLAIN_JSON_RE = re.compile(

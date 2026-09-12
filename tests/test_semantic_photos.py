@@ -197,3 +197,54 @@ def test_taken_at_survives_the_round_trip(tmp_path):
     with PhotoIndexReader(db) as reader:
         photo = next(iter(reader.iter_photos()))
     assert photo.taken_at_utc.startswith("2014-03-09")
+
+
+def test_count_applies_the_album_filter_like_iter_photos_does(library):
+    """`count` built its SQL from `_where`, which never sees `albums` -
+    the column is a JSON blob and the match happens in Python. So the two
+    disagreed: measured on the reference index, `count` said 18,201 for a
+    filter that `iter_photos` answered with 508. A caller sizing a progress
+    bar, or deciding whether anything matched at all, is not wrong by a
+    little."""
+    db, _root = library
+    with PhotoIndexReader(db) as reader:
+        where = ReadFilter(albums=("Kashmir",))
+        assert reader.count(where) == len(list(reader.iter_photos(where)))
+        assert reader.count(where) == 1
+        assert reader.count(ReadFilter()) > 1, "the unfiltered count must be unaffected"
+
+
+def test_count_ignores_a_limit(library):
+    """A limit answers "give me some", a count answers "how many are there".
+    Passing one through would make `count` report the limit back."""
+    db, _root = library
+    with PhotoIndexReader(db) as reader:
+        assert reader.count(ReadFilter(albums=("Kashmir",), limit=1)) == 1
+        assert reader.count(ReadFilter(limit=1)) == reader.count(ReadFilter())
+
+
+def test_a_limit_is_applied_AFTER_the_album_match(tmp_path):
+    """The LIMIT went into the SQL, which runs before the Python-side album
+    test, so it cut the candidates rather than the results: measured on a real
+    library, `limit=200` returned 17 rows.
+
+    Here the wanted album is the last thing in `file_hash` order, so a SQL
+    LIMIT of 3 would reach none of it.
+    """
+    root = tmp_path / "lib"
+    rows = [
+        make_photo(f"{i:032x}", write_photo(root, f"n{i}.jpg", "red"), albums=["Other"])
+        for i in range(10)
+    ]
+    rows += [
+        make_photo(f"f{i:031x}", write_photo(root, f"k{i}.jpg", "blue"), albums=["Kashmir"])
+        for i in range(5)
+    ]
+    db = tmp_path / "data" / "rekindle.sqlite"
+    make_index(db, rows, index_root=root)
+
+    with PhotoIndexReader(db) as reader:
+        got = list(reader.iter_photos(ReadFilter(albums=("Kashmir",), limit=3)))
+
+    assert len(got) == 3, "the limit must cut the RESULTS, not the candidates"
+    assert all("Kashmir" in p.albums for p in got)

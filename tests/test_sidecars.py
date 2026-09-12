@@ -1,4 +1,6 @@
-from rekindle.sidecars import is_album_metadata, sidecar_target
+import pytest
+
+from rekindle.sidecars import is_album_metadata, is_photo_sidecar, sidecar_target
 
 
 def test_plain_supplemental_metadata_yields_the_filename():
@@ -63,3 +65,101 @@ def test_album_metadata_is_recognised_case_insensitively():
     assert is_album_metadata("metadata.json")
     assert is_album_metadata("Metadata.JSON")
     assert not is_album_metadata("IMG_1234.jpg.supplemental-metadata.json")
+
+
+# --------------------------------------------------------------------------
+# truncated markers
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [
+        "supplemental-metadata",
+        "supplemental-metadat",
+        "supplemental-met",
+        "supplemental-me",
+        "supplemental-m",
+        "supplemental-",
+        "supplemental",
+        "supplementa",
+        "suppl",
+        "sup",
+        "su",
+        "s",
+    ],
+)
+def test_a_truncated_marker_still_names_the_media_file(marker):
+    """Google caps the whole sidecar filename, so a long photo name loses the
+    TAIL of the marker.
+
+    The pattern was the literal `supplemental-met` plus `[a-z]*`, under a
+    comment claiming the wildcard covered truncation - it covers it only after
+    those sixteen characters. Everything shorter fell through to the plain
+    `.json` rule, which returns `IMG_1234.jpg.supplemental-me` as the file to
+    look for. That cannot exist, so the sidecar becomes a permanent orphan and
+    fires the INCOMPLETE EXPORT warning on a complete library.
+    """
+    assert sidecar_target(f"IMG_1234.jpg.{marker}.json") == "IMG_1234.jpg"
+
+
+def test_a_truncated_marker_still_relocates_the_counter():
+    assert sidecar_target("DSC00107.JPG.supplemental-me(1).json") == "DSC00107(1).JPG"
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "photo.jpg.settings.json",
+        "photo.jpg.supplementalx.json",
+        "photo.jpg.supplemental-metadataX.json",
+        "photo.jpg.sidecar.json",
+    ],
+)
+def test_a_name_that_only_looks_like_the_marker_is_not_treated_as_one(name):
+    """The pattern matches PREFIXES of the word and nothing else, which is why
+    it is generated from the literal rather than written as a wildcard. A
+    wildcard loose enough to catch `.s` would also swallow `.settings`."""
+    assert sidecar_target(name) == name.removesuffix(".json")
+
+
+# --------------------------------------------------------------------------
+# what counts as a per-photo sidecar at all
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "shared_album_comments.json",
+        "user-generated-memory-titles.json",
+        "print-subscriptions.json",
+        "metadata.json",
+        "Metadata.json",
+    ],
+)
+def test_account_level_and_album_json_are_not_photo_sidecars(name):
+    """Only a per-photo sidecar can be an ORPHAN, and `doctor` fires its
+    loudest warning on the orphan count - "INCOMPLETE EXPORT ... your library
+    will be silently missing photos".
+
+    Google writes two account-level JSONs at the root of `Google Photos/`.
+    They name no photograph, so they matched no media file and were counted as
+    proof the export was incomplete: on a genuinely complete export they were
+    the entire count, and the first command a new user runs told them their
+    data was missing.
+    """
+    assert not is_photo_sidecar(name)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "PXL_1234.jpg.supplemental-metadata.json",
+        "DSC00107.JPG.supplemental-metadata(1).json",
+        "IMG_0001.JPG.json",
+        "clip.mp4.supplemental-me.json",
+    ],
+)
+def test_a_real_per_photo_sidecar_still_counts(name):
+    """The other half: a rule that excluded too much would hide a genuinely
+    incomplete export, which is the failure the warning exists for."""
+    assert is_photo_sidecar(name)
