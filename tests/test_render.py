@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from rekindle.memory import composition as comp
 from rekindle.memory.render import frames as fr
@@ -125,11 +125,6 @@ def test_a_title_card_needs_no_font_file(tmp_path):
     assert card.size == CANVAS
     # Not a blank frame: something was actually drawn.
     assert card.convert("L").getextrema()[1] > 100
-
-
-def test_a_very_long_title_wraps_instead_of_overflowing():
-    card = fr.title_card("A place you kept coming back to over many years", "", (320, 240))
-    assert card.size == (320, 240)
 
 
 def test_a_missing_file_is_dropped_and_counted_not_raised(tmp_path):
@@ -897,3 +892,213 @@ def test_the_frame_report_counts_how_each_shot_met_the_canvas(tmp_path):
     assert report.placement[comp.FIT_DOWNSCALE] == 1
     assert report.placement[comp.FIT_PAD] == 1
     assert sum(report.placement.values()) == report.rendered
+
+
+# --------------------------------------------------------------------------
+# the title card measures its subtitle
+#
+# It did not. It wrapped the title against the canvas WIDTH and then drew the
+# subtitle straight out at a size derived from the canvas HEIGHT, having
+# measured it against nothing. Centred text wider than the canvas overflows at
+# BOTH ends, so "Every August" lost the `1` from `10 photos` and the `6` from
+# `2026`. Invisible at the engine's 1280px default, which is why it shipped.
+#
+# Measured on the real subtitle from the shipped `Every August` memory,
+# `24 photos, August 2009 - August 2026` (the median subtitle in
+# `memories/general` is 38 characters, the longest 42):
+#
+#     canvas      before                       after
+#     1280x960    ink 277..1004  inside box    unchanged
+#      400x300    ink  83..316   inside box    unchanged
+#      240x180    ink  14..225   OUTSIDE box   ink 30..209, inside
+#      210x157    ink   0..209   CLIPPED       ink 15..194, inside
+#
+# So the assertions below are about INK POSITION, not about the card being the
+# size it was asked for - which is what the previous test asserted and which
+# no amount of clipping could ever have failed.
+
+#: A real one, from `memories/general/2026-09-11-on_this_day-08-.../memory.json`.
+REAL_SUBTITLE = "24 photos, August 2009 - August 2026"
+
+
+def _subtitle_ink(title: str, subtitle: str, canvas: tuple[int, int]) -> tuple[int, int] | None:
+    """The leftmost and rightmost columns the SUBTITLE alone put ink in.
+
+    Rendered twice and differenced, rather than scanning the whole card, so a
+    long title can never be mistaken for the thing under test.
+    """
+    with_sub = fr.title_card(title, subtitle, canvas).convert("L")
+    without = fr.title_card(title, "", canvas).convert("L")
+    from PIL import ImageChops
+
+    diff = ImageChops.difference(with_sub, without).load()
+    cols = [x for x in range(canvas[0]) if any(diff[x, y] > 40 for y in range(canvas[1]))]
+    return (min(cols), max(cols)) if cols else None
+
+
+@pytest.mark.parametrize(
+    "canvas",
+    [(1280, 960), (640, 480), (400, 300), (320, 240), (240, 180), (210, 157), (160, 120)],
+    ids=lambda c: f"{c[0]}x{c[1]}",
+)
+def test_the_subtitle_never_leaves_its_text_box(canvas):
+    """The box is `canvas[0] // 16` in from each edge - the same margin the
+    title is wrapped to. Below 245px the old code left it; below 215px the
+    canvas itself cut characters off."""
+    ink = _subtitle_ink("Every August", REAL_SUBTITLE, canvas)
+    assert ink is not None, "the subtitle drew nothing at all"
+    margin = canvas[0] // 16
+    assert ink[0] >= margin - 1, f"subtitle starts at {ink[0]}, left margin is {margin}"
+    assert ink[1] <= canvas[0] - margin, f"subtitle ends at {ink[1]}, canvas is {canvas[0]}"
+
+
+@pytest.mark.parametrize("width", [1280, 640, 400, 320, 240, 210, 180, 160])
+def test_the_subtitle_is_never_clipped_by_the_canvas(width):
+    """The reported symptom, stated directly: no character may be cut off."""
+    canvas = (width, int(width * 0.75))
+    ink = _subtitle_ink("Every August", REAL_SUBTITLE, canvas)
+    assert ink is not None
+    assert ink[0] > 0, "ink touches the left edge, so something is cut off"
+    assert ink[1] < width - 1, "ink touches the right edge, so something is cut off"
+
+
+def test_a_subtitle_that_already_fits_is_drawn_EXACTLY_as_before():
+    """The fix must be a no-op at the engine's 1280px default, or it is a
+    rendering change dressed as a bug fix."""
+    draw = ImageDraw.Draw(Image.new("RGB", (1280, 960)))
+    size, lines = fr._fit_subtitle(draw, REAL_SUBTITLE, (1280, 960), 1280 - 1280 // 8)
+    assert size == max(12, 960 // 22), "the starting size is the one it always used"
+    assert lines == [REAL_SUBTITLE], "one line, unmodified"
+
+
+def test_a_long_subtitle_WRAPS_before_it_shrinks():
+    """Shrinking an ordinary two-phrase subtitle to fit on one line would make
+    it unreadable; two centred lines is the right answer.
+
+    240px is where the real subtitle stops fitting on one line: at 300px it
+    still does, and asserting a wrap there would assert something false.
+    """
+    canvas = (240, 180)
+    draw = ImageDraw.Draw(Image.new("RGB", canvas))
+    size, lines = fr._fit_subtitle(draw, REAL_SUBTITLE, canvas, canvas[0] - canvas[0] // 8)
+    assert len(lines) > 1
+    assert " ".join(lines) == REAL_SUBTITLE, "wrapping must not lose or reorder a word"
+    assert size == max(12, canvas[1] // 22), "wrapping was enough, so nothing shrank"
+
+
+def test_an_UNBREAKABLE_subtitle_shrinks_AND_THEN_TRUNCATES():
+    """All three guards, in one input that defeats the first two.
+
+    `_wrap` deliberately leaves an over-long single word long rather than
+    hyphenating, so wrapping cannot help. Shrinking cannot finish the job
+    either: at the floor this word is still 204px wide in a 175px box, which
+    is why there is a third guard and not two.
+    """
+    canvas = (200, 150)
+    draw = ImageDraw.Draw(Image.new("RGB", canvas))
+    word = "Ludwigshafen-am-Rhein-Oggersheim-Nord"
+    size, lines = fr._fit_subtitle(draw, word, canvas, canvas[0] - canvas[0] // 8)
+    assert size == fr.MIN_SUBTITLE_SIZE, "it did not shrink all the way"
+    assert lines[0].endswith(fr.ELLIPSIS), f"not truncated: {lines[0]!r}"
+    assert word.startswith(lines[0][: -len(fr.ELLIPSIS)])
+    ink = _subtitle_ink("X", word, canvas)
+    assert ink[0] > 0 and ink[1] < canvas[0] - 1
+
+
+def test_shrinking_alone_is_tried_before_truncating():
+    """A word that fits once shrunk must not lose characters it did not need
+    to lose - truncation is the last resort, not the first."""
+    # Tall and narrow: the starting size comes from the HEIGHT (18 here), so
+    # there is room to shrink before the floor, and the WIDTH is what does not
+    # fit. On a short canvas the start is already the floor and nothing could
+    # be observed.
+    canvas = (200, 400)
+    draw = ImageDraw.Draw(Image.new("RGB", canvas))
+    word = "Ludwigshafen-am-Rhein"
+    size, lines = fr._fit_subtitle(draw, word, canvas, canvas[0] - canvas[0] // 8)
+    assert lines == [word], "truncated when shrinking would have done"
+    assert fr.MIN_SUBTITLE_SIZE < size < max(12, canvas[1] // 22)
+
+
+def test_an_ellipsis_is_three_dots_and_not_a_glyph_the_font_may_lack():
+    """The fallback path in `_font` is Pillow's bundled bitmap font, and a
+    missing glyph renders as a blank box - worse than the clipping this is
+    fixing, and only on the machines least able to report it."""
+    assert fr.ELLIPSIS == "..."
+
+
+def test_the_shrink_stops_at_a_readable_floor():
+    """Below about ten pixels the default bitmap font's glyphs stop being
+    distinguishable, so a smaller "fitting" subtitle is not more readable than
+    a clipped one - it is just differently unreadable, and silently so."""
+    canvas = (64, 48)
+    draw = ImageDraw.Draw(Image.new("RGB", canvas))
+    size, _ = fr._fit_subtitle(draw, "A" * 200, canvas, canvas[0] - canvas[0] // 8)
+    assert size == fr.MIN_SUBTITLE_SIZE
+
+
+def test_an_empty_subtitle_draws_nothing_and_does_not_move_the_title():
+    draw = ImageDraw.Draw(Image.new("RGB", (640, 480)))
+    size, lines = fr._fit_subtitle(draw, "", (640, 480), 560)
+    assert lines == []
+    assert size == max(12, 480 // 22)
+    assert _subtitle_ink("Kashmir", "", (640, 480)) is None
+
+
+def test_a_very_long_title_wraps_instead_of_overflowing():
+    """Rewritten. This asserted `card.size == (320, 240)`, which is the size it
+    was constructed with - it could not fail however badly the text overflowed,
+    and it is the reason the subtitle defect below it went unnoticed."""
+    canvas = (320, 240)
+    title = "A place you kept coming back to over many years"
+    card = fr.title_card(title, "", canvas).convert("L")
+    px = card.load()
+    cols = [x for x in range(canvas[0]) if any(px[x, y] > 40 for y in range(canvas[1]))]
+    assert cols, "nothing was drawn"
+    assert min(cols) > 0 and max(cols) < canvas[0] - 1
+
+
+def _ink_bands(card) -> int:
+    """How many separated horizontal bands of ink the card has."""
+    px = card.convert("L").load()
+    w, h = card.size
+    rows = [y for y in range(h) if any(px[x, y] > 40 for x in range(w))]
+    if not rows:
+        return 0
+    return 1 + sum(1 for a, b in zip(rows, rows[1:], strict=False) if b - a > 1)
+
+
+def test_both_lines_of_a_wrapped_subtitle_are_actually_drawn():
+    """A wrap that computes two lines and draws one is the same bug with extra
+    steps: the second line would simply vanish.
+
+    The title is EMPTY here on purpose. Diffing a card against the same card
+    without a subtitle does not work: the number of subtitle lines changes the
+    block height, so the TITLE moves too and its ink lands in the difference.
+    An empty title draws nothing, so every band on the card is a subtitle line.
+    """
+    canvas = (240, 180)
+    draw = ImageDraw.Draw(Image.new("RGB", canvas))
+    _, lines = fr._fit_subtitle(draw, REAL_SUBTITLE, canvas, canvas[0] - canvas[0] // 8)
+    assert len(lines) == 2, "the fixture no longer wraps; the test below proves nothing"
+    assert _ink_bands(fr.title_card("", REAL_SUBTITLE, canvas)) == 2
+    assert _ink_bands(fr.title_card("", lines[0], canvas)) == 1
+
+
+def test_truncation_keeps_as_much_of_the_text_as_will_FIT():
+    """Trimming by a fixed proportion would also "fit" and would throw away
+    characters there was room for. The result must be maximal: one more
+    character before the ellipsis must not fit."""
+    canvas = (200, 150)
+    max_width = canvas[0] - canvas[0] // 8
+    draw = ImageDraw.Draw(Image.new("RGB", canvas))
+    font = fr._font(fr.MIN_SUBTITLE_SIZE)
+    word = "Ludwigshafen-am-Rhein-Oggersheim-Nord"
+    got = fr._ellipsise(draw, word, font, max_width)
+    assert got.endswith(fr.ELLIPSIS)
+    kept = got[: -len(fr.ELLIPSIS)]
+    assert draw.textlength(got, font=font) <= max_width
+    one_more = word[: len(kept) + 1].rstrip() + fr.ELLIPSIS
+    assert draw.textlength(one_more, font=font) > max_width, (
+        f"trimmed further than it had to: {got!r} left room for {one_more!r}"
+    )

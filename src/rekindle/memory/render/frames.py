@@ -158,26 +158,119 @@ def caption_frame(frame: Image.Image, text: str) -> Image.Image:
 
 
 def title_card(title: str, subtitle: str, canvas: tuple[int, int]) -> Image.Image:
-    """The opening frame. Text only - no photo, so nothing can leak into it."""
+    """The opening frame. Text only - no photo, so nothing can leak into it.
+
+    THE SUBTITLE IS MEASURED, WHICH IT WAS NOT. This function wrapped the
+    title against the canvas WIDTH and then drew the subtitle straight out at
+    a size derived from the canvas HEIGHT, having measured it against nothing.
+    Centred text that is wider than the canvas overflows at BOTH ends, so on a
+    narrow preview the memory "Every August" lost the `1` from `10 photos` and
+    the `6` from `2026` - one character off each edge. Invisible at the
+    engine's 1280px default, which is why it shipped; found by the gallery
+    agent rendering at a smaller size, which worked around it in its own
+    script rather than here.
+
+    Three guards now, applied in that order, each doing what the one before
+    it cannot:
+
+      1. WRAP against the same width the title is wrapped against, so a long
+         subtitle becomes two centred lines. Not enough on its own: `_wrap`
+         deliberately leaves an over-long single word long rather than
+         hyphenating it.
+      2. SHRINK, down to `MIN_SUBTITLE_SIZE`, when an unbreakable run still
+         will not fit. Not enough on its own either - it would drive an
+         ordinary two-phrase subtitle to unreadable rather than putting it on
+         two lines - and not enough even after wrapping: at the floor, a
+         37-character unbreakable word is still 204px wide in a 175px box.
+      3. TRUNCATE with an ellipsis, as a last resort at the floor.
+
+    The third guard is what makes the promise UNCONDITIONAL. Without it the
+    honest statement would be "the subtitle does not overflow unless it is
+    pathological", and a rule with an exception nobody can enumerate is how
+    this defect shipped in the first place.
+
+    All three are no-ops when the subtitle already fits, so nothing about the
+    default 1280px canvas changes.
+    """
     frame = Image.new("RGB", canvas, BACKGROUND)
     draw = ImageDraw.Draw(frame)
     title_size = max(18, canvas[1] // 10)
-    sub_size = max(12, canvas[1] // 22)
+    max_width = canvas[0] - canvas[0] // 8
 
     title_font = _font(title_size)
+    lines = _wrap(draw, title, title_font, max_width)
+    sub_size, sub_lines = _fit_subtitle(draw, subtitle, canvas, max_width)
     sub_font = _font(sub_size)
-    lines = _wrap(draw, title, title_font, canvas[0] - canvas[0] // 8)
 
-    block = len(lines) * (title_size + 6) + (sub_size + 10 if subtitle else 0)
+    block = len(lines) * (title_size + 6) + (
+        len(sub_lines) * (sub_size + 4) + 6 if sub_lines else 0
+    )
     y = max(0, (canvas[1] - block) // 2)
     for line in lines:
         width = draw.textlength(line, font=title_font)
         draw.text(((canvas[0] - width) / 2, y), line, font=title_font, fill=TEXT)
         y += title_size + 6
-    if subtitle:
-        width = draw.textlength(subtitle, font=sub_font)
-        draw.text(((canvas[0] - width) / 2, y + 4), subtitle, font=sub_font, fill=DIM)
+    if sub_lines:
+        y += 4
+        for line in sub_lines:
+            width = draw.textlength(line, font=sub_font)
+            draw.text(((canvas[0] - width) / 2, y), line, font=sub_font, fill=DIM)
+            y += sub_size + 4
     return frame
+
+
+#: The subtitle will not be shrunk below this to make it fit. Below about ten
+#: pixels the glyphs of the default bitmap font stop being distinguishable, so
+#: a smaller "fitting" subtitle is not more readable than a clipped one - it
+#: is just differently unreadable, and silently so.
+MIN_SUBTITLE_SIZE = 10
+
+
+def _fit_subtitle(draw, subtitle: str, canvas: tuple[int, int], max_width: int):
+    """`(size, lines)` for a subtitle that fits inside `max_width`.
+
+    Returns `(size, [])` for an empty subtitle so the caller has one shape to
+    handle. The starting size is the one this function has always used -
+    derived from the canvas HEIGHT - so an unclipped subtitle is drawn exactly
+    as it was before.
+    """
+    size = max(12, canvas[1] // 22)
+    if not subtitle:
+        return size, []
+    while True:
+        font = _font(size)
+        lines = _wrap(draw, subtitle, font, max_width)
+        if max(draw.textlength(line, font=font) for line in lines) <= max_width:
+            return size, lines
+        if size <= MIN_SUBTITLE_SIZE:
+            return size, [_ellipsise(draw, line, font, max_width) for line in lines]
+        size -= 1
+
+
+#: What a truncated line ends with. Three dots rather than U+2026 because the
+#: fallback path in `_font` is Pillow's bundled bitmap font, and a glyph it
+#: lacks renders as a blank box - a worse outcome than the clipping this is
+#: fixing, and one that only appears on the machines least able to report it.
+ELLIPSIS = "..."
+
+
+def _ellipsise(draw, text: str, font, max_width: int) -> str:
+    """`text`, trimmed until it fits, with `ELLIPSIS` on the end.
+
+    Character by character rather than by proportion: the bundled face is
+    proportional, so `len` is not width, and a proportional estimate would
+    over-trim a line of narrow characters and under-trim a line of wide ones.
+    A subtitle is a few dozen characters, so the loop is not worth optimising.
+    """
+    if draw.textlength(text, font=font) <= max_width:
+        return text
+    for end in range(len(text) - 1, 0, -1):
+        candidate = text[:end].rstrip() + ELLIPSIS
+        if draw.textlength(candidate, font=font) <= max_width:
+            return candidate
+    # A canvas too narrow for one character plus an ellipsis. Drawing nothing
+    # is the only thing left that does not overflow.
+    return ""
 
 
 def _wrap(draw, text: str, font, max_width: int) -> list[str]:
