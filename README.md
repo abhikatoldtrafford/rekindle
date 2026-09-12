@@ -251,7 +251,8 @@ uv run rekindle semantic facegate               # propose face-free photos
 
 ### Memories from your own words (optional)
 
-With the semantic extra installed and the library embedded:
+With the semantic extra installed and the library embedded — or, when the
+words name one of your own albums, without either:
 
 ```bash
 uv run rekindle memory "durga puja over the years"
@@ -272,6 +273,26 @@ The descriptions come from a checked-in
 files, both working with no API key. Set `OPENAI_API_KEY` and anything they do
 not cover is described by a language model once and cached, so the same prompt
 gives the same memory forever.
+
+**If one of your own albums answers the question, that is the answer.**
+`rekindle memory "memories of kashmir"` finds the `Kashmir`, `Kashmir day 3`
+and `Kashmir, day 1 and 2` albums, notices they hold 534 photographs between
+them — more than a memory has slots — and builds from those and nothing else.
+No descriptions are generated, no search runs, and **no embeddings are needed
+at all**, so that command works on a plain `uv sync`. Several albums of one
+trip are one memory; the two spellings of `Leh Ladakh` need no configuration,
+because matching is on the words and a shorter prompt matches more.
+
+A *small* album is a contribution rather than an answer. `Puri 25` holds three
+photographs, which is not a memory however well curated it is, so those three
+go into the candidate pool and the search supplies the rest — and the command
+says so, with the count, rather than quietly returning three shots. The
+threshold, the measurements behind it and two rules that were tried and
+rejected are in [the decision log](https://github.com/abhikatoldtrafford/rekindle/blob/main/docs/decision-log-prompt-memories.md).
+With `OPENAI_API_KEY` set, and only where the words match no album exactly, the
+model is shown your album *titles* and asked which are about the same thing —
+that is how a misspelling or another transliteration finds the right trip. It
+is cached, and it can only ever point at an album you have.
 
 **A prompt memory is a preview, never an offer.** It is built only when you
 ask for it by name. It never appears in `rekindle memories` and `--auto` will

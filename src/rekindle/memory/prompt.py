@@ -27,9 +27,19 @@ photos in it. So this module reads a hit's POSITION in its own tag's ranking
 and never its magnitude. `--min-score` exists for a user who insists; it is
 unset, and nothing here reads a score except to make the ordering total.
 
+**Unless the user already answered the question.** An album of their own that
+holds at least as many photographs as a memory has slots is better evidence
+than anything above, so it IS the memory: the tags are dropped, `retrieve` is
+never called, and every photograph comes from that album. A SMALLER album
+cannot fill a memory, so it goes into the pool and the tags still supply the
+rest. `LEAD_MIN` and `match_albums` carry the measurements, including the two
+rules that were tried on this library and are not here.
+
 Nothing in here imports `rekindle.semantic`: retrieval arrives as an injected
 callable, so every test in `tests/test_prompt.py` runs with no torch, no
-embedding store and no network - and `rekindle --help` never loads CLIP.
+embedding store and no network - and `rekindle --help` never loads CLIP. An
+album-led memory needs no embedding store at all, which is the one case where
+this whole feature works on a default install.
 """
 
 from __future__ import annotations
@@ -41,6 +51,7 @@ from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 
+from rekindle.memory import albums as album_names
 from rekindle.memory import strata
 from rekindle.memory.index import MemoryIndex
 from rekindle.memory.recipes import Selection
@@ -107,6 +118,90 @@ _MONTHS = {
 }
 
 _YEAR_RE = re.compile(r"^(19|20)\d{2}$")
+#: Words that FRAME a request instead of naming its subject. Removed before a
+#: prompt is compared with an album title, and never reported as a word that
+#: narrowed nothing.
+#:
+#: This list is the difference between a feature that fires and one that does
+#: not. All-token matching asks the album title to contain every word of the
+#: subject, so on the reference library **none of the 37 named albums is
+#: reachable from a prompt as ordinary as `memories of puri`** - `Puri 25`
+#: does not contain "memories" or "of". Measured: 37 of 37 albums self-match
+#: from their own bare title, 0 of 37 from `memories of <title>`. With this
+#: list, `memories of puri` reaches `Puri 25` again.
+#:
+#: It is a closed, human-readable table for the same reason `_MONTHS` is: a
+#: stemmer or a stop-word package would be a dependency, a locale and a
+#: silently changing answer.
+STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "the",
+        "in",
+        "at",
+        "on",
+        "of",
+        "and",
+        "or",
+        "to",
+        "from",
+        "for",
+        "with",
+        "my",
+        "our",
+        "me",
+        "us",
+        "some",
+        "all",
+        "any",
+        "that",
+        "those",
+        "these",
+        "this",
+        "show",
+        "find",
+        "memories",
+        "memory",
+        "photo",
+        "photos",
+        "picture",
+        "pictures",
+        "pic",
+        "pics",
+        "image",
+        "images",
+        "album",
+        "albums",
+        "shot",
+        "shots",
+    }
+)
+
+#: How many photographs an album needs before it IS the memory rather than a
+#: contribution to one. Equal to `engine.DEFAULT_MAX_SHOTS`, and that is the
+#: whole argument: an album the user curated that can fill a memory on its own
+#: needs nothing inferred to complete it, and their labelling beats anything a
+#: model guesses. Asserted equal in `tests/test_prompt.py` rather than
+#: imported, because `engine` imports this module.
+#:
+#: **The threshold is measured, not assumed.** The reference library's 37
+#: named albums split cleanly around it - 25 photographs is the largest album
+#: below and 48 the smallest above, so every value between 26 and 48 gives the
+#: same answer on every album here. `Puri 25` holds 3 photographs and stays a
+#: contribution; `Kashmir` holds 510 and becomes the memory.
+#:
+#: **Letting a small album lead anyway was tried and it is worse.** The
+#: tempting rule is that when nothing describes the prompt visually - no
+#: festival corpus entry, no cached tags, no API key - the album is the only
+#: real evidence in the run and should be the memory however small it is. On
+#: `memories of puri` that rule produces a pool of three photographs, two of
+#: which are the same burst two seconds apart; dedup collapses them and the
+#: engine refuses the memory outright with `too_few_photos`. It converts a
+#: poor memory into no memory, so it is not shipped. A small album stays a
+#: contribution to the pool, and the CLI says how small it was.
+LEAD_MIN = 24
+
 #: Token split that keeps Bengali (U+0980-U+09FF) whole: album titles in this
 #: library are not all ASCII, and a splitter that dropped them would make the
 #: album union silently never fire on them.
@@ -351,6 +446,168 @@ class SeedDay:
         return f"{self.day[0]:04d}-{self.day[1]:02d}-{self.day[2]:02d}"
 
 
+# --------------------------------------------------------------------------
+# albums
+
+
+def content_tokens(text: str) -> frozenset[str]:
+    """The tokens of a string that could name a subject. See `STOPWORDS`."""
+    return frozenset(t for t in tokens(text) if t not in STOPWORDS)
+
+
+def album_matches(index: MemoryIndex, subject: str) -> list[str]:
+    """Presentable albums whose title contains EVERY content token.
+
+    All tokens, not any: on `durga puja`, any-token also matches the album
+    `Diwali Kali Puja 22` on the shared word "puja" and drags Kali Puja photos
+    into a Durga Puja memory - exactly the confusion this module exists to
+    prevent. Because it is a SUBSET test, a shorter prompt matches MORE:
+    `kashmir` reaches all three Kashmir albums and `ladakh` reaches both
+    `Leh Ladakh` and `ladakh`. That is the behaviour wanted, and it is why the
+    multi-album case needs no alias configuration.
+
+    **Only presentable albums.** Google's own `Photos from YYYY` albums are on
+    every photograph, and without this filter the one-word prompt `photos`
+    matched all 23 of them and unioned **17,004 photographs - 88% of the
+    library** - into the candidate pool. Two independent guards now stop that:
+    the presentability rule here, and "photos" being a `STOPWORDS` entry so
+    the prompt has no content tokens left to match on at all.
+    """
+    wanted = content_tokens(subject)
+    if not wanted:
+        return []
+    return sorted(
+        name
+        for name in index.album_counts()
+        if album_names.presentable(name) and wanted <= set(tokens(name))
+    )
+
+
+#: Where a set of matched albums came from.
+ALBUM_NONE = "none"
+ALBUM_TOKENS = "tokens"
+ALBUM_MODEL = "model"
+
+#: Why an album is the memory rather than a contribution to one. One value
+#: today, and a field rather than a bare flag because the alternative was
+#: tried: see `LEAD_MIN` for the measurement that rejected letting a small
+#: album lead when nothing else in the run knew anything either.
+LEAD_SIZE = "size"
+
+
+@dataclass(frozen=True)
+class AlbumMatch:
+    """Which of the user's own albums this prompt names, and how much they
+    weigh.
+
+    `sizes` counts each album AFTER the narrowings the user typed, which is
+    the number the decision below has to be made on: `kashmir 2015` and
+    `kashmir 1999` name the same album and only one of them is a memory.
+    """
+
+    names: tuple[str, ...] = ()
+    sizes: Mapping[str, int] = field(default_factory=dict)
+    source: str = ALBUM_NONE
+    #: `LEAD_SIZE`, or "" when the albums are a contribution to the memory
+    #: rather than the memory itself.
+    lead_reason: str = ""
+    #: Names the model returned that this library does not have. Reported, and
+    #: never searched for.
+    invented: tuple[str, ...] = ()
+    #: How many DISTINCT photographs the matched albums hold between them.
+    #:
+    #: Not the sum of `sizes`, and the difference is not academic: `ladakh`
+    #: matches `Leh Ladakh` (277) and `ladakh` (237), which are one trip filed
+    #: twice and share 195 photographs. Summing says 514 and the memory is
+    #: built from 319. The first version of this printed both numbers two
+    #: lines apart.
+    total: int = 0
+
+    @property
+    def led(self) -> bool:
+        return bool(self.lead_reason)
+
+    @property
+    def largest(self) -> int:
+        return max(self.sizes.values(), default=0)
+
+
+def user_narrowed(query: PromptQuery, photos: Iterable[Photo]) -> list[Photo]:
+    """Apply only the narrowings the USER TYPED.
+
+    Not the festival corpus's month window. An album is the user's own
+    labelling and a corpus window is rekindle's guess about when a festival
+    falls; letting the guess delete photographs out of the label would be the
+    wrong one of the two winning. A year, a month name or a `with <person>`
+    that the user typed is a different thing entirely, and an album that
+    ignored them would answer a question nobody asked.
+    """
+    kept = list(photos)
+    if query.months:
+        kept = [p for p in kept if p.meta.taken_at_local.month in query.months]
+    if query.years:
+        kept = [p for p in kept if p.meta.taken_at_local.year in query.years]
+    if query.people:
+        wanted = set(query.people)
+        kept = [p for p in kept if wanted & set(p.meta.people)]
+    return kept
+
+
+def match_albums(
+    index: MemoryIndex,
+    query: PromptQuery,
+    *,
+    shortlist: Sequence[str] = (),
+    lead_min: int = LEAD_MIN,
+) -> AlbumMatch:
+    """The albums this prompt names, and whether one of them IS the memory.
+
+    Token matching runs first and is authoritative. `shortlist` - names a
+    language model proposed - is consulted ONLY when the tokens matched
+    nothing, so the exact rule can never be overridden by a guess and the
+    measured festival behaviour cannot change when a key is present. Every
+    shortlisted name is checked against this index and a name the library does
+    not have is discarded, not searched for.
+    """
+    names = album_matches(index, query.subject)
+    source = ALBUM_TOKENS if names else ALBUM_NONE
+    invented: tuple[str, ...] = ()
+    if not names and shortlist:
+        real = {
+            normalise(name): name for name in index.album_counts() if album_names.presentable(name)
+        }
+        picked: set[str] = set()
+        missing: set[str] = set()
+        for candidate in shortlist:
+            actual = real.get(normalise(candidate))
+            if actual is None:
+                missing.add(candidate)
+            else:
+                picked.add(actual)
+        names = sorted(picked)
+        invented = tuple(sorted(missing))
+        source = ALBUM_MODEL if names else ALBUM_NONE
+
+    sizes = {}
+    distinct: set[str] = set()
+    for name in names:
+        kept = user_narrowed(query, index.by_album(name))
+        if kept:
+            sizes[name] = len(kept)
+            distinct.update(p.file_hash for p in kept)
+    return AlbumMatch(
+        names=tuple(sorted(sizes)),
+        sizes=sizes,
+        source=source if sizes else ALBUM_NONE,
+        lead_reason=LEAD_SIZE if sizes and max(sizes.values()) >= lead_min else "",
+        invented=invented,
+        total=len(distinct),
+    )
+
+
+# --------------------------------------------------------------------------
+
+
 @dataclass(frozen=True)
 class PromptBuild:
     """Everything the CLI needs to explain what it did."""
@@ -367,6 +624,13 @@ class PromptBuild:
     festival: str | None = None
     agreement: float = 0.0
     notes: tuple[str, ...] = field(default_factory=tuple)
+    #: The full album decision. `albums` is the same names and is kept because
+    #: it is what every existing caller reads.
+    album: AlbumMatch = field(default_factory=AlbumMatch)
+
+    @property
+    def album_led(self) -> bool:
+        return self.album.led
 
 
 def build_selection(
@@ -381,6 +645,7 @@ def build_selection(
     months: Sequence[int] = (),
     festival: str | None = None,
     known_words: Sequence[str] = (),
+    album_match: AlbumMatch | None = None,
 ) -> PromptBuild:
     """Tags -> seed days -> whole capture days -> a Selection.
 
@@ -396,7 +661,17 @@ def build_selection(
     measured well here, where these festivals are multi-day outings, but a day
     holding a pandal visit AND an unrelated lunch pulls the lunch in, and
     nobody has measured how often that happens.
+
+    **When an album leads, none of that runs.** An album big enough to fill a
+    memory is the user's own answer to their own question, so the tags are
+    dropped, `retrieve` is never called and the pool is that album - which is
+    what `album_story` would have built, without minting a memory id that
+    changes the day the library crosses a threshold. See `match_albums`.
     """
+    if album_match is None:
+        album_match = match_albums(index, query)
+    if album_match.led:
+        tags = ()
     consensus_result = consensus(tags, retrieve, tag_k=tag_k)
     # The index is the chokepoint: a hash the policy refused simply is not in
     # this list, so it cannot create a seed day and cannot reach a memory.
@@ -440,14 +715,13 @@ def build_selection(
                 continue
             pool[photo.file_hash] = photo
 
-    # The user's own labelling, added unconditionally. All tokens must match,
-    # not any: on `durga puja`, any-token also matches the album
-    # `Diwali Kali Puja 22` on the shared word "puja" and drags Kali Puja
-    # photos into a Durga Puja memory - exactly the confusion this whole
-    # module exists to prevent.
-    matched_albums = tuple(sorted(album_matches(index, query.subject)))
+    # The user's own labelling, added unconditionally - and narrowed by what
+    # the user typed and by nothing else, so `durga puja 2013` cannot pull in
+    # the whole of `Durga Puja 25`. See `user_narrowed` for why the festival
+    # corpus's month window is deliberately NOT applied here.
+    matched_albums = album_match.names
     for album in matched_albums:
-        for photo in index.by_album(album):
+        for photo in user_narrowed(query, index.by_album(album)):
             pool[photo.file_hash] = photo
 
     agreement = tag_agreement(consensus_result, seed_k)
@@ -460,9 +734,17 @@ def build_selection(
         pool=len(pool),
         resolved=len(resolved),
         selection=None,
-        unmatched=unmatched_words(index, query, matched_albums, known=known_words),
+        unmatched=(
+            # A model shortlist matched on meaning rather than on characters,
+            # so the words that reached it DID narrow something and saying
+            # they narrowed nothing would be false.
+            ()
+            if album_match.source == ALBUM_MODEL
+            else unmatched_words(index, query, matched_albums, known=known_words)
+        ),
         festival=festival,
         agreement=agreement,
+        album=album_match,
     )
     if not pool:
         return build
@@ -487,14 +769,6 @@ def build_selection(
     return PromptBuild(**{**build.__dict__, "selection": selection})
 
 
-def album_matches(index: MemoryIndex, subject: str) -> list[str]:
-    """Albums whose title contains EVERY content token of the subject."""
-    wanted = set(tokens(subject))
-    if not wanted:
-        return []
-    return [name for name in index.album_counts() if wanted <= set(tokens(name))]
-
-
 def unmatched_words(
     index: MemoryIndex,
     query: PromptQuery,
@@ -513,10 +787,14 @@ def unmatched_words(
     people_tokens: set[str] = set()
     for name in index.people_counts():
         people_tokens |= set(tokens(name))
-    stop = {"a", "an", "the", "in", "at", "on", "of", "and", "with", "my", "our"}
     out = []
     for token in tokens(query.subject):
-        if token in stop or token in album_tokens or token in people_tokens or token in _MONTHS:
+        if (
+            token in STOPWORDS
+            or token in album_tokens
+            or token in people_tokens
+            or token in _MONTHS
+        ):
             continue
         out.append(token)
     return tuple(out)

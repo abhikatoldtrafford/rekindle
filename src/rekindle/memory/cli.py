@@ -1096,24 +1096,35 @@ def prompt_cmd(
         except LLMUnavailable:
             generator = None
 
-        if _refused_by_judge(generator, query, index, judge):
-            raise typer.Exit(code=EXIT_REFUSED)
+        album = _match_albums(index, query, data_dir, generator)
 
-        resolution = tags_mod.resolve(
-            query,
-            data_dir=data_dir,
-            generator=generator,
-            people=list(index.people_counts()),
-        )
-        if resolution.source == tags_mod.SOURCE_MODEL:
-            written = tags_mod.write_cache_entry(data_dir, query.text, resolution.tags)
-            console.print(
-                f"[dim]Tags cached in {written}; the same prompt will give the "
-                "same memory from now on.[/dim]"
+        if album.led:
+            # The user already answered this question by making the album, so
+            # nothing here is allowed to second-guess it: no plausibility
+            # judge, no tags, and - the part that matters on a machine with no
+            # `semantic` extra - no embedding store either.
+            resolution = tags_mod.Resolution(tags=(), source=tags_mod.SOURCE_ALBUM)
+            if retrieve is None:
+                retrieve = _no_retrieval
+        else:
+            if _refused_by_judge(generator, query, index, judge):
+                raise typer.Exit(code=EXIT_REFUSED)
+
+            resolution = tags_mod.resolve(
+                query,
+                data_dir=data_dir,
+                generator=generator,
+                people=list(index.people_counts()),
             )
+            if resolution.source == tags_mod.SOURCE_MODEL:
+                written = tags_mod.write_cache_entry(data_dir, query.text, resolution.tags)
+                console.print(
+                    f"[dim]Tags cached in {written}; the same prompt will give the "
+                    "same memory from now on.[/dim]"
+                )
 
-        if retrieve is None:
-            retrieve = _open_retriever(data_dir)
+            if retrieve is None:
+                retrieve = _open_retriever(data_dir)
 
         build = prompt_mod.build_selection(
             index,
@@ -1126,6 +1137,7 @@ def prompt_cmd(
             months=resolution.months,
             festival=resolution.festival,
             known_words=_festival_names(resolution, query),
+            album_match=album,
         )
         _render_prompt_tags(resolution, build)
 
@@ -1195,6 +1207,63 @@ def _open_retriever(data_dir: Path):
     return retrieve
 
 
+def _no_retrieval(text: str, k: int):
+    """A retriever that is never called.
+
+    An album-led build passes no tags, so `consensus` makes no request at all.
+    This exists so that the code path is explicit rather than a None nobody
+    notices, and so a future change that DID search would fail loudly here
+    instead of quietly opening CLIP behind an album memory.
+    """
+    raise AssertionError("an album-led prompt memory must not search")
+
+
+def _match_albums(index, query, data_dir, generator):
+    """Which of the user's own albums this prompt names.
+
+    Exact token matching first. Only when that finds nothing is a language
+    model asked to shortlist from the album titles - it handles the
+    misspelling, the transliteration and the second name for one trip that
+    character matching cannot, and it is cached, validated against this index
+    and entirely optional. With no key and no cached answer the result is
+    exactly what token matching gave.
+    """
+    from rekindle.memory import albums as albums_mod
+    from rekindle.memory import prompt as prompt_mod
+    from rekindle.memory import tags as tags_mod
+    from rekindle.memory.llm import LLMUnavailable
+
+    album = prompt_mod.match_albums(index, query)
+    if album.names:
+        return album
+    titles = [
+        name
+        for name, _ in sorted(index.album_counts().items(), key=lambda kv: (-kv[1], kv[0]))
+        if albums_mod.presentable(name)
+    ]
+    try:
+        shortlist = tags_mod.shortlist_albums(query, titles, data_dir=data_dir, generator=generator)
+    except LLMUnavailable as exc:
+        console.print(f"[yellow]![/yellow] {markup_safe(str(exc))}")
+        return album
+    matched = prompt_mod.match_albums(index, query, shortlist=shortlist.names)
+    # Counted from BOTH validation passes. `tags.parse_album_reply` drops a
+    # title this library does not have before it is ever returned, and
+    # `match_albums` checks the survivors against the index a second time, so
+    # in the shipped path the second count is always zero - it is there for a
+    # caller that hands `match_albums` a shortlist from somewhere else.
+    unknown = shortlist.rejected.count(tags_mod.REJECT_NOT_AN_ALBUM) + len(matched.invented)
+    if unknown:
+        console.print(
+            f"[yellow]![/yellow] The language model named {unknown} album"
+            f"{'s' if unknown > 1 else ''} this library does not have. Ignored: "
+            "a shortlist may point at your albums and never invent one."
+        )
+    if not matched.names:
+        return album
+    return matched
+
+
 def _refused_by_judge(generator, query, index, judge: bool) -> bool:
     """Gate one: is the QUERY coherent and consistent with this library?
 
@@ -1237,6 +1306,9 @@ def _render_prompt_tags(resolution, build) -> None:
     """
     from rekindle.memory import tags as tags_mod
 
+    if resolution.source == tags_mod.SOURCE_ALBUM:
+        _render_album_lead(build)
+        return
     origin = {
         tags_mod.SOURCE_CORPUS: f"the festival corpus ({resolution.festival})",
         tags_mod.SOURCE_CACHE: "the tag cache",
@@ -1256,18 +1328,48 @@ def _render_prompt_tags(resolution, build) -> None:
         console.print(f"[dim]Some generated tags were rejected: {detail}.[/dim]")
 
 
+def _render_album_lead(build) -> None:
+    """Say that an album answered the prompt, and that nothing was inferred."""
+    from rekindle.memory import prompt as prompt_mod
+
+    album = build.album
+    named = ", ".join(f"{name} ({album.sizes[name]})" for name in album.names)
+    how = (
+        "shortlisted by the language model from your album titles"
+        if album.source == prompt_mod.ALBUM_MODEL
+        else "matched on your own words"
+    )
+    plural = "s" if len(album.names) > 1 else ""
+    console.print(f"Your own album{plural} answered this, {how}: {markup_safe(named)}.")
+    console.print(
+        f"[dim]{album.total} photos, which is enough to fill a memory on their "
+        f"own (the floor is {prompt_mod.LEAD_MIN}), so nothing was inferred: no "
+        "visual search ran, and no photo outside these albums can appear.[/dim]"
+    )
+
+
 def _render_prompt_report(build, spec, index) -> None:
     """The honesty surface. Everything a person needs to judge the result for
     themselves, because nothing else can judge it for them."""
-    if build.seed_days:
+    from rekindle.memory import prompt as prompt_mod
+
+    if build.album_led:
+        # `_render_album_lead` has already said how many photos and from where.
+        console.print()
+    elif build.seed_days:
         days = ", ".join(f"{s.iso} ({s.hits} photos, {s.tags} tags)" for s in build.seed_days)
         console.print(f"\n{len(build.seed_days)} days looked like this: {days}")
         console.print(f"[dim]Expanded to {build.pool} candidate photos.[/dim]")
     else:
         console.print("\n[yellow]No capture day had enough agreement between the tags.[/yellow]")
-    if build.albums:
-        named = ", ".join(repr(a) for a in build.albums)
-        console.print(f"[dim]Your own albums {named} were added whole.[/dim]")
+    if build.albums and not build.album_led:
+        named = ", ".join(f"{a} ({build.album.sizes[a]})" for a in build.albums)
+        console.print(
+            f"[dim]Your own albums {markup_safe(named)} were added whole. Too "
+            f"small to be this memory on their own - the floor is "
+            f"{prompt_mod.LEAD_MIN} photos - so the search still supplied the "
+            "rest.[/dim]"
+        )
     if build.unmatched:
         words = ", ".join(repr(w) for w in build.unmatched)
         console.print(
@@ -1276,6 +1378,10 @@ def _render_prompt_report(build, spec, index) -> None:
             "nothing else - so if one of those words is a place, note that "
             "rekindle has no gazetteer and never filtered by it."
         )
+    if build.album_led:
+        if spec is not None:
+            _render_prompt_shape(spec, index)
+        return
     console.print(
         f"[dim]Tag agreement {build.agreement:.0%}. This number does NOT say "
         "whether the concept is in your library: measured over 16 concepts this "
@@ -1284,7 +1390,11 @@ def _render_prompt_report(build, spec, index) -> None:
     )
     if spec is None:
         return
+    _render_prompt_shape(spec, index)
 
+
+def _render_prompt_shape(spec, index) -> None:
+    """What was actually built: years, months, faces, GPS."""
     months: dict[int, int] = {}
     years: dict[int, int] = {}
     faces = gps = 0

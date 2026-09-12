@@ -16,6 +16,15 @@ With none of the three, the prompt itself is used as a single tag and the CLI
 says plainly that it is doing so. That path is the measured-bad one: it is
 what put nine of twenty-four shots of a Kali Puja memory on a Durga Puja day.
 
+This module also does one job that is not about tags at all: given the
+prompt and the titles the user gave their own albums, it asks the model which
+of those albums the prompt is ABOUT. That is here rather than in `prompt`
+because it is the model layer, it shares this module's cache discipline, and
+because `prompt` must stay a module with no network in it. It runs only where
+exact token matching already found nothing, it is cached with a digest of the
+album list it was chosen from, and a title the library does not have is
+dropped rather than searched for.
+
 **What the model is allowed to know.** The tag generator is told the prompt
 and nothing else. It never sees the library, never sees a photo, and is
 instructed that it is supplying world knowledge about what a thing looks
@@ -30,6 +39,7 @@ rejected and the deterministic path is used instead.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -59,12 +69,26 @@ STARTER_CACHE = Path(__file__).with_name("corpus") / "prompt_tags.json"
 #: directory, because it is derived from the user's own prompts.
 USER_CACHE_NAME = "prompt_tags.json"
 
+#: Where an album shortlist is remembered. There is deliberately NO committed
+#: starter for this one: a shortlist is a mapping from someone's prompt to
+#: THEIR OWN album titles, so a checked-in file would ship one person's
+#: private labelling to every user of the package.
+ALBUM_CACHE_NAME = "prompt_albums.json"
+
+#: How many album titles are ever put in one request. The reference library
+#: has 37 named albums; a library with thousands would otherwise send them
+#: all. Most-populous first, so the cut falls on the albums least likely to be
+#: anyone's answer.
+MAX_ALBUM_TITLES = 200
+
 CACHE_VERSION = 1
 
 SOURCE_CORPUS = "corpus"
 SOURCE_CACHE = "cache"
 SOURCE_MODEL = "model"
 SOURCE_PROMPT = "prompt"
+#: No tags were needed: an album of the user's own answered the prompt.
+SOURCE_ALBUM = "album"
 
 #: Tags are short visual phrases. A model asked for "short" writes a sentence
 #: often enough that this has to be enforced rather than requested.
@@ -77,6 +101,8 @@ REJECT_TOO_LONG = "tag_too_long"
 REJECT_NAMES_A_YEAR = "tag_names_a_year"
 REJECT_NAMES_A_PERSON = "tag_names_a_person"
 REJECT_EMPTY = "empty_response"
+#: The model returned an album title this library does not have.
+REJECT_NOT_AN_ALBUM = "album_not_in_library"
 
 _YEAR = re.compile(r"\b(1[89]\d{2}|20\d{2})\b")
 
@@ -103,6 +129,36 @@ will be found.
 
 Phrase: {subject}
 """
+
+_ALBUM_PROMPT = """You are given a short phrase somebody typed to find their \
+own photographs, and the list of titles they gave their own photo albums.
+
+Say which of those albums, if any, are ABOUT the same thing as the phrase.
+
+Rules, all binding:
+- Reply with album titles copied EXACTLY as they appear in the list, one per \
+line. Nothing else: no numbering, no bullets, no quotation marks, no \
+preamble, no explanation.
+- Reply with the single word NONE when no album is about the phrase. NONE is \
+the right answer more often than not.
+- Never write a title that is not in the list. Do not fix a typo in it, do \
+not translate it, do not shorten it, do not tidy its capitalisation: copy the \
+characters.
+- Include an album when the phrase names the same subject under a different \
+spelling, a different transliteration, a misspelling, or another name for the \
+same place or event. That is what you are here for.
+- Do NOT include an album that merely shares a word with the phrase, or that \
+is merely related to it. Two different festivals are two different subjects \
+even when their names share a word.
+- You cannot see a single photograph and you know nothing about what these \
+albums contain beyond their titles. Do not guess at their contents.
+
+Phrase: {subject}
+
+Albums:
+{titles}
+"""
+
 
 _JUDGE_PROMPT = """You are judging whether a SEARCH QUERY is coherent, and \
 whether it is consistent with the kind of photo library described below.
@@ -240,6 +296,145 @@ def write_cache_entry(data_dir: Path, prompt: str, tags: Sequence[str]) -> Path:
     return path
 
 
+# ------------------------------------------------------- the album shortlist
+
+
+def library_fingerprint(titles: Sequence[str]) -> str:
+    """A short digest of the album titles a shortlist was chosen from.
+
+    Stored beside every cached shortlist and compared before it is trusted. A
+    cached answer to "which of these albums is about `ladhak`" is only an
+    answer to that question while the list of albums is the same one; after
+    the user adds or renames an album it is a stale answer that would silently
+    keep a new album out of every memory.
+    """
+    joined = "\n".join(sorted(titles))
+    return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+
+
+def read_album_cache(data_dir: Path | None) -> dict[str, dict[str, Any]]:
+    if data_dir is None:
+        return {}
+    path = data_dir / ALBUM_CACHE_NAME
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    entries = raw.get("entries")
+    if not isinstance(entries, dict):
+        return {}
+    return {
+        normalise(k): v
+        for k, v in entries.items()
+        if isinstance(v, dict) and isinstance(v.get("albums"), list)
+    }
+
+
+def write_album_cache_entry(
+    data_dir: Path, prompt: str, fingerprint: str, names: Sequence[str]
+) -> Path:
+    """Remember a shortlist, INCLUDING an empty one.
+
+    An empty answer is an answer and caching it is what stops a prompt that
+    names no album from paying for a call on every run. Determinism is the
+    real reason: with the cache, the same prompt against the same albums picks
+    the same albums forever, which is the same guarantee `write_cache_entry`
+    gives the tags.
+    """
+    path = data_dir / ALBUM_CACHE_NAME
+    existing: dict[str, Any] = {}
+    if path.is_file():
+        try:
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            existing = {}
+    entries = existing.get("entries")
+    if not isinstance(entries, dict):
+        entries = {}
+    entries[normalise(prompt)] = {"albums": list(names), "library": fingerprint}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {"version": CACHE_VERSION, "entries": entries},
+            indent=2,
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+@dataclass(frozen=True)
+class Shortlist:
+    """Album titles a model proposed for a prompt, and where they came from."""
+
+    names: tuple[str, ...] = ()
+    source: str = ""
+    rejected: tuple[str, ...] = field(default_factory=tuple)
+
+
+def parse_album_reply(text: str, titles: Sequence[str]) -> tuple[list[str], list[str]]:
+    """A model reply -> titles this library actually has.
+
+    Every line is looked up in the list the model was given, matched on the
+    NORMALISED title so a difference of case or of Unicode composition is not
+    a rejection, and the library's own spelling is what comes back. A line
+    that matches nothing is dropped and counted. **The model cannot introduce
+    an album**; at worst it fails to name one.
+    """
+    real = {normalise(t): t for t in titles}
+    out: list[str] = []
+    rejected: list[str] = []
+    for line in text.replace(";", "\n").splitlines():
+        candidate = line.strip().strip("-*•").strip().strip('"').strip()
+        if not candidate or candidate.strip(".").upper() == "NONE":
+            continue
+        actual = real.get(normalise(candidate))
+        if actual is None:
+            rejected.append(REJECT_NOT_AN_ALBUM)
+            continue
+        if actual not in out:
+            out.append(actual)
+    return out, rejected
+
+
+def shortlist_albums(
+    query: PromptQuery,
+    titles: Sequence[str],
+    *,
+    data_dir: Path | None = None,
+    generator: TagGenerator | None = None,
+) -> Shortlist:
+    """Which of the user's albums a model thinks this prompt is about.
+
+    Consulted only where exact token matching already failed, so this can add
+    an album and can never take one away. With no key and no cached answer it
+    returns nothing, which leaves the caller exactly where it was before this
+    function existed - the whole feature degrades to token matching rather
+    than to an error.
+
+    `titles` should arrive most-significant first; only the first
+    `MAX_ALBUM_TITLES` are ever sent.
+    """
+    sent = tuple(titles)[:MAX_ALBUM_TITLES]
+    if not sent:
+        return Shortlist()
+    fingerprint = library_fingerprint(sent)
+    cached = read_album_cache(data_dir).get(query.text)
+    if cached is not None and cached.get("library") == fingerprint:
+        return Shortlist(names=tuple(str(n) for n in cached["albums"]), source=SOURCE_CACHE)
+    if generator is None:
+        return Shortlist()
+    names, rejected = generator.albums_for(query.subject, sorted(sent))
+    if data_dir is not None:
+        write_album_cache_entry(data_dir, query.text, fingerprint, names)
+    return Shortlist(names=tuple(names), source=SOURCE_MODEL, rejected=tuple(rejected))
+
+
 # ------------------------------------------------------------------ parsing
 
 
@@ -310,6 +505,20 @@ class TagGenerator:
         if not text.strip():
             return [], [REJECT_EMPTY]
         return parse_tags(text, people=people)
+
+    def albums_for(self, subject: str, titles: Sequence[str]) -> tuple[list[str], list[str]]:
+        """Album titles from `titles` that are about `subject`.
+
+        The model sees the phrase and the album titles - the same titles the
+        plausibility judge is already given, so this opens no new channel out
+        of the library. It sees no photograph, no path, no date, no name and
+        no count. Its reply is looked up in `titles` and anything else is
+        discarded; see `parse_album_reply`.
+        """
+        text = self._ask(_ALBUM_PROMPT.format(subject=subject, titles="\n".join(titles)))
+        if not text.strip():
+            return [], [REJECT_EMPTY]
+        return parse_album_reply(text, titles)
 
     def plausible(self, query: str, vocabulary: Vocabulary) -> str | None:
         """None when the query is coherent, else the model's one-line reason."""

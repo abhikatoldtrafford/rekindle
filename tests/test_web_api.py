@@ -146,6 +146,37 @@ def test_a_prompt_naming_your_own_album_builds_from_it_with_no_search_hits(works
     assert events[-1]["data"]["order"]
 
 
+def test_an_album_big_enough_to_be_the_memory_skips_the_search_entirely(tmp_path, monkeypatch):
+    """30 photos in one album is more than a memory holds, so the album IS the
+    answer. `retriever` raises here: reaching it at all is the failure, and it
+    is also what the claim "this works without the semantic extra" means."""
+
+    def refuse():
+        raise AssertionError("an album-led prompt memory must not open the store")
+
+    data_dir, _ = make_library(tmp_path, days=30)
+    shop = make_workshop(tmp_path, data_dir)
+    monkeypatch.setattr(shop.library, "retriever", refuse)
+
+    events = list(api.build_events(shop, prompt=PROMPT))
+    assert events[-1]["event"] == "ready", events[-1]
+    names = [e["event"] for e in events]
+    assert "searched" not in names, "nothing was searched, so nothing may say it was"
+
+    tags = next(e["data"] for e in events if e["event"] == "tags")
+    assert tags["album_led"] is True
+    assert tags["tags"] == []
+    assert tags["albums"] == [ALBUM]
+    assert tags["weak"] is False, "the weak-path warning is about a search that ran"
+
+    found = next(e["data"] for e in events if e["event"] == "found")
+    assert found["album_led"] is True
+    assert found["seed_days"] == []
+    assert found["albums"] == [ALBUM]
+    # Still keyed on the prompt, not on the album.
+    assert events[-1]["data"]["origin"]["key"] == PROMPT
+
+
 def test_a_prompt_without_the_extra_says_what_to_install(workshop, monkeypatch):
     shop, _data_dir = workshop
     from rekindle.semantic import availability

@@ -352,7 +352,17 @@ These entries were carried into M2 as open questions. Each is now closed.
   `Diwali Kali Puja 22` are different years under an equally similar pair of
   names. An `album_aliases` config table lets the user say so; the default
   merges nothing. The overlap cap catches the resulting redundancy at build
-  time.
+  time. A *prompt* does not need the alias: `kashmir` matches all three
+  Kashmir albums and `ladakh` matches both spellings, because prompt album
+  matching is a subset test on the words, and a prompt memory consumes every
+  album it matched as one cluster.
+- **A prompt cannot rescue an album that is too small to be a memory.**
+  `Puri 25` holds three photographs, two of which are the same burst two
+  seconds apart. `memories of puri` now finds the album and says how small it
+  is, then builds from the visual search like any other prompt - which on this
+  library returns nothing from that trip. Expanding the album to its capture
+  days was measured and rejected; the numbers are in
+  [decision-log-prompt-memories.md](decision-log-prompt-memories.md).
 
 ## M3 (semantic): what was deferred, and one label that must not be trusted
 

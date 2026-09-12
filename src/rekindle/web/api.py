@@ -476,6 +476,13 @@ def _build_recipe(workshop: Workshop, recipe: str, key: str) -> Iterator[dict]:
     yield from _finish(workshop, draft, note=skip_explanation(draft.report))
 
 
+def _never_searched(text: str, k: int) -> list[tuple[str, float]]:
+    """The retriever an album-led build is handed. It is never called - the
+    tag list is empty - and it raises rather than returning [] so that a change
+    which DID search would fail loudly instead of silently opening CLIP."""
+    raise AssertionError("an album-led prompt memory must not search")
+
+
 def _build_prompt(workshop: Workshop, text: str) -> Iterator[dict]:
     """The prompt path, streamed one visual tag at a time.
 
@@ -485,6 +492,18 @@ def _build_prompt(workshop: Workshop, text: str) -> Iterator[dict]:
     injected retriever is wrapped so each tag's search emits a progress event.
     That wrapping is safe precisely because retrieval is injected - the
     consensus arithmetic never sees the wrapper.
+
+    An album-led prompt skips the tag stage and the retriever entirely, again
+    exactly as `prompt_cmd` does. Emitting descriptions that were then ignored
+    was the first version of this and it read as a search that had silently
+    failed.
+
+    What this path does NOT do, and `prompt_cmd` does, is ask a language model
+    to shortlist albums when the words match none exactly. That orchestration
+    lives in `memory/cli.py` and prints as it goes; wiring it here means
+    turning it into stream events first. Until then a misspelling reaches an
+    album from the command line and not from this window - a narrower feature
+    here, never a different answer.
 
     The LLM plausibility judge is NOT run. It exists to avoid spending a
     render on an incoherent query, and in this window the user sees the
@@ -507,15 +526,25 @@ def _build_prompt(workshop: Workshop, text: str) -> Iterator[dict]:
     except LLMUnavailable:
         generator = None
 
-    yield _stage("tags", "turning the prompt into visual descriptions")
-    resolution = tags_mod.resolve(
-        query,
-        data_dir=workshop.library.data_dir,
-        generator=generator,
-        people=list(index.people_counts()),
-    )
-    if resolution.source == tags_mod.SOURCE_MODEL:
-        tags_mod.write_cache_entry(workshop.library.data_dir, query.text, resolution.tags)
+    album = prompt_mod.match_albums(index, query)
+
+    if album.led:
+        # The same rule `memory/cli.py:prompt_cmd` applies, for the same
+        # reason: an album of the user's own that can fill a memory has
+        # already answered the question. No descriptions are generated and the
+        # embedding store is never opened, so this path works in a UI running
+        # without the `semantic` extra.
+        resolution = tags_mod.Resolution(tags=(), source=tags_mod.SOURCE_ALBUM)
+    else:
+        yield _stage("tags", "turning the prompt into visual descriptions")
+        resolution = tags_mod.resolve(
+            query,
+            data_dir=workshop.library.data_dir,
+            generator=generator,
+            people=list(index.people_counts()),
+        )
+        if resolution.source == tags_mod.SOURCE_MODEL:
+            tags_mod.write_cache_entry(workshop.library.data_dir, query.text, resolution.tags)
     yield {
         "event": "tags",
         "data": {
@@ -525,29 +554,40 @@ def _build_prompt(workshop: Workshop, text: str) -> Iterator[dict]:
             "months": list(resolution.months),
             "rejected": list(resolution.rejected),
             "weak": resolution.source == tags_mod.SOURCE_PROMPT,
+            "album_led": album.led,
+            "albums": list(album.names),
+            "album_photos": album.total,
         },
     }
 
-    retrieve = workshop.library.retriever()
     progress: list[dict] = []
     total = max(1, len(resolution.tags))
     seen = {"n": 0}
+    searcher = _never_searched
 
-    def watched(tag_text: str, k: int) -> list[tuple[str, float]]:
-        hits = retrieve(tag_text, k)
-        seen["n"] += 1
-        progress.append({"tag": tag_text, "hits": len(hits), "done": seen["n"], "of": total})
-        return hits
+    if not album.led:
+        retrieve = workshop.library.retriever()
 
-    yield _stage("search", f"searching {total} descriptions over the embedded library")
+        def watched(tag_text: str, k: int) -> list[tuple[str, float]]:
+            hits = retrieve(tag_text, k)
+            seen["n"] += 1
+            progress.append({"tag": tag_text, "hits": len(hits), "done": seen["n"], "of": total})
+            return hits
+
+        searcher = watched
+        yield _stage("search", f"searching {total} descriptions over the embedded library")
+    else:
+        yield _stage("albums", f"building from {album.total} photos you filed yourself")
+
     build = prompt_mod.build_selection(
         index,
         query,
         resolution.tags,
-        watched,
+        searcher,
         months=resolution.months,
         festival=resolution.festival,
         known_words=_festival_names(resolution, query),
+        album_match=album,
     )
     for step in progress:
         yield {"event": "searched", "data": step}
@@ -560,6 +600,7 @@ def _build_prompt(workshop: Workshop, text: str) -> Iterator[dict]:
             "albums": list(build.albums),
             "unmatched": list(build.unmatched),
             "agreement": build.agreement,
+            "album_led": build.album_led,
         },
     }
     if build.selection is None:

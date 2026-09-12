@@ -231,7 +231,10 @@ year-buckets but only 4 of 24 shots carry a face tag". Measured now, on
 face tag**. The docstring's conclusion is if anything understated; its numbers
 are wrong and were wrong before the re-embed.
 
-The album union is all-tokens, not any-token, and the difference is measured:
+The album union is all-tokens, not any-token, and the difference is measured
+(and see *Albums: ground truth, a contribution, or noise* below, which found
+that this comparison had never once been run against a prompt with an
+ordinary framing word in it):
 `durga puja` all-tokens matches only `Durga Puja 25` — re-confirmed on the
 live index — which is what gets 2025 into the memory at all. Those six photos
 are portraits: their *best* rank on any of the four tags is 572 and on the
@@ -246,6 +249,167 @@ It measured well here because these festivals are multi-day outings, but the
 shipped Durga memory contains two shots of a college lawn that happen to share
 a day with a pandal visit. Nobody has measured how often that happens.
 
+
+---
+
+## Albums: ground truth, a contribution, or noise
+
+The owner's observation was that the pipeline did not take advantage of
+albums, and that `memories of puri` ought to look for a Puri album first. They
+were right that albums were underused, and the reason turned out to be sharper
+and more embarrassing than "albums are only a supplementary signal".
+
+### The album union never fired on a sentence
+
+All-token matching asks the album title to contain *every* content token of
+the subject, and the subject is the whole prompt. `Puri 25` does not contain
+the words "memories" or "of", so `memories of puri` matched **nothing**.
+Measured on the reference library over its 37 named albums:
+
+| prompt shape | albums reached |
+|---|---|
+| the album's own bare title (`puri 25`) | 37 / 37 |
+| the title with its year stripped (`puri`) | 37 / 37 |
+| `memories of <title>` | **0 / 37** |
+
+Any framing word at all - "memories of", "our", "show me", "photos of" -
+turned the feature off completely. Every album measurement previously recorded
+here was taken with a bare keyword prompt, which is why this never showed up.
+
+The fix is a closed, human-readable list of words that frame a request instead
+of naming a subject (`prompt.STOPWORDS`), removed before the comparison. It is
+a table for the same reason `_MONTHS` is a table: a stemmer or a stop-word
+package would be a dependency, a locale, and a silently changing answer. After
+it, `memories of <title>` reaches **37 of 37**.
+
+All-token matching itself is kept, and the reason it was chosen still holds:
+`durga puja` matches only `Durga Puja 25`, where any-token also matches
+`Diwali Kali Puja 22` on the shared word "puja". Because it is a *subset*
+test, a shorter prompt matches more, and that is what makes the multi-album
+case work without any alias configuration: `kashmir` reaches all three Kashmir
+albums and `ladakh` reaches both `Leh Ladakh` and `ladakh`.
+
+### A live defect the same measurement found
+
+`album_matches` did not apply the presentability rule. Google writes a
+`Photos from YYYY` album for every year and every photograph is in one, so the
+one-word prompt `photos` matched **all 23 of them and unioned 17,004
+photographs - 88% of the library - into the candidate pool**. Two independent
+guards now stop it: the presentability filter, and "photos" being a stop word,
+so the prompt has no content token left to match on.
+
+### When an album is the memory, and when it is a contribution
+
+Album-first is *not* simply better, and the album-size distribution is why.
+The reference library's 37 named albums run from 1,134 photographs (`Avyan`)
+and 510 (`Kashmir`) down to 6 (`Durga Puja 25`), 3 (`Puri 25`) and 1
+(`vanu biye`).
+
+An album that holds at least as many photographs as a memory has slots
+(`LEAD_MIN = 24`, which is `engine.DEFAULT_MAX_SHOTS`) can answer the question
+on its own, and the user's own curation beats anything a model infers. Below
+that it cannot, and the tags are still needed. The threshold is measured, not
+assumed: 25 photographs is the largest album below it and 48 the smallest
+above, so **every value between 26 and 48 gives the same answer on every album
+in this library** - the decision does not sit on a cliff.
+
+When an album leads, the tags are dropped, the plausibility judge is skipped,
+`retrieve` is never called and the pool is the album. That is what
+`album_story` would have built. The prompt is deliberately **not** routed to
+that recipe: `album_story` can name only one album where `kashmir` needs
+three, and the memory id would become `album_story:Kashmir`, so it would
+change the day an album crossed the threshold and every dismissal of it would
+stop applying. The id stays `prompt:<text>` and the several albums are one
+cluster.
+
+One arithmetic trap, found by reading the output rather than the code: the
+album sizes must not be summed. `Leh Ladakh` (277) and `ladakh` (237) are one
+trip filed twice and share 195 photographs, so the sum says 514 where the
+memory is built from 319. The CLI printed both numbers two lines apart until
+`AlbumMatch.total` was changed to count distinct photographs.
+
+Measured, before and after, with no API key on the machine:
+
+| prompt | before | after |
+|---|---|---|
+| `memories of puri` | 0 albums matched; 24 shots over 9 years and 7 months, **none from the Puri trip** | `Puri 25` (3) joins the pool; still 24 search-led shots, and the CLI now says the album was too small to be the memory |
+| `durga puja` | `Durga Puja 25`; 24 shots, 10 years, 19 in October | **identical, shot for shot** |
+| `durga puja over the years` | `Durga Puja 25`; 24 shots, 10 years, 21 with faces | **identical, shot for shot** |
+| `kashmir` | pool 870 from tags + albums; 22 of 24 shots in a Kashmir album, one stray from 2017 | album-led, pool 534; **24 of 24** in a Kashmir album, all 2015-05, 24 with faces |
+| `ladakh` | pool 334; 24 shots, all 2018 | album-led, pool 319; the same 24 shots, and no CLIP load at all |
+| `memories of kashmir` | 0 albums matched; pool 790 from tags alone; 23 of 24 in the album | album-led, pool 534; **24 of 24**, and it works with no `semantic` extra installed |
+
+The festival results are byte-identical, which is the point: `Durga Puja 25`
+holds six photographs, so it never leads, and the union that every number in
+this document depends on is untouched.
+
+### Two things that were tried and are not shipped
+
+**Expanding a small album to its capture days.** `Puri 25`'s three
+photographs sit on two days that hold 57 photographs between them, which looks
+like exactly the trip the owner wanted. It is not defensible. The tag path
+expands a day only after *quorum* evidence that the day is the concept; an
+album says nothing about the other photographs that share its dates. Measured
+across all 37 named albums, the amplification is unbounded and sometimes
+absurd: `Archive` (3 photographs) expands to **331**, because its "day" is a
+bulk-import timestamp holding photographs filed under 2012, 2019, 2020 and
+2021; `Rumpa Di marriage` (1) expands to **115**; `Abhirup Birthday/ Sudipta
+Saad` (4) to **242**. Requiring two album photographs on a day helps some
+cases (`Mamabari iburo bhat` 351 -> 21) and not others (`Archive` stays 331).
+And the Puri days themselves are 13 photographs in a ten-minute burst and 44
+in a half-hour burst, every one of them also filed under `Avyan` - a child,
+not a beach.
+
+**Letting a small album lead when nothing else knows anything.** With no
+festival-corpus entry, no cached tags and no API key, the tag path falls back
+to searching for the prompt's own words, which is the measured-bad path; the
+album is then the only real evidence in the run. Implemented, measured,
+reverted. On `memories of puri` it produces a pool of three photographs, two
+of which are the same burst two seconds apart, dedup collapses them, and the
+engine refuses the memory outright with `too_few_photos`. **It converts a poor
+memory into no memory.**
+
+That second result is also the honest correction to the framing this work
+started from, which said the search "finds a couple of dozen from that trip"
+where the album finds three. It does not. On this library, with no key, the
+24 shots `memories of puri` returns contain **not one photograph from the Puri
+album or its days** - nine different years and seven different months. Both
+answers are bad. The library holds three photographs of Puri, two of them near
+identical, and no design turns that into a memory.
+
+### The language model shortlist
+
+Token matching is exact and brittle: it cannot connect `ladhak` to
+`Leh Ladakh`, and it cannot connect a transliteration to a Bengali album name.
+So the optional layer gets a job it is genuinely good at - the model is handed
+the prompt and the album *titles*, and asked which are about the same subject.
+
+Four constraints, each of them enforced rather than requested:
+
+1. **It is consulted only where token matching found nothing.** The exact rule
+   stays authoritative, so a model cannot answer `Diwali Kali Puja 22` to
+   `durga puja` and reach the pool, and the presence of an API key cannot move
+   any number in this document.
+2. **It cannot invent an album.** Every returned line is looked up in the list
+   the model was given, matched on the normalised title so a change of case is
+   not a rejection, and the library's own spelling comes back. Anything else
+   is dropped, counted, and reported to the user.
+3. **It is cached**, in the data directory beside the tag cache, with a digest
+   of the album titles it was chosen from. A cached answer to "which of *these*
+   albums" is only an answer while the album list is the same one. An empty
+   answer is cached too, so a prompt that names no album does not pay for a
+   call on every run.
+4. **There is no committed starter cache**, unlike `prompt_tags.json`. A
+   shortlist maps somebody's prompt to *their own* album titles, and a
+   checked-in file would ship one person's private labelling to every user.
+
+It opens no new channel out of the library: the plausibility judge is already
+given the album titles, and this request carries the same titles and nothing
+else - no photograph, no path, no date, no name, no count.
+
+**It is unmeasured against a real model**, because this session had no API
+key. Every assertion about it is about what the layer does with a reply, on an
+injected transport. Do not describe it as validated.
 ---
 
 ## The refusal gate — the eighth signal, and the eighth failure

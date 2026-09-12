@@ -1026,6 +1026,145 @@ def test_the_weak_path_is_named_when_no_source_describes_the_prompt(tmp_path, ca
     assert WEAK_PATH_WARNING.split(".")[0] in out
 
 
+def _album_library(tmp_path):
+    """A library whose one named album is bigger than a memory."""
+    data = tmp_path / "data"
+    data.mkdir(parents=True, exist_ok=True)
+    photos = []
+    for i in range(30):
+        path = _jpeg(tmp_path / "lib" / f"k{i}.jpg", colour=(30 + i * 7, 80, 140))
+        photos.append(_photo(f"k{i}", path, local=datetime(2015, 5, 15, 6, i), albums=["Kashmir"]))
+    for i in range(6):
+        path = _jpeg(tmp_path / "lib" / f"o{i}.jpg", colour=(200, 30 + i * 10, 30))
+        photos.append(_photo(f"o{i}", path, local=datetime(2019, 5, 1, 9, i * 5)))
+    with PhotoStore(data / "rekindle.sqlite") as store:
+        store.upsert_many(photos)
+    return data
+
+
+def test_an_album_that_can_fill_a_memory_answers_the_prompt_without_searching(tmp_path, capsys):
+    """NO retriever is injected and this library has no embedding store, so
+    `_open_retriever` would exit non-zero and `_no_retrieval` would raise. The
+    memory is built anyway, which is the claim: a prompt an album answers works
+    on a machine with no `semantic` extra installed."""
+    from rekindle.memory.cli import prompt_cmd
+
+    from .helpers import unwrapped
+
+    data = _album_library(tmp_path)
+    prompt_cmd(data, "memories of kashmir", tmp_path / "out", no_mp4=True)
+    out = unwrapped(capsys.readouterr().out)
+
+    assert unwrapped("Your own album answered this, matched on your own words") in out
+    assert unwrapped("Kashmir (30)") in out
+    assert unwrapped("no visual search ran") in out
+    # Not a word about tags, seed days or the weak path: none of that ran.
+    assert unwrapped("visual descriptions") not in out
+    assert unwrapped("Tag agreement") not in out
+
+    folders = list((tmp_path / "out").glob("*prompt*"))
+    assert len(folders) == 1
+    spec = json.loads((folders[0] / "memory.json").read_text(encoding="utf-8"))
+    # The id is the PROMPT, not the album. An id that became
+    # `album_story:Kashmir` would change the day the album crossed the floor,
+    # and every dismissal of it would stop applying.
+    assert (spec["recipe"], spec["key"]) == ("prompt", "memories of kashmir")
+    assert {s["file_hash"] for s in spec["shots"]} <= {f"k{i}" for i in range(30)}
+
+
+def test_a_small_album_is_named_as_too_small_and_the_search_still_runs(tmp_path, capsys):
+    from rekindle.memory.cli import prompt_cmd
+
+    from .helpers import unwrapped
+
+    data = _festival_library(tmp_path)
+    with PhotoStore(data / "rekindle.sqlite") as store:
+        path = _jpeg(tmp_path / "lib" / "p0.jpg", colour=(10, 200, 90))
+        store.upsert_many(
+            [_photo("p0", path, local=datetime(2019, 10, 4, 9, 59), albums=["Puri 25"])]
+        )
+    seeds = [f"f{y}{i}" for y in (2019, 2020, 2021, 2022) for i in range(2)]
+    prompt_cmd(
+        data,
+        "memories of puri",
+        tmp_path / "out",
+        no_mp4=True,
+        retrieve=_fake_retriever(seeds),
+    )
+    out = unwrapped(capsys.readouterr().out)
+    assert unwrapped("Your own albums Puri 25 (1) were added whole") in out
+    assert unwrapped("Too small to be this memory on their own") in out
+    # The search DID run: the tags and the seed days are reported as usual.
+    assert unwrapped("visual descriptions") in out
+    assert unwrapped("2019-10-04") in out
+
+
+def _shortlisting(reply, tmp_path):
+    """`_match_albums` wired to a canned model reply and a real index."""
+    from rekindle.memory.cli import _match_albums
+    from rekindle.memory.index import MemoryIndex
+    from rekindle.memory.prompt import parse
+    from rekindle.memory.tags import TagGenerator
+
+    data = _album_library(tmp_path)
+    generator = TagGenerator("k", transport=lambda payload, key: {"output_text": reply})
+    with PhotoStore(data / "rekindle.sqlite") as store:
+        index = MemoryIndex.open(store)
+        query = parse("kashmiri holiday", index)
+        return _match_albums(index, query, data, generator)
+
+
+def test_a_prompt_that_names_an_album_outright_never_asks_the_model(tmp_path):
+    """Token matching is exact and authoritative, so the model is not worth a
+    call - and nothing about this prompt leaves the machine. The transport
+    raises: reaching it at all is the failure."""
+    from rekindle.memory.cli import _match_albums
+    from rekindle.memory.index import MemoryIndex
+    from rekindle.memory.prompt import ALBUM_TOKENS, parse
+    from rekindle.memory.tags import TagGenerator
+
+    def refuse(payload, key):
+        raise AssertionError("the tokens already matched; the model must not be asked")
+
+    data = _album_library(tmp_path)
+    with PhotoStore(data / "rekindle.sqlite") as store:
+        index = MemoryIndex.open(store)
+        album = _match_albums(
+            index, parse("kashmir", index), data, TagGenerator("k", transport=refuse)
+        )
+    assert album.names == ("Kashmir",)
+    assert album.source == ALBUM_TOKENS
+
+
+def test_a_misspelling_reaches_an_album_through_the_shortlist(tmp_path):
+    """What token matching cannot do: `kashmiri holiday` shares no whole word
+    with `Kashmir`."""
+    from rekindle.memory.prompt import ALBUM_MODEL
+
+    album = _shortlisting("Kashmir", tmp_path)
+    assert album.names == ("Kashmir",)
+    assert album.source == ALBUM_MODEL
+    assert album.led is True
+
+
+def test_an_album_the_model_invented_is_counted_and_dropped(tmp_path, capsys):
+    from .helpers import unwrapped
+
+    album = _shortlisting("Atlantis\nKashmir\nThe Moon", tmp_path)
+    assert album.names == ("Kashmir",)
+    out = unwrapped(capsys.readouterr().out)
+    assert unwrapped("named 2 albums this library does not have") in out
+
+
+def test_a_shortlist_of_nothing_real_leaves_the_prompt_where_it_was(tmp_path):
+    from rekindle.memory.prompt import ALBUM_NONE
+
+    album = _shortlisting("Atlantis", tmp_path)
+    assert album.names == ()
+    assert album.source == ALBUM_NONE
+    assert album.led is False
+
+
 def test_a_dismissed_prompt_memory_is_not_rendered(tmp_path, capsys):
     data = _festival_library(tmp_path)
     seeds = [f"f{y}{i}" for y in (2019, 2020, 2021, 2022) for i in range(2)]

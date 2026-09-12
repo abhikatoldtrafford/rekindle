@@ -239,6 +239,11 @@ function build(params) {
   stream.addEventListener("tags", (event) => {
     const data = JSON.parse(event.data);
     setMeter("build-bar", BUILD_MARKS.tags, false);
+    if (data.album_led) {
+      note(`your own ${data.albums.length > 1 ? "albums" : "album"} answered this: ` +
+           `${data.albums.join(", ")} — ${data.album_photos} photos, so nothing was searched`);
+      return;
+    }
     note(`${data.tags.length} visual descriptions, from ${data.source}: ${data.tags.join(" · ")}`);
     if (data.weak) {
       note("Nothing describes this prompt visually, so your words were searched directly. " +
@@ -255,6 +260,10 @@ function build(params) {
   });
   stream.addEventListener("found", (event) => {
     const data = JSON.parse(event.data);
+    if (data.album_led) {
+      note(`${data.pool} photos in ${data.albums.join(", ")} — no photo from outside them can appear`);
+      return;
+    }
     note(`${data.seed_days.length} capture days agreed, expanded to ${data.pool} candidates`);
     data.seed_days.forEach((day) => note(`  ${day.day} — ${day.hits} photos, ${day.tags} descriptions`));
     if (data.albums.length) note(`your own albums added whole: ${data.albums.join(", ")}`);
