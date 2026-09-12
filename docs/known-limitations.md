@@ -919,3 +919,67 @@ and without them 21 would have been written.
 false-positive rate against unrelated pairs. Until it does, a blind judgement
 about sameness is evidence about the pairs shown and not about the threshold,
 and the deletion count is the only thing standing between the two.
+
+## Carried forward from the lazy `MemoryIndex`
+
+Full measurements in [the scale decision log](decision-log-memory-scale.md).
+
+- **THE BIG ONE: `all_offers` is 11x slower at 300,000 rows** - 46.5 s against
+  4.1 s - and it is the whole of the 1.64x regression on a full
+  `--all-recipes` pass. The offers phase asks a recipe for a slice of the
+  library, uses it for a count and a set of years, and discards the
+  photographs; against a 60,000-photo cache and 297,585 photographs most of
+  those slices miss and are re-read. Six of the nine recipes were fixed and
+  now read the count and the years off the spine (it was 25x / 185.9 s
+  before that). **Three are left:**
+  - `then_and_now` runs `compose()` over every person and every album to
+    learn which photographs would survive the guardrails - roughly 570 k
+    hydrations at 300k and most of the remaining cost. It needs width,
+    height, sharpness, brightness and media type per photograph, so serving
+    it from the spine means putting those scalars on the spine. That is a
+    bigger change than the count-and-years one and is not a patch.
+  - `album_story` calls `captions.subtitle_for`, which wants a span and a
+    description of the people in the slice. Derivable, but it means a
+    spine-level subtitle rather than one more aggregate.
+  - `place_cluster` splits a GPS cell into visits by timestamp. The
+    smallest of the three: only 12% of the reference library has GPS.
+
+- **`MemoryIndex.open` itself got faster** - 32% at 300k, 10% at 19,480, from
+  three interleaved rounds - so the scan is not where the cost is. It could be
+  faster still: it reads `SELECT *` and builds a full `Photo` for every row
+  purely so `deny_reason` can be applied to it, and a narrowed `SELECT` of the
+  eleven columns the policy and the indexes actually need measures 2.4 s
+  against 9.4 s. Not done, because a partial `Photo` handed to `deny_reason`
+  is a correctness hazard - add a field to the predicate and the narrow scan
+  silently supplies a default - and doing it safely needs a test asserting the
+  predicate reads nothing the scan did not populate.
+
+- **An index is a snapshot, and the failure mode of a stale one changed.** The
+  spine holds SQLite rowids, and `_insert` is INSERT OR REPLACE, which deletes
+  the row and allocates a NEW rowid (verified). So writing to the `photos`
+  table while a `MemoryIndex` is open could in principle make a rowid address
+  a different photograph, where before it would merely have shown stale data.
+  Nothing in rekindle does that today - the fingerprint and orientation passes
+  use targeted UPDATEs, which keep the rowid, and the web UI writes only to
+  `memory_exclusions`, `memory_history` and `photo_captions` - so this is a
+  constraint to respect rather than a live bug. A `PRAGMA data_version` check
+  on the hydration connection would turn it into a clear error; it is not
+  there because capturing a comparable baseline needs the connection opened
+  eagerly at `open`, and an eagerly-held file handle is what
+  `MemoryIndex.close` exists to avoid on Windows.
+
+- **`MemoryIndex.close()` is only this thread's connection.** `sqlite3`
+  refuses to touch a connection from a thread other than the one that made
+  it, so an index read from many threads keeps one handle per reading thread
+  until it is garbage-collected. Harmless for the web server, which lives as
+  long as the process; it would matter to an embedder that opened and dropped
+  many indexes across a thread pool.
+
+- **`build_all` is the other half of what makes 300k slow, and it always
+  was.** 51.2 s before this work and 59.4 s after, essentially all of it
+  inside `diversity.pick`, which is O(slots x candidates) per memory and
+  decodes a 4x4x4 colour histogram from hex on every comparison. It also sets
+  the peak: the §4a offers change removed roughly half the hydrations a full
+  pass does and moved the 300k full-pass peak by 1.2 MB, because the offers
+  phase drops what it loads as it goes. Independent of the index and
+  untouched here.

@@ -4,28 +4,79 @@
 > that every recipe goes through - not a filter each recipe remembers to
 > apply. If a recipe can bypass the guardrail, the guardrail does not exist."
 
-So the guardrail is not a filter. `MemoryIndex.open` loads every row, applies
-the policy ONCE, and keeps only the survivors. No method on this class can
-return a photo the policy rejected, because no rejected photo is ever stored
-on the object.
+So the guardrail is not a filter. Every `Photo` this class hands out has come
+through `_StoreSource`, which applies `ExclusionPolicy.deny_reason` to every
+row it turns into a `Photo` - on the opening scan and on every later fetch. A
+recipe cannot ask for a photo the policy rejected because no code path exists
+that would produce one.
 
 A recipe is handed a `MemoryIndex` and nothing else - no `PhotoStore`, no
 path, no connection. Bypassing the guardrail requires importing `PhotoStore`
 yourself, which is exactly the reviewable act it should be. `tests/
 test_memory_index.py` enumerates every public method and asserts none of them
 leaks, so a query added later without filtering fails automatically.
+
+WHY THE LIBRARY IS NOT MATERIALISED
+-----------------------------------
+It used to be. `MemoryIndex.open` loaded every row into a tuple of `Photo`
+objects and every index pointed at those objects, which is correct and fast at
+19,480 rows and untenable at 300,000: measured on a synthetic 300k library,
+the photos alone are **681 MB** at 2,289 bytes apiece, while the eight derived
+indexes over them are 32.5 MB. The photos are the problem, not the indexing.
+
+So the indexes hold SQLite **rowids** - eight bytes each, in `array("q")` -
+and the `Photo` objects are fetched back only when a caller actually reads
+one, through a bounded LRU cache. The interface is unchanged: every query
+still returns `list[Photo]`, and the single enforcement point is still single.
+
+THE COST, STATED
+----------------
+Recipes scan the index several times, so this is a trade and not a free win,
+and the trade is not the one it looks like from here.
+
+A library that fits in the cache pays nothing: the first pass fills it and
+every later pass is a dict lookup. Measured on the reference library, a full
+`--all-recipes` pass is 7% FASTER than it was, because nothing survives
+`open` for the garbage collector to trace.
+
+A library LARGER than the cache re-reads from SQLite, and that bill lands
+almost entirely on `all_offers`, which asks every recipe for every slice of
+the library and then wants a count and a set of years out of it. So the index
+answers both off the spine - `year_counts`, `month_day_years`, `person_years`
+and their siblings, and `image_day_counts` for `recurring_event` - and six of
+the nine recipes stopped loading photographs to build an offer. That took the
+phase from 185.9 s to 46.5 s on a synthetic 300,000-photo library, against
+4.1 s materialised. What is left is `then_and_now`, which must know which
+photographs would survive `compose()`, plus `album_story`'s subtitle and
+`place_cluster`'s visit split.
+
+Net at 300k: `open` 39% faster, the whole `--all-recipes` pass 1.64x slower,
+peak memory 1.6x smaller and the index itself 15.7x smaller. It is volume and
+not locality: generating the library in capture order rather than at random -
+the shape a real Takeout index has - buys 7%.
+
+Every number here is in `docs/decision-log-memory-scale.md`, with the caveats
+that belong to it; `tests/bench_memory_index.py` re-measures them.
+
+`iter_all` and `iter_images` exist for the callers that only want to *count*
+something across the library. Materialising 300,000 photos to count how many
+lack a fingerprint would undo the whole of the above.
 """
 
 from __future__ import annotations
 
 import itertools
-from collections import Counter, defaultdict
-from collections.abc import Iterable
+import sqlite3
+import threading
+from array import array
+from bisect import bisect_left
+from collections import Counter, OrderedDict, defaultdict
+from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
-from rekindle.db import PhotoStore
+from rekindle.db import PhotoStore, row_to_photo
 from rekindle.memory import albums
 from rekindle.memory.policy import ExclusionPolicy, is_public_safe
 from rekindle.memory.videoframe import frames_dir
@@ -34,6 +85,32 @@ from rekindle.models import MediaType, Photo
 # Coarse enough that one town is one cell, fine enough that two towns are not.
 # The reference library's 2,318 GPS photos fall into 19 cells at this size.
 GPS_CELL = 0.25
+
+#: How many hydrated `Photo` objects the index keeps alive at once.
+#:
+#: 60,000 is roughly 138 MB at the 2,289 bytes a photo measured on the
+#: synthetic 300k library. It is chosen so that every library up to 60,000
+#: photos behaves EXACTLY as the materialised index did - one pass to fill the
+#: cache, then no SQLite at all - because a change that made ordinary
+#: libraries slower to make a large one possible would be a bad trade made
+#: silently. Above 60,000 the cache becomes a working set and the index starts
+#: re-reading; that is the regime the laziness exists for.
+DEFAULT_CACHE = 60_000
+
+#: Rows per `WHERE rowid IN (...)`. SQLITE_MAX_VARIABLE_NUMBER is 999 on
+#: builds older than 3.32 and 32,766 after; 900 is under the floor and the
+#: per-statement overhead at that size is already noise.
+_FETCH_CHUNK = 900
+
+#: How many photos `iter_all` holds at once. Small enough that streaming the
+#: whole library costs a few megabytes, large enough that the fetch is bulk.
+_STREAM_CHUNK = 2_000
+
+#: `array` typecode for rowids. Signed 64-bit, matching SQLite's own INTEGER,
+#: so no library can outgrow it. Eight bytes an entry - the same as the
+#: pointer a list of `Photo` would have held, with none of the object behind
+#: it.
+_ROWID = "q"
 
 
 @dataclass
@@ -58,6 +135,11 @@ class ExclusionReport:
         return self.excluded == sum(self.by_reason.values())
 
 
+def _ids() -> array:
+    """A fresh, empty rowid array. The `defaultdict` factory for every index."""
+    return array(_ROWID)
+
+
 def gps_cell(lat: float, lon: float, size: float = GPS_CELL) -> tuple[float, float]:
     """Snap a coordinate to a grid cell.
 
@@ -73,14 +155,145 @@ def gps_cell(lat: float, lon: float, size: float = GPS_CELL) -> tuple[float, flo
     )
 
 
-class MemoryIndex:
-    """Guardrailed, in-memory view of the library.
+class _ListSource:
+    """A source over photos the caller already holds.
 
-    Everything is materialised and indexed up front. The whole library is
-    19,480 rows and a few tens of megabytes of metadata; every recipe scans it
-    several times, and doing that in SQL would mean each recipe writing its own
-    WHERE clause - which is precisely the "filter each recipe remembers to
-    apply" that this class exists to prevent.
+    This is what `MemoryIndex(photos, ...)` uses. It does NOT re-apply the
+    policy: the constructor has always taken an already-vetted list, and
+    `tests/test_memory_index.py` depends on that to build a deliberately
+    unguarded index and prove its own fixture is not vacuous.
+    """
+
+    def __init__(self, photos: Sequence[Photo]) -> None:
+        self._photos = tuple(photos)
+        self._by_hash = {p.file_hash: p for p in self._photos}
+
+    def fetch(self, row_ids: Sequence[int]) -> dict[int, Photo]:
+        return {i: self._photos[i] for i in row_ids}
+
+    def lookup(self, hashes: Sequence[str]) -> dict[str, Photo]:
+        found = {h: self._by_hash.get(h) for h in hashes}
+        return {h: p for h, p in found.items() if p is not None}
+
+
+class _StoreSource:
+    """Rows on demand, guardrailed. THE enforcement point of the lazy index.
+
+    Every `Photo` that reaches `MemoryIndex` is built here, and every `Photo`
+    built here has had `ExclusionPolicy.deny_reason` applied to it - on the
+    opening scan and again on every later fetch. The second application is not
+    redundant decoration: with the library no longer materialised, "the index
+    physically does not contain a rejected photo" is no longer what makes the
+    guarantee true. What makes it true is that there is exactly one function
+    that turns a row into a `Photo`, and it refuses.
+
+    It owns its OWN read-only SQLite connection rather than borrowing the
+    store's, for two reasons that are both load-bearing:
+
+      * `web/library.py` closes the store the moment the index is built, and
+        then serves every request from the index for the life of the process.
+      * A `sqlite3` connection belongs to the thread that created it, and that
+        same web index is read from many request threads at once. So the
+        connection is thread-local, created on demand.
+
+    `mode=ro` is belt and braces: nothing here writes, and now nothing here
+    CAN write, whatever a later edit does.
+    """
+
+    def __init__(self, db_path: Path, policy: ExclusionPolicy) -> None:
+        self._uri = db_path.resolve().as_uri() + "?mode=ro"
+        self._policy = policy
+        self._local = threading.local()
+
+    @property
+    def _conn(self) -> sqlite3.Connection:
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(self._uri, uri=True)
+            conn.row_factory = sqlite3.Row
+            self._local.conn = conn
+        return conn
+
+    def close(self) -> None:
+        """Release this thread's handle on the database file.
+
+        Reopening is transparent - the next query gets a fresh connection - so
+        this is a way to let go of the FILE, not a way to end the index's life.
+        Windows refuses to delete an open file, which is the whole reason it
+        exists: a test that builds an index inside a `TemporaryDirectory` has
+        no other way to let the directory be cleaned up.
+
+        Only this thread's connection. `sqlite3` refuses to touch a connection
+        from a thread other than the one that made it, so closing another
+        thread's would raise rather than tidy.
+        """
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            self._local.conn = None
+            conn.close()
+
+    def scan(self, report: ExclusionReport) -> Iterator[tuple[int, Photo]]:
+        """Every allowed row, once, as `(rowid, photo)`, counting the rest.
+
+        The rowid is what lets the index hold a 300,000-photo library as
+        eight-byte integers. It is NOT stable across writes - `_insert` is
+        INSERT OR REPLACE, which deletes the row and allocates a new rowid -
+        which is fine and is why the connection is read-only: an index is a
+        snapshot of the library as it was when it was opened, and rebuilding
+        it is how you see a changed one.
+
+        ORDER BY rowid is not decoration. A bare `SELECT * FROM photos` walks
+        the table in rowid order *in practice*, and the engine's byte-for-byte
+        promise must not rest on a query plan: `_build_indexes` reassembles
+        merged album lists by sorting on rowid, and that reproduces the scan
+        order only if the scan was ordered in the first place.
+        """
+        for row in self._conn.execute("SELECT rowid AS _rowid, * FROM photos ORDER BY rowid"):
+            photo = row_to_photo(row)
+            report.total += 1
+            reason = self._policy.deny_reason(photo)
+            if reason is None:
+                yield row["_rowid"], photo
+            else:
+                report.by_reason[reason] = report.by_reason.get(reason, 0) + 1
+
+    def fetch(self, row_ids: Sequence[int]) -> dict[int, Photo]:
+        return self._by("rowid", row_ids, key=lambda row, photo: row["_rowid"])
+
+    def lookup(self, hashes: Sequence[str]) -> dict[str, Photo]:
+        return self._by("file_hash", hashes, key=lambda row, photo: photo.file_hash)
+
+    def _by(self, column: str, values: Sequence, key) -> dict:
+        out: dict = {}
+        # Sorted and de-duplicated: sorted so a large fetch walks the table in
+        # rowid order instead of jumping around it, de-duplicated so a caller
+        # asking for the same photo twice costs one row.
+        wanted = sorted(set(values))
+        for start in range(0, len(wanted), _FETCH_CHUNK):
+            chunk = wanted[start : start + _FETCH_CHUNK]
+            sql = (
+                f"SELECT rowid AS _rowid, * FROM photos WHERE {column} IN "
+                f"({','.join('?' * len(chunk))})"
+            )
+            for row in self._conn.execute(sql, chunk):
+                photo = row_to_photo(row)
+                if self._policy.deny_reason(photo) is None:
+                    out[key(row, photo)] = photo
+        return out
+
+
+class MemoryIndex:
+    """Guardrailed view of the library, indexed by rowid and loaded lazily.
+
+    The eight indexes hold SQLite rowids, not photos; `Photo` objects are
+    fetched through `_hydrate` when a caller actually reads one, and kept in a
+    bounded LRU cache. See the module docstring for the measurements that
+    forced this and for what it costs.
+
+    Doing the filtering in SQL per recipe would be faster still and is exactly
+    what this class exists to prevent: it is the "filter each recipe remembers
+    to apply" the guardrail was written against. The filter moved closer to the
+    data; it did not multiply.
     """
 
     def __init__(
@@ -89,10 +302,15 @@ class MemoryIndex:
         policy: ExclusionPolicy,
         report: ExclusionReport,
         frames: Path | None = None,
+        *,
+        cache: int = DEFAULT_CACHE,
     ):
-        # Private and a tuple: a recipe holding a reference cannot append a
-        # photo that never passed the policy.
-        self._photos: tuple[Photo, ...] = tuple(photos)
+        photos = list(photos)
+        self._start(_ListSource(photos), policy, report, frames, cache)
+        self._build_indexes(enumerate(photos))
+
+    def _start(self, source, policy, report, frames, cache: int) -> None:
+        self._source = source
         self._policy = policy
         self.report = report
         #: Where `rekindle fingerprint` cached one still frame per video.
@@ -101,35 +319,83 @@ class MemoryIndex:
         #: a JPEG without knowing a video was involved. Optional, because a
         #: `MemoryIndex` built by hand in a test has no data directory.
         self._frames = frames
-        self._by_hash = {p.file_hash: p for p in self._photos}
-        self._build_indexes()
+        self._cache_max = max(1, cache)
+        self._cache: OrderedDict[int, Photo] = OrderedDict()
+        # The index is shared across threads by `web.library`, and an
+        # OrderedDict is not safe against concurrent eviction.
+        self._lock = threading.Lock()
 
     @classmethod
     def open(cls, store: PhotoStore, policy: ExclusionPolicy | None = None) -> MemoryIndex:
         policy = policy or ExclusionPolicy()
         report = ExclusionReport()
-        allowed: list[Photo] = []
-        for photo in store.iter_photos():
-            report.total += 1
-            reason = policy.deny_reason(photo)
-            if reason is None:
-                allowed.append(photo)
-            else:
-                report.by_reason[reason] = report.by_reason.get(reason, 0) + 1
-        report.allowed = len(allowed)
-        return cls(allowed, policy, report, frames=frames_dir(store.db_path.parent))
+        index = cls.__new__(cls)
+        source = _StoreSource(store.db_path, policy)
+        index._start(source, policy, report, frames_dir(store.db_path.parent), DEFAULT_CACHE)
+        index._build_indexes(source.scan(report))
+        report.allowed = index.count()
+        return index
 
-    def _build_indexes(self) -> None:
-        self._by_year: dict[int, list[Photo]] = defaultdict(list)
-        self._by_month: dict[int, list[Photo]] = defaultdict(list)
-        self._by_month_day: dict[tuple[int, int], list[Photo]] = defaultdict(list)
-        self._by_ymd: dict[tuple[int, int, int], list[Photo]] = defaultdict(list)
-        self._by_person: dict[str, list[Photo]] = defaultdict(list)
-        self._by_pair: dict[tuple[str, str], list[Photo]] = defaultdict(list)
-        self._by_album: dict[str, list[Photo]] = defaultdict(list)
-        self._by_cell: dict[tuple[float, float], list[Photo]] = defaultdict(list)
+    # ---- the spine
 
-        aliases = dict(self._merged_year_suffixes())
+    def _build_indexes(self, rows: Iterable[tuple[int, Photo]]) -> None:
+        """One streaming pass. Nothing here keeps a `Photo`."""
+        self._ids = array(_ROWID)
+        # Local capture year per row, ALIGNED WITH `_ids`, so a rowid's year
+        # is a bisect away. Four bytes a photo - 1.2 MB across a 300k library
+        # - and it is what lets `offers()` answer "how many distinct years are
+        # in this slice?" without loading the slice. See `_years_in`.
+        self._years = array("i")
+        self._image_ids = array(_ROWID)
+        self._by_year: dict[int, array] = defaultdict(_ids)
+        self._by_month: dict[int, array] = defaultdict(_ids)
+        self._by_month_day: dict[tuple[int, int], array] = defaultdict(_ids)
+        self._by_ymd: dict[tuple[int, int, int], array] = defaultdict(_ids)
+        self._by_person: dict[str, array] = defaultdict(_ids)
+        self._by_pair: dict[tuple[str, str], array] = defaultdict(_ids)
+        self._by_cell: dict[tuple[float, float], array] = defaultdict(_ids)
+        # Images only, so `recurring_event` can find its bursts without
+        # materialising the library to count days. See `image_day_counts`.
+        self._image_days: Counter[tuple[int, int, int]] = Counter()
+        # Keyed on the album name AS WRITTEN. The year-suffix families can only
+        # be worked out once every name is known, so merging happens below.
+        raw_albums: dict[str, array] = {}
+
+        for row_id, photo in rows:
+            self._ids.append(row_id)
+            local = photo.meta.taken_at_local
+            # `deny_reason` already rejected a dateless photo, so this is a
+            # belt-and-braces narrowing for the type checker rather than a
+            # reachable branch. Year 0 keeps `_years` aligned with `_ids`; it
+            # is unreachable and no index below points at it.
+            if local is None:  # pragma: no cover
+                self._years.append(0)
+                continue
+            self._years.append(local.year)
+            ymd = (local.year, local.month, local.day)
+            self._by_year[local.year].append(row_id)
+            self._by_month[local.month].append(row_id)
+            self._by_month_day[(local.month, local.day)].append(row_id)
+            self._by_ymd[ymd].append(row_id)
+            if photo.media_type is MediaType.IMAGE:
+                self._image_ids.append(row_id)
+                self._image_days[ymd] += 1
+
+            people = sorted({p for p in photo.meta.people if p})
+            for person in people:
+                self._by_person[person].append(row_id)
+            # Sorted pairs, so "A and B" and "B and A" are one key. Without
+            # this the pair recipe offers every pair twice.
+            for pair in itertools.combinations(people, 2):
+                self._by_pair[pair].append(row_id)
+
+            for album in photo.albums:
+                raw_albums.setdefault(album, array(_ROWID)).append(row_id)
+
+            if photo.meta.gps is not None:
+                self._by_cell[gps_cell(photo.meta.gps.lat, photo.meta.gps.lon)].append(row_id)
+
+        aliases = dict(self._merged_year_suffixes(raw_albums))
         # An explicit alias always wins over the automatic rule.
         aliases.update(self._policy.album_aliases)
         self.album_merges = {
@@ -137,33 +403,17 @@ class MemoryIndex:
             for name, target in aliases.items()
             if name not in self._policy.album_aliases
         }
-        for photo in self._photos:
-            local = photo.meta.taken_at_local
-            # `deny_reason` already rejected a dateless photo, so this is a
-            # belt-and-braces narrowing for the type checker rather than a
-            # reachable branch.
-            if local is None:  # pragma: no cover
-                continue
-            self._by_year[local.year].append(photo)
-            self._by_month[local.month].append(photo)
-            self._by_month_day[(local.month, local.day)].append(photo)
-            self._by_ymd[(local.year, local.month, local.day)].append(photo)
+        merged: dict[str, list[int]] = {}
+        for name, row_ids in raw_albums.items():
+            merged.setdefault(aliases.get(name, name), []).extend(row_ids)
+        # Sorted back into rowid order, which IS scan order because
+        # `_StoreSource.scan` says ORDER BY rowid. Without this a merged family would list one
+        # spelling's photos before the other's, and `album_story` would emit a
+        # different memory than the materialised index did.
+        self._by_album = {name: array(_ROWID, sorted(rows)) for name, rows in merged.items()}
 
-            people = sorted({p for p in photo.meta.people if p})
-            for person in people:
-                self._by_person[person].append(photo)
-            # Sorted pairs, so "A and B" and "B and A" are one key. Without
-            # this the pair recipe offers every pair twice.
-            for pair in itertools.combinations(people, 2):
-                self._by_pair[pair].append(photo)
-
-            for album in photo.albums:
-                self._by_album[aliases.get(album, album)].append(photo)
-
-            if photo.meta.gps is not None:
-                self._by_cell[gps_cell(photo.meta.gps.lat, photo.meta.gps.lon)].append(photo)
-
-    def _merged_year_suffixes(self) -> dict[str, str]:
+    @staticmethod
+    def _merged_year_suffixes(raw_albums: Iterable[str]) -> dict[str, str]:
         """Album names that are the same album with a year on the end.
 
         `Christmas 2025` and `Christmas 15` are one recurring event that
@@ -187,10 +437,9 @@ class MemoryIndex:
         `album_aliases` in `exclusions.toml` is for.
         """
         families: dict[str, set[str]] = {}
-        for photo in self._photos:
-            for album in photo.albums:
-                if albums.presentable(album):
-                    families.setdefault(albums.family(album), set()).add(album)
+        for album in raw_albums:
+            if albums.presentable(album):
+                families.setdefault(albums.family(album), set()).add(album)
         return {
             name: family
             for family, names in families.items()
@@ -199,16 +448,88 @@ class MemoryIndex:
             if name != family
         }
 
-    # ---- queries. Every one reads self._photos or an index derived from it.
+    def _years_in(self, row_ids: Sequence[int]) -> set[int]:
+        """The distinct local capture years of a slice, without loading it.
+
+        `_ids` is ascending - the scan is ORDER BY rowid - so a rowid's
+        position is a bisect, and `_years[position]` is its year. This is the
+        one thing five recipes want from the photographs they ask for in
+        `offers()`, and asking for the photographs to get it is what made a
+        300,000-photo library slow: `year_in_review` alone hydrated 298,000
+        of them to compute 24 integers.
+        """
+        ids, years = self._ids, self._years
+        return {years[bisect_left(ids, row_id)] for row_id in row_ids}
+
+    # ---- hydration. The ONLY route from a rowid to a Photo.
+
+    def _hydrate(self, row_ids: Sequence[int], *, cache: bool = True) -> list[Photo]:
+        """Rowids -> photos, in the order given.
+
+        A rowid the source refuses is silently absent, exactly as a refused
+        hash is absent from `resolve_many`. That cannot happen with a frozen
+        policy over a read-only database - the same predicate put the rowid in
+        the spine - and `test_memory_index.py` pins that the two agree.
+        """
+        with self._lock:
+            found = {}
+            for row_id in row_ids:
+                photo = self._cache.get(row_id)
+                if photo is not None:
+                    found[row_id] = photo
+                    self._cache.move_to_end(row_id)
+        missing = [i for i in row_ids if i not in found]
+        if missing:
+            fetched = self._source.fetch(missing)
+            found.update(fetched)
+            # A read bigger than the cache can only evict things worth
+            # keeping to make room for things it is about to drop, so it is
+            # not admitted at all. `all()` over a 300k library would otherwise
+            # flush every recipe's working set on the way past.
+            if cache and len(row_ids) < self._cache_max:
+                with self._lock:
+                    for row_id, photo in fetched.items():
+                        self._cache[row_id] = photo
+                        self._cache.move_to_end(row_id)
+                    while len(self._cache) > self._cache_max:
+                        self._cache.popitem(last=False)
+        return [found[i] for i in row_ids if i in found]
+
+    def _stream(self, row_ids: Sequence[int]) -> Iterator[Photo]:
+        for start in range(0, len(row_ids), _STREAM_CHUNK):
+            yield from self._hydrate(row_ids[start : start + _STREAM_CHUNK], cache=False)
+
+    def close(self) -> None:
+        """Release this thread's handle on the database file, if it has one.
+
+        A no-op for an index built from a list of photos, and transparently
+        undone by the next query. See `_StoreSource.close`.
+        """
+        closer = getattr(self._source, "close", None)
+        if closer is not None:
+            closer()
+
+    # ---- queries. Every one goes through _hydrate or reads the spine.
 
     def all(self) -> list[Photo]:
-        return list(self._photos)
+        return self._hydrate(self._ids)
+
+    def iter_all(self) -> Iterator[Photo]:
+        """Every photo, streamed, without ever holding the library.
+
+        `all()` on a 300,000-photo library is 690 MB of `Photo` objects, and
+        the two callers that most needed it only wanted to COUNT something -
+        how many rows lack a fingerprint, how many match a search string. This
+        yields in bulk-fetched chunks and does not admit them to the cache, so
+        the caller's own filter decides what survives.
+        """
+        return self._stream(self._ids)
 
     def count(self) -> int:
-        return len(self._photos)
+        return len(self._ids)
 
     def get(self, file_hash: str) -> Photo | None:
-        return self._by_hash.get(file_hash)
+        return self._source.lookup((file_hash,)).get(file_hash)
 
     def resolve_many(self, hashes: Iterable[str]) -> list[Photo]:
         """Hashes -> photos, in the order given.
@@ -221,7 +542,9 @@ class MemoryIndex:
         person drops 60 of 600 `durga puja` hits, with no filtering code
         anywhere in the caller.
         """
-        return [p for p in (self._by_hash.get(h) for h in hashes) if p is not None]
+        wanted = list(hashes)
+        found = self._source.lookup(wanted)
+        return [found[h] for h in wanted if h in found]
 
     def by_date(self, year: int, month: int, day: int) -> list[Photo]:
         """Every photo taken on one LOCAL calendar day.
@@ -232,35 +555,49 @@ class MemoryIndex:
         that this is a different index from `by_month_day`, which folds every
         year together for anniversaries.
         """
-        return list(self._by_ymd.get((year, month, day), ()))
+        return self._hydrate(self._by_ymd.get((year, month, day), ()))
 
     def dates(self) -> list[tuple[int, int, int]]:
         """Every local calendar day the library has a photo on, in order."""
         return sorted(self._by_ymd)
 
     def by_year(self, year: int) -> list[Photo]:
-        return list(self._by_year.get(year, ()))
+        return self._hydrate(self._by_year.get(year, ()))
 
     def by_month(self, month: int) -> list[Photo]:
-        return list(self._by_month.get(month, ()))
+        return self._hydrate(self._by_month.get(month, ()))
 
     def by_month_day(self, month: int, day: int) -> list[Photo]:
-        return list(self._by_month_day.get((month, day), ()))
+        return self._hydrate(self._by_month_day.get((month, day), ()))
 
     def by_person(self, person: str) -> list[Photo]:
-        return list(self._by_person.get(person, ()))
+        return self._hydrate(self._by_person.get(person, ()))
 
     def by_pair(self, a: str, b: str) -> list[Photo]:
-        return list(self._by_pair.get(tuple(sorted((a, b))), ()))  # type: ignore[arg-type]
+        return self._hydrate(self._by_pair.get(tuple(sorted((a, b))), ()))  # type: ignore[arg-type]
 
     def by_album(self, album: str) -> list[Photo]:
-        return list(self._by_album.get(album, ()))
+        return self._hydrate(self._by_album.get(album, ()))
 
     def by_gps_cell(self, cell: tuple[float, float]) -> list[Photo]:
-        return list(self._by_cell.get(cell, ()))
+        return self._hydrate(self._by_cell.get(cell, ()))
 
     def images(self) -> list[Photo]:
-        return [p for p in self._photos if p.media_type is MediaType.IMAGE]
+        return self._hydrate(self._image_ids)
+
+    def iter_images(self) -> Iterator[Photo]:
+        """Every image, streamed. `iter_all`'s reason, for images."""
+        return self._stream(self._image_ids)
+
+    def image_day_counts(self) -> Counter[tuple[int, int, int]]:
+        """How many IMAGES fall on each local calendar day, `(y, m, d)`.
+
+        Read off the spine, so it costs no photos at all. `recurring_event`
+        needs exactly this and nothing else to find its bursts, and asking it
+        for `images()` instead is what used to materialise the whole library
+        inside a recipe - the one place the lazy index could not help.
+        """
+        return Counter(self._image_days)
 
     # ---- aggregate views, for building offers cheaply
 
@@ -272,6 +609,15 @@ class MemoryIndex:
 
     def month_days(self) -> list[tuple[int, int]]:
         return sorted(self._by_month_day)
+
+    def year_counts(self) -> Counter[int]:
+        return Counter({year: len(v) for year, v in self._by_year.items()})
+
+    def month_counts(self) -> Counter[int]:
+        return Counter({month: len(v) for month, v in self._by_month.items()})
+
+    def month_day_counts(self) -> Counter[tuple[int, int]]:
+        return Counter({key: len(v) for key, v in self._by_month_day.items()})
 
     def people_counts(self) -> Counter[str]:
         return Counter({name: len(v) for name, v in self._by_person.items()})
@@ -287,6 +633,27 @@ class MemoryIndex:
 
     def years_present(self, photos: list[Photo]) -> set[int]:
         return {p.meta.taken_at_local.year for p in photos if p.meta.taken_at_local}
+
+    # The distinct years of a slice, off the spine. Each is exactly
+    # `years_present(by_X(...))` and `test_memory_index.py` pins that against
+    # every slice of a real index - but it costs no photographs, which is the
+    # difference between an offers pass that reads the library and one that
+    # does not. See `_years_in`.
+
+    def month_years(self, month: int) -> set[int]:
+        return self._years_in(self._by_month.get(month, ()))
+
+    def month_day_years(self, month: int, day: int) -> set[int]:
+        return self._years_in(self._by_month_day.get((month, day), ()))
+
+    def person_years(self, person: str) -> set[int]:
+        return self._years_in(self._by_person.get(person, ()))
+
+    def pair_years(self, a: str, b: str) -> set[int]:
+        return self._years_in(self._by_pair.get(tuple(sorted((a, b))), ()))  # type: ignore[arg-type]
+
+    def album_years(self, album: str) -> set[int]:
+        return self._years_in(self._by_album.get(album, ()))
 
     # ---- public-safe
 

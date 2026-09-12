@@ -271,6 +271,51 @@ def _undt(value: str | None) -> datetime | None:
     return datetime.fromisoformat(value) if value else None
 
 
+def row_to_photo(row: sqlite3.Row) -> Photo:
+    """One `photos` row to a `Photo`. Extra columns in the row are ignored,
+    so `SELECT rowid AS _rowid, *` works as well as `SELECT *`."""
+    gps = None
+    if row["gps_lat"] is not None and row["gps_lon"] is not None:
+        gps = Gps(lat=row["gps_lat"], lon=row["gps_lon"], alt=row["gps_alt"])
+    meta = PhotoMeta(
+        taken_at_utc=_undt(row["taken_at_utc"]),
+        taken_at_local=_undt(row["taken_at_local"]),
+        tz_source=TzSource(row["tz_source"]),
+        gps=gps,
+        people=json.loads(row["people"]),
+        face_regions=[FaceRegion(**r) for r in json.loads(row["face_regions"])],
+        keywords=json.loads(row["keywords"]),
+        description=row["description"],
+        favorite=bool(row["favorite"]),
+        camera_make=row["camera_make"],
+        camera_model=row["camera_model"],
+        width=row["width"],
+        height=row["height"],
+        exif_taken_at_utc=_undt(row["exif_taken_at_utc"]),
+        takeout_people=json.loads(row["takeout_people"]),
+        archived=bool(row["archived"]),
+        trashed=bool(row["trashed"]),
+        phash=_unsigned64(row["phash"]),
+        sharpness=row["sharpness"],
+        phash_error=row["phash_error"],
+        brightness=row["brightness"],
+        colour=row["colour"],
+    )
+    return Photo(
+        file_hash=row["file_hash"],
+        paths=[Path(x) for x in json.loads(row["paths"])],
+        media_type=MediaType(row["media_type"]),
+        meta=meta,
+        first_seen=_undt(row["first_seen"]),
+        last_seen=_undt(row["last_seen"]),
+        albums=json.loads(row["albums"]),
+        edited_of=row["edited_of"],
+        source=row["source"],
+        metadata_conflict=bool(row["metadata_conflict"]),
+        sidecar_match=row["sidecar_match"],
+    )
+
+
 class PhotoStore:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
@@ -979,45 +1024,8 @@ class PhotoStore:
         ).fetchone()
         return self._row_to_photo(row) if row else None
 
-    @staticmethod
-    def _row_to_photo(row: sqlite3.Row) -> Photo:
-        gps = None
-        if row["gps_lat"] is not None and row["gps_lon"] is not None:
-            gps = Gps(lat=row["gps_lat"], lon=row["gps_lon"], alt=row["gps_alt"])
-        meta = PhotoMeta(
-            taken_at_utc=_undt(row["taken_at_utc"]),
-            taken_at_local=_undt(row["taken_at_local"]),
-            tz_source=TzSource(row["tz_source"]),
-            gps=gps,
-            people=json.loads(row["people"]),
-            face_regions=[FaceRegion(**r) for r in json.loads(row["face_regions"])],
-            keywords=json.loads(row["keywords"]),
-            description=row["description"],
-            favorite=bool(row["favorite"]),
-            camera_make=row["camera_make"],
-            camera_model=row["camera_model"],
-            width=row["width"],
-            height=row["height"],
-            exif_taken_at_utc=_undt(row["exif_taken_at_utc"]),
-            takeout_people=json.loads(row["takeout_people"]),
-            archived=bool(row["archived"]),
-            trashed=bool(row["trashed"]),
-            phash=_unsigned64(row["phash"]),
-            sharpness=row["sharpness"],
-            phash_error=row["phash_error"],
-            brightness=row["brightness"],
-            colour=row["colour"],
-        )
-        return Photo(
-            file_hash=row["file_hash"],
-            paths=[Path(x) for x in json.loads(row["paths"])],
-            media_type=MediaType(row["media_type"]),
-            meta=meta,
-            first_seen=_undt(row["first_seen"]),
-            last_seen=_undt(row["last_seen"]),
-            albums=json.loads(row["albums"]),
-            edited_of=row["edited_of"],
-            source=row["source"],
-            metadata_conflict=bool(row["metadata_conflict"]),
-            sidecar_match=row["sidecar_match"],
-        )
+    #: Public as `rekindle.db.row_to_photo`, because `memory.index` hydrates
+    #: rows through its OWN read-only connection - the store it was opened
+    #: from is long closed by then - and a second copy of this function is a
+    #: second place for a column to be forgotten.
+    _row_to_photo = staticmethod(row_to_photo)

@@ -138,7 +138,12 @@ def status(workshop: Workshop) -> dict:
         payload["withheld"] = report.excluded
         payload["withheld_by_reason"] = dict(sorted(report.by_reason.items()))
         payload["unfingerprinted"] = sum(
-            1 for p in library.index.all() if p.meta.phash is None and not p.meta.phash_error
+            # `iter_all`, not `all`: this is a COUNT, and materialising a
+            # 300,000-photo library to produce one integer is the exact
+            # thing the lazy index exists to stop.
+            1
+            for p in library.index.iter_all()
+            if p.meta.phash is None and not p.meta.phash_error
         )
         # The oldest and newest year with a photograph in it. The page prints
         # it under the wordmark, and "19,318 photographs, 2000-2026" is a

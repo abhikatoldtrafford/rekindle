@@ -90,15 +90,58 @@ v1 is structured queries over real metadata.
 | Method | Returns |
 |---|---|
 | `all()`, `images()`, `count()` | every allowed photo |
+| `iter_all()`, `iter_images()` | the same, streamed — see *Big libraries* below |
 | `by_year(y)`, `by_month(m)`, `by_month_day(m, d)` | temporal slices |
+| `by_date(y, m, d)`, `dates()` | one local calendar day; every day present |
 | `by_person(name)`, `by_pair(a, b)` | face tags (order-independent pairs) |
 | `by_album(title)` | album membership, after any configured aliases |
 | `by_gps_cell(cell)` | a 0.25° GPS cell |
 | `years()`, `months()`, `month_days()` | what exists, for building offers |
+| `year_counts()`, `month_counts()`, `month_day_counts()` | counts |
 | `people_counts()`, `pair_counts()`, `album_counts()`, `gps_cells()` | counts |
+| `image_day_counts()` | images per local calendar day, `(y, m, d) -> n` |
+| `month_years(m)`, `month_day_years(m, d)` | the distinct years of a slice |
+| `person_years(p)`, `pair_years(a, b)`, `album_years(t)` | the same, per subject |
 | `earliest(photos)`, `latest(photos)` | chronological ends, tie-broken stably |
 | `resolve_path(photo)` | the first path that exists on disk, or None |
 | `is_public_safe(photo)` | the publish rule |
+
+## Big libraries: what your recipe costs
+
+The index does **not** hold the library. It holds SQLite rowids and fetches
+`Photo` objects when you read one, through a bounded cache — measured on a
+synthetic 300,000-photo library, holding them all is 681 MB. Nothing about the
+interface changes, but two habits matter once a library is large:
+
+**Prefer a count over a list.** `iter_all()` and `iter_images()` stream in
+chunks and never admit them to the cache, so `sum(1 for p in index.iter_all()
+if ...)` costs the matches rather than the library. `all()` and `images()`
+still return a real list and are still correct — they are just the expensive
+way to answer a question about a number.
+
+**`offers()` should not touch a photograph.** This is the big one, and it is
+the mistake every built-in recipe was making. An offer needs a count and
+usually a set of years; both are on the spine, and asking for the slice to
+compute them reads the library. Measured on a synthetic 300,000-photo library,
+`year_in_review.offers` spent **38.7 seconds hydrating 298,000 photographs to
+produce 24 integers** that `year_counts()` already had. Use `year_counts()`,
+`month_counts()`, `month_day_counts()`, `people_counts()`, `pair_counts()`,
+`album_counts()` for the count and `month_years()`, `month_day_years()`,
+`person_years()`, `pair_years()`, `album_years()` for the years. Keep
+`by_*()` for `select()`, where you genuinely need the photographs.
+
+**Ask the narrowest question you can.** `recurring_event` used to call
+`index.images()` and filter it down to the fortnight it cared about, which
+materialised every photograph in the library once per offer; it now reads
+`image_day_counts()` and then asks `by_date` for the days its bursts actually
+cover. Same memories out, and the peak is the memory rather than the library.
+
+**Do not re-derive the same list.** A recipe that calls `by_album(x)` in
+`offers` and again in `select` is fine — the cache serves the second call on
+any ordinary library. A recipe that iterates the whole library several times
+per offer is not, and no amount of laziness underneath will rescue it.
+`then_and_now` still does this and is documented in
+[known-limitations.md](known-limitations.md) as the one left.
 
 ## Rules
 
