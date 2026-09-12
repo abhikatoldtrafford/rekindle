@@ -28,3 +28,21 @@ import os
 # non-determinism this removes.
 os.environ["COLUMNS"] = "200"
 os.environ["LINES"] = "50"
+
+# And no colour. `rich` styles an option name in SEGMENTS - `--out` becomes
+# `-` ESC `-out` ESC - so `"--frame-ms" in output` is false in coloured output
+# however the whitespace is handled. That is what turned CI red while every
+# local run was green: typer colours help unconditionally, and a local
+# CliRunner is not a terminal.
+#
+# No test asserts anything ABOUT colour. Turning it off here removes the whole
+# failure class rather than hardening one assertion at a time, and it makes a
+# developer's `FORCE_COLOR` as harmless as their `COLUMNS`.
+#
+# All three lines below are deliberately redundant - measured: removing any
+# ONE of them changes nothing, removing all three fails. They cover different
+# libraries reading different variables, and the cost of keeping the belt as
+# well as the braces is three lines.
+os.environ["NO_COLOR"] = "1"
+os.environ["TERM"] = "dumb"
+os.environ.pop("FORCE_COLOR", None)
