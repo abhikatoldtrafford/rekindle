@@ -35,6 +35,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from rekindle.extras import install_command
 from rekindle.semantic.availability import SemanticUnavailable
 from rekindle.semantic.registry import (
     AESTHETIC_MODELS,
@@ -137,7 +138,7 @@ def _hub():
     except ImportError as exc:
         raise SemanticUnavailable(
             "downloading models needs huggingface_hub, from the 'semantic' "
-            "extra (uv sync --extra semantic)"
+            f"extra ({install_command('semantic')})"
         ) from exc
     return snapshot_download
 

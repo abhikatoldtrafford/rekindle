@@ -11,6 +11,7 @@ from rich.table import Table
 
 from rekindle.db import PhotoStore
 from rekindle.enrich.takeout import EnrichReport
+from rekindle.extras import install_command_markup
 from rekindle.meta.exif import HEIF_AVAILABLE
 from rekindle.models import SourceReport, TzSource
 
@@ -116,7 +117,7 @@ def render(diagnosis: Diagnosis, console: Console) -> None:
     if not HEIF_AVAILABLE:
         console.print(
             "\n[dim]HEIC support: disabled. Install with "
-            "`uv sync --extra heic` if your library has iPhone photos.[/dim]"
+            f"{install_command_markup('heic')} if your library has iPhone photos.[/dim]"
         )
 
     for warning in diagnosis.warnings:

@@ -16,6 +16,8 @@ from __future__ import annotations
 import importlib.util
 from dataclasses import dataclass
 
+from rekindle.extras import install_hint
+
 #: The light extra: everything except torch. Enough for CPU inference via ONNX.
 EXTRA_CPU = "semantic"
 #: The heavy extra: adds torch + transformers, and on Windows/Linux a CUDA build.
@@ -84,14 +86,12 @@ def require(*, gpu: bool = False, feature: str = "This feature") -> None:
             return
         raise SemanticUnavailable(
             f"{feature} needs the '{EXTRA_GPU}' extra "
-            f"(missing: {', '.join(found.missing_gpu)}). "
-            f"Install it with:  uv sync --extra {EXTRA_GPU}"
+            f"(missing: {', '.join(found.missing_gpu)}). " + install_hint(EXTRA_GPU)
         )
     if found.any:
         return
     raise SemanticUnavailable(
         f"{feature} needs the '{EXTRA_CPU}' extra "
-        f"(missing: {', '.join(found.missing_cpu)}). "
-        f"Install it with:  uv sync --extra {EXTRA_CPU}   "
-        f"(or --extra {EXTRA_GPU} for the CUDA runtime)"
+        f"(missing: {', '.join(found.missing_cpu)}). " + install_hint(EXTRA_CPU) + "   "
+        f"(or {EXTRA_GPU} instead of {EXTRA_CPU}, for the CUDA runtime)"
     )

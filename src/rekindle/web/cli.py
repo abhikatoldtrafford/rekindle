@@ -16,6 +16,7 @@ from pathlib import Path
 import typer
 from rich.console import Console
 
+from rekindle.extras import install_command_markup
 from rekindle.memory.render.gif import DEFAULT_FRAME_MS, DEFAULT_MAX_FRAMES, TITLE_MS
 from rekindle.memory.render.mp4 import FFMPEG_MISSING
 from rekindle.memory.spec import MemorySpec
@@ -73,7 +74,7 @@ def ui_cmd(
     if not app.library.semantic_available():
         console.print(
             "[dim]Prompt search is unavailable: install the semantic extra with "
-            "`uv sync --extra semantic` (or --extra semantic-gpu) and run "
+            f"`{install_command_markup('semantic')}` (or semantic-gpu) and run "
             "`rekindle semantic embed`. Everything else works without it.[/dim]"
         )
     console.print("[dim]Ctrl-C to stop.[/dim]")

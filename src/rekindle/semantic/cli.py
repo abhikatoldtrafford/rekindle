@@ -23,6 +23,7 @@ from rich.table import Table
 # `meta.orientation` imports nothing heavier than json and pathlib - PIL is
 # deferred inside its functions - so naming its default here costs `rekindle
 # --help` nothing and stops the CLI and the module disagreeing about it.
+from rekindle.extras import markup_safe
 from rekindle.meta.orientation import MIN_MARGIN
 from rekindle.semantic.availability import SemanticUnavailable
 from rekindle.semantic.embed import PREFETCH_BATCHES
@@ -52,7 +53,10 @@ def _db_path(data_dir: Path) -> Path:
 
 
 def _fail(message: str, code: int = EXIT_UNAVAILABLE) -> typer.Exit:
-    console.print(f"[red]{message}[/red]")
+    # ESCAPED. Every message that reaches here may name an install command,
+    # and `pip install 'rekindle[semantic]'` is valid Rich markup that Rich
+    # deletes - see `extras.markup_safe`.
+    console.print(f"[red]{markup_safe(message)}[/red]")
     return typer.Exit(code=code)
 
 
@@ -117,7 +121,7 @@ def semantic_doctor(
     try:
         report = resolve_device(device)  # type: ignore[arg-type]
     except DeviceUnavailable as exc:
-        console.print(f"  [red]{exc}[/red]")
+        console.print(f"  [red]{markup_safe(str(exc))}[/red]")
     else:
         for line in report.lines():
             style = "yellow" if line.startswith("!") else ""

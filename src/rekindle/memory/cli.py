@@ -18,6 +18,7 @@ from rich.console import Console
 from rich.table import Table
 
 from rekindle.db import PhotoStore
+from rekindle.extras import install_command_markup, markup_safe
 from rekindle.memory import captioning, engine
 from rekindle.memory.composition import FIT_PAD, describe_drops
 from rekindle.memory.history import (
@@ -244,7 +245,7 @@ def _semantic_support(data_dir: Path, *, announce: bool = True):
             console.print(
                 "[dim]No embeddings available (the 'semantic' extra is not "
                 "installed), so near-duplicates are judged on the perceptual "
-                "hash and colour alone. `uv sync --extra semantic` to add "
+                f"hash and colour alone. `{install_command_markup('semantic')}` to add "
                 "them.[/dim]"
             )
         return None
@@ -253,7 +254,10 @@ def _semantic_support(data_dir: Path, *, announce: bool = True):
 
         support = open_support(data_dir)
     except Exception as exc:  # pragma: no cover - a corrupt store, reported
-        console.print(f"[yellow]Embedding store unusable ({exc}); continuing without it.[/yellow]")
+        console.print(
+            f"[yellow]Embedding store unusable ({markup_safe(str(exc))}); "
+            "continuing without it.[/yellow]"
+        )
         return None
     if support is None:
         if announce:
@@ -406,7 +410,7 @@ def _vision_support(data_dir: Path):
     if not probe().any:
         console.print(
             "[dim]Grounded captions need the 'semantic' extra "
-            "(`uv sync --extra semantic`); the deterministic captions were "
+            f"(`{install_command_markup('semantic')}`); the deterministic captions were "
             "used.[/dim]"
         )
         return None
@@ -434,7 +438,9 @@ def _vision_support(data_dir: Path):
         encoder = load_encoder(spec.key, device="auto", cache_dir=cache_dir_for(data_dir)).encoder
         return describe.build(store, encoder)
     except Exception as exc:  # pragma: no cover - reported, never fatal
-        console.print(f"[yellow]Caption grounding unavailable ({exc}); continuing.[/yellow]")
+        console.print(
+            f"[yellow]Caption grounding unavailable ({markup_safe(str(exc))}); continuing.[/yellow]"
+        )
         return None
 
 
@@ -496,7 +502,7 @@ def _maybe_caption(
     try:
         captioner = captioner_from_env()
     except LLMUnavailable as exc:
-        console.print(f"[yellow]![/yellow] {exc}")
+        console.print(f"[yellow]![/yellow] {markup_safe(str(exc))}")
         # Grounded captions are strictly better than the deterministic ones
         # and cost nothing more, so a missing key falls back to CLIP rather
         # than all the way to the year.
@@ -1196,7 +1202,7 @@ def _refused_by_judge(generator, query, index, judge: bool) -> bool:
     try:
         reason = generator.plausible(query.text, tags_mod.vocabulary_of(index))
     except LLMUnavailable as exc:
-        console.print(f"[yellow]![/yellow] {exc}")
+        console.print(f"[yellow]![/yellow] {markup_safe(str(exc))}")
         return False
     if reason is None:
         return False

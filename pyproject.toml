@@ -1,10 +1,36 @@
 [project]
 name = "rekindle"
 version = "0.1.0"
-description = "Turn your photo library into memories"
+description = "Turn a folder of photos into memories - slideshows with music, entirely on your own machine"
 readme = "README.md"
 license = "MIT"
 requires-python = ">=3.12"
+authors = [{ name = "Abhik Maiti", email = "abhikatoldtrafford@gmail.com" }]
+keywords = [
+    "photos",
+    "google-takeout",
+    "slideshow",
+    "memories",
+    "photo-library",
+    "exif",
+    "local-first",
+    "privacy",
+]
+# Trove classifiers, chosen to be TRUE rather than aspirational. No
+# "Programming Language :: Python :: 3.13" until it is tested; no
+# "Development Status :: 5 - Production/Stable" for a 0.1.0.
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Environment :: Console",
+    "Intended Audience :: End Users/Desktop",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Multimedia :: Graphics",
+    "Topic :: Multimedia :: Video",
+    "Topic :: Utilities",
+    "Typing :: Typed",
+]
 dependencies = [
     "pillow>=11.1.0",
     "defusedxml>=0.7.1",
@@ -38,6 +64,13 @@ semantic-gpu = [
     "torch>=2.6",
     "transformers>=4.45",
 ]
+
+[project.urls]
+Homepage = "https://github.com/abhikatoldtrafford/rekindle"
+Repository = "https://github.com/abhikatoldtrafford/rekindle"
+Issues = "https://github.com/abhikatoldtrafford/rekindle/issues"
+"Known limitations" = "https://github.com/abhikatoldtrafford/rekindle/blob/main/docs/known-limitations.md"
+Contributing = "https://github.com/abhikatoldtrafford/rekindle/blob/main/CONTRIBUTING.md"
 
 [project.scripts]
 rekindle = "rekindle.cli:app"
@@ -76,6 +109,34 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/rekindle"]
+
+# THE SDIST IS A WHITELIST, NOT A BLACKLIST, and that is not fastidiousness.
+#
+# This repository sits next to a 61 GB personal photo export. Hatchling's
+# default is "everything git does not ignore", and `.gitignore` here contains
+# `!.env.example`, a NEGATION - which un-ignores that filename at any depth.
+# The first sdist built from this tree therefore reached into
+# `.claude/worktrees/*/` and packaged three other agents' copies of it. Nothing
+# secret escaped, but the mechanism would have packaged anything else those
+# directories held, and this is a public package with no undo.
+#
+# So the sdist lists what it wants. A file that is not named here cannot be
+# shipped by accident, whatever anyone later puts in this directory.
+# `tests/test_packaging.py` asserts the negative: no photo, no database, no
+# worktree, nothing outside these paths.
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src/rekindle",
+    "/tests",
+    "/docs/*.md",
+    "/.github/workflows",
+    "/README.md",
+    "/LICENSE",
+    "/CONTRIBUTING.md",
+    "/SECURITY.md",
+    "/pyproject.toml",
+    "/uv.lock",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/abhikatoldtrafford/rekindle/actions/workflows/ci.yml/badge.svg)](https://github.com/abhikatoldtrafford/rekindle/actions)
 [![Python 3.12+](https://img.shields.io/badge/python-3.12%2B-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](https://github.com/abhikatoldtrafford/rekindle/blob/main/LICENSE)
 [![No cloud](https://img.shields.io/badge/runs-100%25%20local-brightgreen.svg)](#privacy)
 
 Twenty thousand photos sitting in a folder is not a memory. It's a filing
@@ -76,33 +76,91 @@ reason. A memory that silently drops your favourite photo is indistinguishable
 from a bug, so it doesn't do that.
 
 **It's honest about what it can't do.** [Known limits](#known-limits) is a real
-section, not a disclaimer. Videos don't appear in memories yet. A photographed
-document can slip through. We write those down.
+section, not a disclaimer. A video appears only as one extracted still, and
+only if ffmpeg is installed. A photographed document can slip through. We
+write those down.
 
 **Nothing leaves your machine.** The default configuration makes no network
 calls at all.
 
 ---
 
+## 📦 Install
+
+**If you just want to use it**, and have Python 3.12 or newer:
+
+```bash
+pipx install rekindle          # or: pip install rekindle
+rekindle --version
+```
+
+`pipx` is the right tool here — it puts `rekindle` on your PATH in its own
+environment, so it cannot collide with anything else you have installed.
+Four dependencies, no compiler, no CUDA, no account. Everything below then
+works as plain `rekindle ...` with no `uv run` in front of it.
+
+**If you want to work on it**, clone and use [uv](https://docs.astral.sh/uv/):
+
+```bash
+git clone https://github.com/abhikatoldtrafford/rekindle && cd rekindle
+uv sync
+uv run rekindle --version
+```
+
+Optional extras, in either world:
+
+| Extra | What it adds | Cost |
+|---|---|---|
+| `heic` | iPhone `.HEIC` photos | ~10 MB |
+| `semantic` | Search by description, scene clusters, aesthetics, the face gate, grounded captions — all on CPU | ~120 MB |
+| `semantic-gpu` | The same, on an NVIDIA GPU | ~2.5 GB |
+
+```bash
+pipx install 'rekindle[semantic]'      # installed copy
+uv sync --extra semantic               # source checkout
+```
+
+Every command tells you which of these it needs, **phrased for how you
+installed it** — a `pipx` user is never told to run `uv sync`. Nothing else
+degrades: without any extra you still get the index, all nine recipes, GIF,
+WebP and MP4.
+
+> **A CUDA caveat that packaging cannot fix.** PyPI's Windows and Linux
+> `torch` wheels are CPU-only; the CUDA builds live on PyTorch's own index.
+> This repository points `uv` at it (see `[tool.uv.sources]`), and that
+> instruction is a *uv* setting — it cannot be expressed in wheel metadata, so
+> `pipx install 'rekindle[semantic-gpu]'` gives you a CPU torch. `rekindle
+> semantic doctor` says so in as many words rather than letting you discover
+> it as unexplained slowness. To get CUDA from an installed copy, follow
+> [pytorch.org](https://pytorch.org/get-started/locally/) and install torch
+> yourself into the same environment.
+
+**ffmpeg** is optional and unbundled. Without it you get GIF and WebP but no
+MP4, and no still frames from your videos. With it on PATH, both appear.
+
+---
+
 ## ⚡ Quick start
 
 ```bash
-uv sync
-uv run rekindle doctor ~/Pictures    # what metadata do you actually have?
-uv run rekindle index ~/Pictures     # build the local index
-uv run rekindle enrich ~/Pictures    # read Google Takeout sidecars, if you have them
-uv run rekindle fingerprint          # one-time pass; enables dedup
+rekindle doctor ~/Pictures    # what metadata do you actually have?
+rekindle index ~/Pictures     # build the local index
+rekindle enrich ~/Pictures    # read Google Takeout sidecars, if you have them
+rekindle fingerprint          # one-time pass; enables dedup and video stills
 ```
 
 Then make something:
 
 ```bash
-uv run rekindle memories                     # what could this library produce?
-uv run rekindle memory --recipe album_story --key "Kashmir"
-uv run rekindle memory --auto                # today's anniversary, if any
-uv run rekindle ui                           # edit a memory in your browser
-uv run rekindle watch ~/Pictures             # foreground; prints, never renders
+rekindle memories                     # what could this library produce?
+rekindle memory --recipe album_story --key "Kashmir"
+rekindle memory --all-recipes         # one of each, from every recipe
+rekindle memory --auto                # today's anniversary, if any
+rekindle ui                           # edit a memory in your browser
+rekindle watch ~/Pictures             # foreground; prints, never renders
 ```
+
+*(In a source checkout, put `uv run` in front of each.)*
 
 A memory is a **GIF** (always) plus an **MP4** (when ffmpeg is on PATH),
 written to `memories/` alongside the `MemorySpec` that produced it — so you can
@@ -123,11 +181,11 @@ and aren't built yet — v1 selection is deterministic and structured.
 `rekindle memories` lists everything available.
 
 > **Status: early development.** The memory engine is designed in
-> [the M2 spec](docs/superpowers/specs/2026-09-11-memories-design.md); the
-> wider architecture is in [the v1 spec](docs/superpowers/specs/2026-09-10-rekindle-design.md),
-> which went through an [independent adversarial review](docs/superpowers/specs/audit-v1-resolutions.md).
+> [the M2 spec](https://github.com/abhikatoldtrafford/rekindle/blob/main/docs/superpowers/specs/2026-09-11-memories-design.md); the
+> wider architecture is in [the v1 spec](https://github.com/abhikatoldtrafford/rekindle/blob/main/docs/superpowers/specs/2026-09-10-rekindle-design.md),
+> which went through an [independent adversarial review](https://github.com/abhikatoldtrafford/rekindle/blob/main/docs/superpowers/specs/audit-v1-resolutions.md).
 > How it was actually built, including the bugs that shaped it, is in the
-> [decision log](docs/decision-log-memory-engine.md). Issues and PRs welcome.
+> [decision log](https://github.com/abhikatoldtrafford/rekindle/blob/main/docs/decision-log-memory-engine.md). Issues and PRs welcome.
 
 ---
 ## Getting your photos in
@@ -162,13 +220,13 @@ corrected capture dates, descriptions and album titles — into an index that
 `rekindle index` already built. Run `rekindle doctor --from-index` afterwards
 to see what it found.
 
-**[→ Exporting from Google Photos](docs/connecting-google-photos.md)**
+**[→ Exporting from Google Photos](https://github.com/abhikatoldtrafford/rekindle/blob/main/docs/connecting-google-photos.md)**
 
 ### Other libraries
 
 Immich, Apple Photos, Nextcloud and PhotoPrism all expose their libraries
 properly, and several give face regions that Google never did. Each is one
-`Source` implementation: [writing-sources.md](docs/writing-sources.md).
+`Source` implementation: [writing-sources.md](https://github.com/abhikatoldtrafford/rekindle/blob/main/docs/writing-sources.md).
 
 
 `doctor` writes nothing at all, so it is safe to point at anything. `enrich`
@@ -183,6 +241,7 @@ model download; everything afterwards runs with no network at all.
 
 ```bash
 uv sync --extra semantic-gpu        # torch + CUDA;  --extra semantic for CPU/ONNX
+                                    # installed copy: pipx install 'rekindle[semantic]'
 uv run rekindle semantic setup      # fetch and checksum the weights, once
 uv run rekindle semantic doctor     # which device will actually be used?
 
@@ -211,8 +270,8 @@ A ten-armed goddess with a lion and a black goddess with a red tongue are not
 close at all. Measured again with the descriptions: none.
 
 The descriptions come from a checked-in
-[festival corpus](src/rekindle/memory/corpus/festivals.toml) and a checked-in
-[tag cache](src/rekindle/memory/corpus/prompt_tags.json) — both editable data
+[festival corpus](https://github.com/abhikatoldtrafford/rekindle/blob/main/src/rekindle/memory/corpus/festivals.toml) and a checked-in
+[tag cache](https://github.com/abhikatoldtrafford/rekindle/blob/main/src/rekindle/memory/corpus/prompt_tags.json) — both editable data
 files, both working with no API key. Set `OPENAI_API_KEY` and anything they do
 not cover is described by a language model once and cached, so the same prompt
 gives the same memory forever.
@@ -224,7 +283,7 @@ words** — eight statistics have now been tested as a refusal signal on the
 reference library and all eight failed. So the command prints what it searched
 for, which days it found, the month and year histogram of what it built, and
 then says: *look at the memory before you keep it.* The whole measurement is
-in [the decision log](docs/decision-log-prompt-memories.md).
+in [the decision log](https://github.com/abhikatoldtrafford/rekindle/blob/main/docs/decision-log-prompt-memories.md).
 
 `semantic setup` is the only command in rekindle that makes a network
 request. Every other command loads from the local cache and fails with a
@@ -255,7 +314,7 @@ A scenery memory makes them the subject. It works the same way a prompt memory
 does — a concept becomes visual descriptions, each is searched separately, and
 a photograph ranks by how many of them agree — except that the concepts come
 from a checked-in, editable
-[scenery corpus](src/rekindle/memory/corpus/scenery.toml) rather than from
+[scenery corpus](https://github.com/abhikatoldtrafford/rekindle/blob/main/src/rekindle/memory/corpus/scenery.toml) rather than from
 whatever you typed.
 
 **Every entry in that file was graded by looking at what it returned**, and
@@ -267,7 +326,7 @@ library's night photographs did not come out.
 
 The scene clusters `rekindle semantic cluster` already produces are **not**
 used for this, and cannot be:
-[known-limitations.md](docs/known-limitations.md) records cluster #16, 270
+[known-limitations.md](https://github.com/abhikatoldtrafford/rekindle/blob/main/docs/known-limitations.md) records cluster #16, 270
 photographs of institutional buildings labelled *"a hospital or a clinic"*,
 containing no hospital. A curated file is something you can read, disagree
 with, and fix.
@@ -313,7 +372,7 @@ by a `default-src 'self'` policy on every response. The URL carries a token
 that changes every run, `Host` and `Origin` are checked, and request logging is
 off by default, because a request log is a record of which of your photographs
 you looked at. How it was built, and the three controls that were cut, is in
-[the decision log](docs/decision-log-memory-builder.md).
+[the decision log](https://github.com/abhikatoldtrafford/rekindle/blob/main/docs/decision-log-memory-builder.md).
 
 ## How it works
 
@@ -368,7 +427,7 @@ uv run rekindle scenery sea --captions gpt
 | `gpt` | a language model phrasing those terms and the fact sheet | the above + `OPENAI_API_KEY` |
 
 **1. CLIP grounds it.** Every word that can appear comes from
-[a checked-in vocabulary](src/rekindle/memory/corpus/caption_vocab.toml) with
+[a checked-in vocabulary](https://github.com/abhikatoldtrafford/rekindle/blob/main/src/rekindle/memory/corpus/caption_vocab.toml) with
 five rules about what may never be in it — no proper nouns, no people or
 relationships, no sentiment or occasion, no sensitive context, nothing not
 physically in the frame — and the test suite fails the build if you add one.
@@ -457,18 +516,18 @@ Everything runs locally by default — no API key needed, no network calls made,
 no audio downloaded, and your original files are never modified. If you enable
 the optional LLM captions, **only a fact sheet is sent** — dates, counts, names,
 albums and coordinates drawn from your index. Never the pixels, never a file
-path, never your library. See [SECURITY.md](SECURITY.md).
+path, never your library. See [SECURITY.md](https://github.com/abhikatoldtrafford/rekindle/blob/main/SECURITY.md).
 
 ## Contributing
 
 Two high-value contributions, neither requiring core changes:
 
 - **A new memory type** — one file implementing one protocol:
-  [writing-recipes.md](docs/writing-recipes.md)
+  [writing-recipes.md](https://github.com/abhikatoldtrafford/rekindle/blob/main/docs/writing-recipes.md)
 - **A new photo source** — Immich, Apple Photos, Nextcloud:
-  [writing-sources.md](docs/writing-sources.md)
+  [writing-sources.md](https://github.com/abhikatoldtrafford/rekindle/blob/main/docs/writing-sources.md)
 
-See [CONTRIBUTING.md](CONTRIBUTING.md).
+See [CONTRIBUTING.md](https://github.com/abhikatoldtrafford/rekindle/blob/main/CONTRIBUTING.md).
 
 ## License
 

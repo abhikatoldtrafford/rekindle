@@ -42,6 +42,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from rekindle.extras import install_command
 from rekindle.semantic.availability import SemanticUnavailable
 from rekindle.semantic.vectors import Matrix, normalise
 
@@ -60,7 +61,7 @@ def _numpy():
         import numpy as np
     except ImportError as exc:
         raise SemanticUnavailable(
-            "clustering needs numpy, from the 'semantic' extra (uv sync --extra semantic)"
+            f"clustering needs numpy, from the 'semantic' extra ({install_command('semantic')})"
         ) from exc
     return np
 

@@ -14,6 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from rekindle.extras import install_command
 from rekindle.semantic.availability import SemanticUnavailable
 from rekindle.semantic.store import ITEM_SIZE, EmbeddingStore, StoreError
 
@@ -26,7 +27,7 @@ def _numpy():
         import numpy as np
     except ImportError as exc:
         raise SemanticUnavailable(
-            "vector maths needs numpy, from the 'semantic' extra (uv sync --extra semantic)"
+            f"vector maths needs numpy, from the 'semantic' extra ({install_command('semantic')})"
         ) from exc
     return np
 

@@ -107,6 +107,20 @@ uv run ruff check .
 uv run ruff format .
 ```
 
+### Packaging
+
+```bash
+uv build                      # wheel + sdist into dist/
+uv run pytest tests/test_packaging.py
+```
+
+`tests/test_packaging.py` checks the wheel's contents only when `dist/` holds
+one, so build first or the interesting half silently skips.
+
+**Publishing is not automated and no agent does it.** See
+[docs/publishing.md](https://github.com/abhikatoldtrafford/rekindle/blob/main/docs/publishing.md)
+for the single command, what it irreversibly does, and the checklist before it.
+
 ### The semantic extras
 
 `rekindle semantic ...` (embeddings, search, scene clusters, aesthetic
