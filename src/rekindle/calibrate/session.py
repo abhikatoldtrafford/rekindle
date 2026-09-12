@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from rekindle import config
-from rekindle.calibrate import plan, sampling, state
+from rekindle.calibrate import labels, plan, sampling, state
 from rekindle.calibrate.judge import Derived, Judgement, derive, next_probe
 from rekindle.calibrate.plan import Availability, Step
 from rekindle.models import MediaType, Photo
@@ -195,7 +195,17 @@ class Session:
         return sampling.nearest(pool, target, used=used)
 
     def answer(self, step: Step, example: sampling.Example, said_yes: bool) -> Derived:
-        """Record one judgement and re-derive. Persists immediately."""
+        """Record one judgement and re-derive. Persists immediately.
+
+        TWO WRITES, TWO LIFETIMES. `calibration.json` is working state and
+        REPLACES an earlier answer about the same photograph, so changing your
+        mind changes the threshold. `labels.jsonl` is append-only and keeps
+        both, because a judgement that was given is a fact about a moment and
+        a later one about the same photograph is a second fact. See
+        `calibrate.labels` for why that distinction is worth two files, and
+        `docs/decision-log-calibration-labels.md` for what the evidence is
+        currently worth.
+        """
         st = self._state(step)
         st.judgements = [j for j in st.judgements if j.subject != example.subject]
         st.judgements.append(
@@ -210,6 +220,15 @@ class Session:
             )
         )
         self.save()
+        labels.append(
+            self.data_dir,
+            setting=step.setting,
+            subject=example.subject,
+            value=example.value,
+            rejected=said_yes,
+            question=step.question,
+            library_size=len(self.photos),
+        )
         found = self.derived(step)
         if found.usable:
             st.proposed = _quantise(step.setting, found.value)

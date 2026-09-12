@@ -13,8 +13,13 @@ thread that created it. Nothing here holds one open: the index is built in the
 loader thread and the store is closed immediately afterwards, and the two
 operations that must WRITE - dismissing a memory, recording that one was
 surfaced - open a fresh store inside the calling thread and close it again.
-The index itself is immutable in-memory data, so every reader thread can share
-it without a lock.
+
+The index does hold a READ-ONLY connection of its own, because it loads photos
+lazily and the store it was opened from is gone by the time a request arrives.
+That connection is thread-local and its LRU cache is behind a lock, both
+inside `MemoryIndex`, so sharing one index across request threads is still
+safe - but it is safe because that class arranges it, not because the object
+is inert. See `memory.index`.
 """
 
 from __future__ import annotations
@@ -163,7 +168,9 @@ class Library:
         if not needle:
             return []
         hits: list[tuple[Photo, str]] = []
-        for photo in index.all():
+        # Streamed: only the MATCHES are kept, so a search over a large
+        # library costs the hits rather than the library.
+        for photo in index.iter_all():
             why = _metadata_match(photo, needle)
             if why:
                 hits.append((photo, why))

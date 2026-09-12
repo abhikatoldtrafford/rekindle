@@ -21,6 +21,7 @@ from rekindle.calibrate import state
 from rekindle.cli import app
 from rekindle.db import PhotoStore
 from rekindle.models import MediaType, Photo, PhotoMeta
+from tests.helpers import unwrapped
 
 runner = CliRunner()
 T0 = datetime(2025, 8, 4, 10, 0, tzinfo=UTC)
@@ -327,3 +328,38 @@ def test_no_memories_yet_says_so_rather_than_offering_a_rebuild(library, tmp_pat
         stdin="d\nn\n0.4\ny\n",
     )
     assert "No memories built yet" in got.output
+
+
+def test_status_says_the_label_log_exists_and_what_it_holds(library):
+    """A file the user did not ask for, holding judgements about their own
+    photographs, has to be discoverable. `--status` names it, says it is
+    append-only, and says it is never committed - and it counts rather than
+    listing, because naming a photograph there would defeat the point."""
+    run("calibrate", "--data-dir", str(library), stdin="p\ny\nn\nq\n")
+    got = run("calibrate", "--status", "--data-dir", str(library))
+    assert got.exit_code == 0, got.output
+    said = unwrapped(got.output)
+    for phrase in ("judgements on record", "labels.jsonl", "append-only", "never committed"):
+        assert unwrapped(phrase) in said, f"--status never said {phrase!r}: {got.output}"
+
+
+def test_status_on_a_library_with_no_judgements_says_nothing_about_the_log(library):
+    """No labels, no paragraph. A first run must not be told about a file that
+    does not exist."""
+    got = run("calibrate", "--status", "--data-dir", str(library))
+    assert unwrapped("labels.jsonl") not in unwrapped(got.output)
+
+
+def test_redo_clears_the_working_state_and_the_log_keeps_the_answers(library):
+    """`--redo` is the moment a sitting's evidence used to be destroyed. It
+    still resets the thresholds - that is what it is for - and the log still
+    has both sittings in it afterwards."""
+    from rekindle.calibrate import labels
+
+    run("calibrate", "--data-dir", str(library), stdin="p\ny\nn\nq\n")
+    first = sum(labels.summary(library).values())
+    assert first >= 2
+
+    run("calibrate", "--data-dir", str(library), "--redo", stdin="p\ny\nn\nq\n")
+    assert state.load(library).answers, "the redo recorded new answers"
+    assert sum(labels.summary(library).values()) > first, "the log lost the first sitting"

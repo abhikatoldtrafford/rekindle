@@ -440,6 +440,10 @@ def _p_min_shots(_):
         try:
             spec = engine.build(index, _offer(), selection=_selection(photos))
         finally:
+            # BOTH. The index hydrates photos through its own read-only
+            # connection, so closing the store alone leaves a handle open and
+            # Windows refuses to remove the TemporaryDirectory.
+            index.close()
             store.close()
     return spec is not None
 

@@ -46,6 +46,7 @@ late November.
 from __future__ import annotations
 
 from collections import Counter
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date
 
@@ -145,14 +146,30 @@ def _local_day(photo: Photo) -> date | None:
     return moment.date() if moment else None
 
 
-def bursts(photos: list[Photo]) -> list[Burst]:
-    """Every run of unusually dense days, per year."""
-    by_day: dict[date, int] = Counter()
+def day_counts(photos: Iterable[Photo]) -> Counter[date]:
+    """How many of `photos` fall on each local calendar day."""
+    by_day: Counter[date] = Counter()
     for photo in photos:
         day = _local_day(photo)
         if day is not None:
             by_day[day] += 1
+    return by_day
 
+
+def bursts(photos: Iterable[Photo]) -> list[Burst]:
+    """Every run of unusually dense days, per year."""
+    return bursts_from(day_counts(photos))
+
+
+def bursts_from(by_day: Mapping[date, int]) -> list[Burst]:
+    """`bursts`, from a day histogram rather than from the photos.
+
+    This split is what lets a 300,000-photo library find its recurring events
+    without materialising itself. Nothing below this line reads a `Photo`: the
+    density rule was always a question about a histogram, and `MemoryIndex`
+    can answer it off the spine (`image_day_counts`) for the cost of a
+    `Counter` copy. See `recipes.builtin.RecurringEvent`.
+    """
     by_year: dict[int, dict[date, int]] = {}
     for day, count in by_day.items():
         by_year.setdefault(day.year, {})[day] = count
@@ -201,7 +218,7 @@ def _circular(a: int, b: int) -> int:
 
 
 def events(
-    photos: list[Photo],
+    photos: Iterable[Photo],
     *,
     min_years: int = MIN_YEARS,
     half_window: int = HALF_WINDOW,
@@ -213,7 +230,17 @@ def events(
     only the chosen bursts matters - otherwise the next pass rediscovers the
     same festival from the bursts it left behind.
     """
-    remaining = bursts(photos)
+    return events_from(day_counts(photos), min_years=min_years, half_window=half_window)
+
+
+def events_from(
+    by_day: Mapping[date, int],
+    *,
+    min_years: int = MIN_YEARS,
+    half_window: int = HALF_WINDOW,
+) -> list[RecurringEvent]:
+    """`events`, from a day histogram. See `bursts_from` for why."""
+    remaining = bursts_from(by_day)
     found: list[RecurringEvent] = []
     while True:
         best: tuple[tuple[int, int, int], int, list[Burst]] | None = None
@@ -248,7 +275,7 @@ def events(
         remaining = [b for b in remaining if _circular(b.doy, centre) > half_window]
 
 
-def photos_in(event: RecurringEvent, photos: list[Photo]) -> list[Photo]:
+def photos_in(event: RecurringEvent, photos: Iterable[Photo]) -> list[Photo]:
     """Every photo inside any of the event's bursts."""
     return [
         photo
@@ -260,7 +287,7 @@ def photos_in(event: RecurringEvent, photos: list[Photo]) -> list[Photo]:
 
 def naming_evidence(
     event: RecurringEvent,
-    photos: list[Photo],
+    photos: Iterable[Photo],
     *,
     min_years: int = 2,
     reserved: frozenset[str] = frozenset(),

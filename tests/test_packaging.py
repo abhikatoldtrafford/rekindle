@@ -174,8 +174,20 @@ def test_every_extra_this_project_documents_is_declared():
 
 # --------------------------------------------------- the wheel, if one exists
 
-WHEELS = sorted((ROOT / "dist").glob("*.whl")) if (ROOT / "dist").is_dir() else []
-needs_wheel = pytest.mark.skipif(not WHEELS, reason="no built wheel in dist/ (run `uv build`)")
+# Only a wheel of the CURRENT version. `dist/` is not cleaned on a version
+# bump, so a stale artifact sits there and every assertion that looks inside
+# `rekindle-<version>.dist-info/` fails with a KeyError naming a path that was
+# never going to exist. That is a stale build, not a defect in the package -
+# so it skips, and the reason says which version it found.
+_ALL_WHEELS = sorted((ROOT / "dist").glob("*.whl")) if (ROOT / "dist").is_dir() else []
+WHEELS = [w for w in _ALL_WHEELS if f"-{PROJECT['version']}-" in w.name]
+needs_wheel = pytest.mark.skipif(
+    not WHEELS,
+    reason=(
+        f"no wheel for {PROJECT['version']} in dist/ "
+        f"(found {[w.name for w in _ALL_WHEELS] or 'nothing'}); run `uv build`"
+    ),
+)
 
 
 @needs_wheel

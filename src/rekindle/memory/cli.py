@@ -93,7 +93,9 @@ def _warn_unfingerprinted(index: MemoryIndex) -> None:
     to read. The memories are still built - a warning is the right response,
     not an empty result.
     """
-    missing = sum(1 for p in index.all() if p.meta.phash is None and not p.meta.phash_error)
+    # A count, so it is streamed. `index.all()` here was 690 MB on a
+    # 300,000-photo library, paid before a single memory was built.
+    missing = sum(1 for p in index.iter_all() if p.meta.phash is None and not p.meta.phash_error)
     if missing:
         console.print(
             f"[yellow]![/yellow] {missing} photos have no perceptual fingerprint, so "

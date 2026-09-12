@@ -500,3 +500,100 @@ def test_two_peaks_in_one_fortnight_do_not_offer_the_same_id_twice(tmp_path):
         store.close()
     assert keys, "the recipe offered nothing"
     assert len(keys) == len(set(keys)), f"duplicate memory ids offered: {keys}"
+
+
+def test_the_recipe_finds_the_same_events_from_the_index_as_from_the_photos(tmp_path):
+    """The recipe reads `index.image_day_counts()` instead of `index.images()`.
+
+    That is the one place the lazy index could not help - a recipe that asks
+    for every photograph materialises every photograph, whatever the index
+    does underneath - so it now asks for the day histogram and hydrates only
+    the days its bursts cover. This pins that the substitution is exact: the
+    events found from the spine are the events found from the photos.
+    """
+    from rekindle.memory.recipes.registry import get
+
+    photos = _library(DURGA)
+    store, index = _index(tmp_path, photos)
+    try:
+        recipe = get("recurring_event")
+        from_photos = recurring.events(photos)
+        from_index = recurring.events_from(recipe._days(index))
+        assert [(e.centre, e.years, e.count) for e in from_index] == [
+            (e.centre, e.years, e.count) for e in from_photos
+        ]
+        for event in from_index:
+            assert {p.file_hash for p in recipe._images_of(index, event)} == {
+                p.file_hash for p in recurring.photos_in(event, photos)
+            }
+    finally:
+        store.close()
+
+
+def test_a_video_inside_the_burst_never_reaches_the_memory(tmp_path):
+    """`index.images()` filtered videos out for free. Walking the burst days
+    with `index.by_date` does not - that index holds every medium - so the
+    recipe filters, and this is what says so.
+
+    A video in a montage is not a cosmetic problem: `composition` refuses one
+    with no cached still frame, so it is a shot that silently disappears, and
+    `recurring_event` is the only recipe that was ever image-only.
+    """
+    from rekindle.memory.recipes.registry import get
+
+    photos = _library(DURGA)
+    # One video on the busiest day of the first festival, so it is certainly
+    # inside a burst.
+    when = datetime(2011, 10, 3, 12, 0)
+    video = _photo("video0001", when)
+    video.media_type = MediaType.VIDEO
+    photos.append(video)
+
+    store, index = _index(tmp_path, photos)
+    try:
+        recipe = get("recurring_event")
+        # The premise: the video really is inside a burst, so a recipe that
+        # forgot to filter would return it.
+        covered = any(
+            b.covers(when.date())
+            for e in recurring.events_from(recipe._days(index))
+            for b in e.bursts
+        )
+        assert covered, "the fixture's video is not inside any burst; the test proves nothing"
+        for offer in recipe.offers(index):
+            selection = recipe.select(index, offer)
+            if selection is None:
+                continue
+            assert all(p.media_type is MediaType.IMAGE for p in selection.photos)
+    finally:
+        store.close()
+
+
+def test_every_year_is_a_claim_about_the_library_not_about_the_event(tmp_path):
+    """`years_available` counts the years of the span that hold ANY photo.
+
+    Computing it from the event's own photos - which is what the recipe used
+    to be handed, back when it was passed the whole library and could not tell
+    the difference - makes it equal to `len(event.years)` by construction, so
+    the title says "every year" always and the word stops meaning anything.
+    """
+    from rekindle.memory.recipes.registry import get
+
+    # A festival in 2011, 2013, 2014, 2016 and 2017 - but 2012 and 2015 hold
+    # ordinary photographs, so this is emphatically NOT every year.
+    festival = {y: DURGA[y] for y in (2011, 2013, 2014, 2016, 2017)}
+    photos = _library(festival)
+    n = 0
+    for year in (2012, 2015):
+        for week in range(52):
+            n += 1
+            photos.append(_photo(f"g{n:05d}", datetime(year, 1, 1) + timedelta(weeks=week)))
+
+    store, index = _index(tmp_path, photos)
+    try:
+        recipe = get("recurring_event")
+        titles = [o.title for o in recipe.offers(index)]
+        assert titles, "no offers, so the title was never rendered"
+        assert all(t.endswith("most years") for t in titles), titles
+    finally:
+        store.close()

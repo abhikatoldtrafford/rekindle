@@ -12,7 +12,8 @@ be visibly a threshold chosen for A library rather than a law of nature.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from collections import Counter
+from datetime import date, timedelta
 
 from rekindle.memory import albums, captions, recurring, strata
 from rekindle.memory.composition import compose
@@ -28,7 +29,7 @@ from rekindle.memory.recipes.base import (
 )
 from rekindle.memory.recipes.registry import register
 from rekindle.memory.spec import build_fact_sheet
-from rekindle.models import Photo
+from rekindle.models import MediaType, Photo
 
 # Which album names may be shown, and which two names are one album, now
 # live in `memory.albums` - `recurring` needs the same rules, and the first
@@ -103,19 +104,26 @@ class OnThisDay:
     min_photos = 8
 
     def offers(self, index: MemoryIndex) -> list[Offer]:
+        # Counts and years off the index's spine, never the photographs. An
+        # offer needs two integers per date; on a 300,000-photo library the
+        # version that asked for the photographs to get them read the whole
+        # library once for this recipe alone.
         out = []
+        counts = index.month_day_counts()
         for month, day in index.month_days():
-            photos = index.by_month_day(month, day)
-            years = years_of(photos)
-            if len(years) < self.min_years or len(photos) < self.min_photos:
+            count = counts[(month, day)]
+            if count < self.min_photos:
+                continue
+            years = index.month_day_years(month, day)
+            if len(years) < self.min_years:
                 continue
             out.append(
                 Offer(
                     recipe=self.name,
                     key=f"{month:02d}-{day:02d}",
                     title=f"{day} {captions.month_name(month)}",
-                    subtitle=f"{len(years)} years, {len(photos)} photos",
-                    size=len(photos),
+                    subtitle=f"{len(years)} years, {count} photos",
+                    size=count,
                 )
             )
         return sorted(out, key=lambda o: (-o.size, o.key))
@@ -161,18 +169,21 @@ class OnThisMonth:
 
     def offers(self, index: MemoryIndex) -> list[Offer]:
         out = []
+        counts = index.month_counts()
         for month in index.months():
-            photos = index.by_month(month)
-            years = years_of(photos)
-            if len(years) < self.min_years or len(photos) < self.min_photos:
+            count = counts[month]
+            if count < self.min_photos:
+                continue
+            years = index.month_years(month)
+            if len(years) < self.min_years:
                 continue
             out.append(
                 Offer(
                     recipe=self.name,
                     key=f"{month:02d}",
                     title=f"Every {captions.month_name(month)}",
-                    subtitle=f"{len(years)} years, {len(photos)} photos",
-                    size=len(photos),
+                    subtitle=f"{len(years)} years, {count} photos",
+                    size=count,
                 )
             )
         return sorted(out, key=lambda o: (-o.size, o.key))
@@ -210,8 +221,7 @@ class PersonYears:
         for person, count in index.people_counts().items():
             if count < self.min_photos:
                 continue
-            photos = index.by_person(person)
-            years = years_of(photos)
+            years = index.person_years(person)
             if len(years) < self.min_years:
                 continue
             out.append(
@@ -258,8 +268,7 @@ class PairYears:
         for (a, b), count in index.pair_counts().items():
             if count < self.min_photos:
                 continue
-            photos = index.by_pair(a, b)
-            years = years_of(photos)
+            years = index.pair_years(a, b)
             if len(years) < self.min_years:
                 continue
             out.append(
@@ -356,7 +365,19 @@ class ThenAndNow:
     @staticmethod
     def _subjects(index: MemoryIndex):
         """Both people and albums. A person is the obvious subject; an album
-        is a trip, and "Kashmir: then and now" is the first and last day."""
+        is a trip, and "Kashmir: then and now" is the first and last day.
+
+        THE ONE `offers()` THAT STILL READS THE LIBRARY, and it is deliberate
+        rather than overlooked. Every other recipe's offer needs a count and a
+        set of years, both of which the index answers off its spine. This one
+        needs to know which photographs would SURVIVE the composition
+        guardrails, because it picks exactly two and a dropped one kills the
+        memory - and that needs width, height, sharpness, brightness and media
+        type per photograph. On a 300,000-photo library that is roughly 570k
+        hydrations, most of the offers phase's remaining cost. Serving it from
+        the spine means putting the composition scalars on the spine; see
+        docs/known-limitations.md.
+        """
         for person in sorted(index.people_counts()):
             yield f"person:{person}", index.by_person(person)
         for album in sorted(index.album_counts()):
@@ -404,17 +425,18 @@ class YearInReview:
 
     def offers(self, index: MemoryIndex) -> list[Offer]:
         out = []
+        counts = index.year_counts()
         for year in index.years():
-            photos = index.by_year(year)
-            if len(photos) < self.min_photos:
+            count = counts[year]
+            if count < self.min_photos:
                 continue
             out.append(
                 Offer(
                     recipe=self.name,
                     key=str(year),
                     title=str(year),
-                    subtitle=f"{len(photos)} photos",
-                    size=len(photos),
+                    subtitle=f"{count} photos",
+                    size=count,
                 )
             )
         # Newest first: a year in review is most interesting for recent years.
@@ -530,12 +552,46 @@ class RecurringEvent:
     name = "recurring_event"
     title = "Every year, about this time"
 
+    @staticmethod
+    def _days(index: MemoryIndex):
+        """The image histogram every question here is really about.
+
+        `index.image_day_counts()` is read off the index's spine and costs no
+        photographs at all. This recipe used to call `index.images()` - the
+        whole library, materialised, once per offer AND once per select - and
+        on a 300,000-photo library that single call was 650 MB and undid
+        everything the lazy index buys. Nothing about the detection needed the
+        photos: it needed how many were taken on each day.
+        """
+        return Counter({date(y, m, d): n for (y, m, d), n in index.image_day_counts().items()})
+
+    @staticmethod
+    def _images_of(index: MemoryIndex, event) -> list[Photo]:
+        """The images inside the event's bursts, and no others.
+
+        Walks the burst date ranges and asks the index for each day, so the
+        only photographs hydrated are the ones the memory could contain. The
+        equivalent used to be `recurring.photos_in(event, index.images())`,
+        which filters the same set out of the whole library.
+        """
+        out: list[Photo] = []
+        for burst in event.bursts:
+            day = burst.start
+            while day <= burst.end:
+                out.extend(
+                    p
+                    for p in index.by_date(day.year, day.month, day.day)
+                    if p.media_type is MediaType.IMAGE
+                )
+                day += timedelta(days=1)
+        return out
+
     def offers(self, index: MemoryIndex) -> list[Offer]:
-        photos = index.images()
+        days = self._days(index)
         reserved = frozenset(p.casefold() for p in index.people_counts())
         out: list[Offer] = []
         seen: set[str] = set()
-        for event in recurring.events(photos):
+        for event in recurring.events_from(days):
             # Two peaks can quantise into one fortnight bucket. Offers are
             # strongest first, so keeping the first is deterministic - but it
             # IS a dropped memory, so it is not done silently: the weaker
@@ -548,7 +604,7 @@ class RecurringEvent:
                 Offer(
                     recipe=self.name,
                     key=event.key,
-                    title=self._title(event, photos, reserved),
+                    title=self._title(event, self._images_of(index, event), days, reserved),
                     subtitle=f"{len(event.years)} years, {event.count} photos",
                     size=event.count,
                 )
@@ -556,17 +612,19 @@ class RecurringEvent:
         return out
 
     def select(self, index: MemoryIndex, offer: Offer) -> Selection | None:
-        photos = index.images()
+        days = self._days(index)
         reserved = frozenset(p.casefold() for p in index.people_counts())
-        event = next((e for e in recurring.events(photos) if e.key == offer.key), None)
+        event = next((e for e in recurring.events_from(days) if e.key == offer.key), None)
         if event is None:
             return None
-        chosen = chronological(recurring.photos_in(event, photos))
+        photos = self._images_of(index, event)
+        chosen = chronological(photos)
         if len(chosen) < MIN_SHOTS:
             return None
+        title = self._title(event, photos, days, reserved)
         return Selection(
             photos=chosen,
-            facts=_facts(chosen, title=self._title(event, photos, reserved), recipe=self.name),
+            facts=_facts(chosen, title=title, recipe=self.name),
             ordering=CHRONOLOGICAL,
             # BY YEAR, hard. The premise is that this happens EVERY year; a
             # memory of one year's festival is `album_story`, not this.
@@ -582,7 +640,7 @@ class RecurringEvent:
         )
 
     @staticmethod
-    def _title(event, photos: list[Photo], reserved: frozenset[str]) -> str:
+    def _title(event, photos: list[Photo], days, reserved: frozenset[str]) -> str:
         """From evidence only. NEVER a guessed festival name.
 
         Inferring "Diwali" from a date in late October is exactly the
@@ -597,11 +655,12 @@ class RecurringEvent:
         if named:
             return named
         span = range(event.years[0], event.years[-1] + 1)
-        available = len(
-            {
-                p.meta.taken_at_local.year
-                for p in photos
-                if p.meta.taken_at_local and p.meta.taken_at_local.year in span
-            }
-        )
+        # From the day histogram, not from `photos`: `photos` is now only the
+        # event's OWN images, and every one of them is inside the span by
+        # construction, so counting years there would always return
+        # `len(event.years)` and "every year" would become a tautology rather
+        # than a claim. `days` covers the whole library, which is what the
+        # question - how many years of this span hold any photograph at all -
+        # has always meant.
+        available = len({day.year for day in days if day.year in span})
         return recurring.describe(event, years_available=available)

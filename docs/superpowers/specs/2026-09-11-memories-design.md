@@ -123,6 +123,14 @@ object. A recipe is handed a `MemoryIndex` and nothing else — it has no
 `PhotoStore`, no path, no connection. Bypassing the guardrail requires importing
 `PhotoStore` yourself, which is exactly the reviewable act we want it to be.
 
+> **Amended after this spec was written.** The private tuple is gone: the
+> index holds SQLite rowids and loads `Photo` objects on demand, because at
+> 300,000 rows the tuple is 681 MB. The chokepoint, the interface and the
+> guarantee are unchanged — what makes the guarantee true is now that exactly
+> one function turns a row into a `Photo` and it applies `deny_reason`, rather
+> than that no rejected photo is stored. See
+> [the scale decision log](../../decision-log-memory-scale.md).
+
 Filtering is done in `policy.deny_reason(photo)`, a single predicate, in this
 order:
 

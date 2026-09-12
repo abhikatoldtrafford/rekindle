@@ -46,3 +46,16 @@ os.environ["LINES"] = "50"
 os.environ["NO_COLOR"] = "1"
 os.environ["TERM"] = "dumb"
 os.environ.pop("FORCE_COLOR", None)
+
+# And no API key. A developer's own `OPENAI_API_KEY` is visible to the test
+# process, so any code path that asks "is the model available?" answers
+# differently here than in CI - the LLM branch runs, tags get cached, and a
+# test asserting the no-model message fails on the one machine that has a key.
+#
+# This is the mirror of the extras problem that kept CI red for ten pushes:
+# there, the dev machine had something CI lacked and tests passed locally;
+# here it fails locally and passes in CI. Both are the same defect - a result
+# that depends on the machine.
+#
+# A test that WANTS the model path must set the key itself, explicitly.
+os.environ.pop("OPENAI_API_KEY", None)

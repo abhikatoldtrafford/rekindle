@@ -7,6 +7,8 @@ That is the difference between a guardrail and a convention.
 """
 
 import inspect
+from array import array
+from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from pathlib import Path
 
@@ -93,6 +95,15 @@ def test_no_query_method_can_return_a_blocked_photo(tmp_path):
             "by_pair": ("Abhik Maiti", "Paramita"),
             "by_album": ("Kashmir",),
             "by_gps_cell": (gps_cell(22.5, 87.25),),
+            # The aggregates. They return integers, so `_touch` cannot see a
+            # leak in them - `test_the_year_aggregates_honour_an_exclusion`
+            # is what actually holds them. They are here so the sweep still
+            # refuses to pass over a method it does not know how to call.
+            "month_years": (5,),
+            "month_day_years": (5, 1),
+            "person_years": ("Paramita",),
+            "pair_years": ("Abhik Maiti", "Paramita"),
+            "album_years": ("Kashmir",),
             "get": (BLOCKED,),
             "resolve_many": ([BLOCKED, OK],),
             "by_date": (2020, 5, 1),
@@ -129,16 +140,26 @@ def test_no_query_method_can_return_a_blocked_photo(tmp_path):
         # every other one. Named explicitly as well as counted, because a
         # rename that dropped one from the sweep would still leave the count
         # satisfied by the methods that remain.
-        for name in ("resolve_many", "by_date", "dates"):
+        for name in ("resolve_many", "by_date", "dates", "iter_all", "iter_images"):
             assert name in checked, f"{name} was not swept"
-        assert len(checked) >= 21, f"only {len(checked)} methods checked: {checked}"
+        assert len(checked) >= 32, f"only {len(checked)} methods checked: {checked}"
     finally:
         store.close()
 
 
 def _touch(result, checked, name):
-    """Fail if a blocked photo appears anywhere in `result`."""
+    """Fail if a blocked photo appears anywhere in `result`.
+
+    An ITERATOR is drained, not skipped. `iter_all` and `iter_images` return
+    generators, and a sweep that treated a generator as one opaque object
+    would have run every assertion below against the generator itself and
+    passed without ever producing a photo - the vacuous-test shape this file
+    exists to prevent.
+    """
     checked.append(name)
+    if isinstance(result, Iterator):
+        result = list(result)
+        assert result, f"MemoryIndex.{name} yielded nothing, so nothing was checked"
     items = result if isinstance(result, (list, tuple, set)) else [result]
     for item in items:
         if isinstance(item, Photo):
@@ -435,20 +456,34 @@ def test_a_query_result_is_a_copy_not_the_internal_store(tmp_path):
         store.close()
 
 
-def test_the_internal_photo_collection_is_immutable(tmp_path):
+def test_the_index_holds_no_photo_collection_at_all(tmp_path):
     """Defence in depth, and deliberately a SEPARATE test from the one above.
 
-    Every query already returns a copy, so making `_photos` a tuple changes no
-    observable behaviour today - the test above passes either way. It is kept
-    because the copying is a property of thirteen query methods that each have
-    to remember it, while this is a property of the one attribute they all
-    read. Asserting it directly is what stops the tuple being quietly relaxed
-    to a list by someone who notices no test fails.
+    This used to assert that `_photos` was a tuple rather than a list: every
+    query already returned a copy, so it changed no observable behaviour, and
+    it was kept because the copying was a property thirteen query methods each
+    had to remember while immutability was a property of the one attribute
+    they all read.
+
+    There is now no such attribute. The spine is `array("q")` of SQLite
+    rowids, which cannot hold a `Photo` even in principle, and the LRU cache
+    is keyed on rowid, so a photo appended to a returned list reaches nothing.
+    The assertion is therefore that no attribute of the index is a container
+    OF PHOTOS - which is both the immutability property and the laziness
+    property, and fails the moment someone reintroduces a materialised list.
     """
     store = _store(tmp_path, [_p("a")])
     try:
         index = MemoryIndex.open(store)
-        assert isinstance(index._photos, tuple)
+        index.all()  # fill the cache, so the cache itself is examined too
+        assert isinstance(index._ids, array)
+        holding = {
+            name: value
+            for name, value in vars(index).items()
+            if isinstance(value, (list, tuple, set, frozenset))
+            and any(isinstance(item, Photo) for item in value)
+        }
+        assert not holding, f"the index is materialising photos in {sorted(holding)}"
     finally:
         store.close()
 
@@ -533,3 +568,454 @@ def test_dates_lists_every_local_day_in_order(tmp_path):
         assert index.dates() == [(2019, 10, 5), (2020, 10, 5)]
     finally:
         store.close()
+
+
+# --------------------------------------------------------------------------
+# laziness
+#
+# "A lazy index that quietly falls back to materialising everything looks
+# identical to a working one until you measure memory." So these tests measure
+# it. Nothing below passes on a materialising index.
+
+
+def _bulk(n, *, year=2020):
+    """`n` photos with people and an album, so the derived indexes are real."""
+    return [
+        _p(
+            f"{i:064x}",
+            local=datetime(year, 1 + i % 12, 1 + i % 28, 12, 0),
+            people=[f"Person {i % 7}", f"Person {(i + 3) % 7}"],
+            albums=[f"Trip {i % 20}"],
+        )
+        for i in range(n)
+    ]
+
+
+def test_open_hydrates_nothing_at_all(tmp_path):
+    """The whole claim, at its narrowest: opening the index reads every row,
+    applies the policy to every row, and keeps NO photo.
+
+    This is the test that fails the moment someone reintroduces a materialised
+    list, whatever else they leave in place.
+    """
+    store = _store(tmp_path, _bulk(50))
+    index = MemoryIndex.open(store)
+    try:
+        assert index.count() == 50
+        assert len(index._cache) == 0, "opening the index materialised photos"
+        assert len(index.by_year(2020)) == 50
+    finally:
+        index.close()
+        store.close()
+
+
+def test_the_cache_is_bounded_and_queries_are_still_complete(tmp_path):
+    """A cache smaller than the library must change what is HELD, never what
+    is ANSWERED."""
+    store = _store(tmp_path, _bulk(60))
+    index = MemoryIndex.open(store)
+    try:
+        index._cache_max = 10
+        # 60 at once is larger than the cache, so nothing is admitted...
+        assert len(index.all()) == 60
+        assert len(index._cache) == 0
+        # ...but a query that fits is cached, and bounded.
+        for month in range(1, 13):
+            assert index.by_month(month)
+        assert len(index._cache) <= 10
+        # and every answer is still whole.
+        assert len(index.all()) == 60
+        assert sum(len(index.by_month(m)) for m in index.months()) == 60
+    finally:
+        index.close()
+        store.close()
+
+
+def test_a_scan_larger_than_the_cache_does_not_evict_the_working_set(tmp_path):
+    """`all()` over a library bigger than the cache must not flush it.
+
+    Without the guard, a single `index.all()` - which `rekindle memories`
+    printed a warning from - would evict every recipe's working set on the way
+    past, and the next query would re-read the database for all of it.
+    """
+    store = _store(tmp_path, _bulk(60))
+    index = MemoryIndex.open(store)
+    try:
+        index._cache_max = 20
+        kept = index.by_month(1)
+        assert kept and len(index._cache) == len(kept)
+        before = set(index._cache)
+        index.all()
+        assert set(index._cache) == before, "a big scan flushed the cache"
+    finally:
+        index.close()
+        store.close()
+
+
+def test_the_index_costs_far_less_than_the_photos_it_indexes(tmp_path):
+    """The measurement, not an assertion about it.
+
+    Measured on a synthetic 300,000-row library the photos are 681 MB and the
+    indexes over them 32.5 MB, which is the whole reason this class stopped
+    holding photos. Here the same comparison is made in miniature and as a
+    RATIO, so it means the same thing on any platform and at any Python
+    version: opening the index must cost a small fraction of what holding the
+    library costs.
+
+    A materialising index scores 1.0 and fails.
+    """
+    import gc
+    import tracemalloc
+
+    store = _store(tmp_path, _bulk(2000))
+    index = None
+    try:
+        gc.collect()
+        tracemalloc.start()
+        materialised = list(store.iter_photos())
+        photos_bytes = tracemalloc.get_traced_memory()[0]
+        del materialised
+        gc.collect()
+        base = tracemalloc.get_traced_memory()[0]
+        index = MemoryIndex.open(store)
+        index_bytes = tracemalloc.get_traced_memory()[0] - base
+        tracemalloc.stop()
+        assert index.count() == 2000
+        assert index_bytes < photos_bytes / 4, (
+            f"the index costs {index_bytes / 1e6:.2f} MB against "
+            f"{photos_bytes / 1e6:.2f} MB for the photos - it is materialising them"
+        )
+    finally:
+        if index is not None:
+            index.close()
+        store.close()
+
+
+def test_iter_all_yields_the_library_without_holding_it(tmp_path):
+    store = _store(tmp_path, _bulk(60))
+    index = MemoryIndex.open(store)
+    try:
+        index._cache_max = 5
+        seen = [p.file_hash for p in index.iter_all()]
+        assert len(seen) == 60
+        assert seen == [p.file_hash for p in index.all()]
+        assert len(index._cache) == 0, "streaming admitted photos to the cache"
+    finally:
+        index.close()
+        store.close()
+
+
+def test_iter_images_yields_only_images(tmp_path):
+    photos = _bulk(4)
+    photos[1].media_type = MediaType.VIDEO
+    store = _store(tmp_path, photos)
+    index = MemoryIndex.open(store)
+    try:
+        assert {p.file_hash for p in index.iter_images()} == {
+            p.file_hash for p in photos if p.media_type is MediaType.IMAGE
+        }
+    finally:
+        index.close()
+        store.close()
+
+
+def test_image_day_counts_counts_images_only_and_matches_by_date(tmp_path):
+    """The aggregate `recurring_event` reads instead of the whole library. It
+    must agree with the index it was derived from, or the recipe finds bursts
+    the photos cannot fill."""
+    photos = [
+        _p("a", local=datetime(2020, 5, 1, 9, 0)),
+        _p("b", local=datetime(2020, 5, 1, 10, 0)),
+        _p("v", local=datetime(2020, 5, 1, 11, 0), media_type=MediaType.VIDEO),
+        _p("c", local=datetime(2020, 5, 2, 9, 0)),
+    ]
+    store = _store(tmp_path, photos)
+    index = MemoryIndex.open(store)
+    try:
+        counts = index.image_day_counts()
+        assert counts == {(2020, 5, 1): 2, (2020, 5, 2): 1}
+        for ymd, n in counts.items():
+            images = [p for p in index.by_date(*ymd) if p.media_type is MediaType.IMAGE]
+            assert len(images) == n
+    finally:
+        index.close()
+        store.close()
+
+
+def test_a_hydrated_photo_is_the_one_the_scan_admitted(tmp_path):
+    """The spine holds rowids, so a fetch that read the wrong row - or a
+    policy that disagreed with itself between the scan and the fetch - shows
+    up as a query returning fewer photos than the count says."""
+    store = _store(tmp_path, [*_bulk(40), _p("hidden", archived=True)])
+    index = MemoryIndex.open(store)
+    try:
+        assert index.count() == 40
+        assert len(index.all()) == 40
+        assert index.report.total == 41
+        assert index.report.by_reason == {"archived": 1}
+        assert index.get("hidden") is None
+    finally:
+        index.close()
+        store.close()
+
+
+def test_closing_the_index_releases_the_file_and_reopening_is_transparent(tmp_path):
+    """Windows will not delete an open file, so a caller must be able to let
+    go of it - and letting go must not end the index."""
+    store = _store(tmp_path, _bulk(5))
+    index = MemoryIndex.open(store)
+    try:
+        assert len(index.all()) == 5
+        index.close()
+        index.close()  # idempotent
+        assert len(index.all()) == 5, "the index did not reopen"
+    finally:
+        index.close()
+        store.close()
+
+
+def test_a_merged_album_comes_back_in_the_order_the_library_is_scanned_in(tmp_path):
+    """Two spellings of one album, interleaved, must come back interleaved.
+
+    The rowid indexes are built per RAW album name and only merged afterwards,
+    so the naive merge concatenates - every `Christmas 15` before every
+    `Christmas 2025` - and `album_story` then publishes a memory in a
+    different order than the materialised index did. Sorting the merged rowids
+    restores scan order, and scan order is rowid order only because
+    `_StoreSource.scan` says ORDER BY rowid.
+
+    Interleaved on purpose: with the two spellings in separate runs, a
+    concatenating merge produces the right answer by accident and this test
+    cannot fail.
+    """
+    photos = [
+        _p("a", albums=["Christmas 2025"], local=datetime(2025, 12, 25, 9, 0)),
+        _p("b", albums=["Christmas 15"], local=datetime(2015, 12, 25, 9, 0)),
+        _p("c", albums=["Christmas 2025"], local=datetime(2025, 12, 25, 10, 0)),
+        _p("d", albums=["Christmas 15"], local=datetime(2015, 12, 25, 10, 0)),
+    ]
+    store = _store(tmp_path, photos)
+    index = MemoryIndex.open(store)
+    try:
+        merged = [p.file_hash for p in index.by_album("Christmas")]
+        scanned = [p.file_hash for p in index.all()]
+        assert merged == [h for h in scanned if h in set(merged)]
+        assert merged == ["a", "b", "c", "d"]
+    finally:
+        index.close()
+        store.close()
+
+
+def test_streaming_never_admits_a_photo_to_the_cache(tmp_path):
+    """Separate from the bounded-cache test, and deliberately so.
+
+    There the library is bigger than the cache, so the scan-resistance guard
+    would keep the cache empty even if `iter_all` asked for admission. Here
+    the cache is bigger than the library, so the ONLY thing keeping it empty
+    is `iter_all` declining to cache - and the test fails if that is removed.
+    """
+    store = _store(tmp_path, _bulk(60))
+    index = MemoryIndex.open(store)
+    try:
+        index._cache_max = 10_000
+        assert len(list(index.iter_all())) == 60
+        assert len(index._cache) == 0, "streaming admitted photos to the cache"
+        assert len(list(index.iter_images())) == 60
+        assert len(index._cache) == 0
+    finally:
+        index.close()
+        store.close()
+
+
+def test_every_spine_aggregate_agrees_with_the_photos_it_summarises(tmp_path):
+    """The offers phase now answers "how many?" and "which years?" off the
+    spine instead of loading the slice. That is only safe if the two answers
+    are the same answer, so this checks EVERY slice of a real index rather
+    than one of each.
+
+    It is the test that would have caught an off-by-one in `_years_in`'s
+    bisect, which is the only interesting thing that could go wrong: the years
+    array is aligned with `_ids` by position, and a rowid that resolved to its
+    neighbour's position would give a plausible wrong year.
+    """
+    photos = []
+    for i in range(120):
+        photos.append(
+            _p(
+                f"{i:064x}",
+                # Several years, several months, several days, so no index
+                # collapses to a single bucket and the bisect has work to do.
+                local=datetime(2015 + i % 8, 1 + i % 12, 1 + i % 27, 9, 0),
+                people=[f"Person {i % 5}", f"Person {(i + 2) % 5}"],
+                albums=[f"Trip {i % 9}"],
+            )
+        )
+    store = _store(tmp_path, photos)
+    index = MemoryIndex.open(store)
+    try:
+        checked = 0
+        for year, count in index.year_counts().items():
+            assert count == len(index.by_year(year))
+            checked += 1
+        for month in index.months():
+            assert index.month_counts()[month] == len(index.by_month(month))
+            assert index.month_years(month) == index.years_present(index.by_month(month))
+            checked += 1
+        for month, day in index.month_days():
+            assert index.month_day_counts()[(month, day)] == len(index.by_month_day(month, day))
+            assert index.month_day_years(month, day) == index.years_present(
+                index.by_month_day(month, day)
+            )
+            checked += 1
+        for person in index.people_counts():
+            assert index.person_years(person) == index.years_present(index.by_person(person))
+            checked += 1
+        for a, b in index.pair_counts():
+            assert index.pair_years(a, b) == index.years_present(index.by_pair(a, b))
+            checked += 1
+        for album in index.album_counts():
+            assert index.album_years(album) == index.years_present(index.by_album(album))
+            checked += 1
+        assert checked > 60, f"only {checked} slices compared; the fixture is too thin"
+    finally:
+        index.close()
+        store.close()
+
+
+def test_the_spine_aggregates_cost_no_photographs(tmp_path):
+    """The whole point. Counting and year-listing every slice of the library
+    must not hydrate a single photograph - that is the difference between an
+    offers pass that reads the library and one that does not."""
+    store = _store(tmp_path, _bulk(80))
+    index = MemoryIndex.open(store)
+    try:
+        index.year_counts()
+        index.month_counts()
+        index.month_day_counts()
+        index.image_day_counts()
+        for month in index.months():
+            index.month_years(month)
+        for month, day in index.month_days():
+            index.month_day_years(month, day)
+        for person in index.people_counts():
+            index.person_years(person)
+        for a, b in index.pair_counts():
+            index.pair_years(a, b)
+        for album in index.album_counts():
+            index.album_years(album)
+        assert len(index._cache) == 0, "an aggregate hydrated a photograph"
+    finally:
+        index.close()
+        store.close()
+
+
+def test_a_years_answer_is_empty_for_a_slice_that_does_not_exist(tmp_path):
+    store = _store(tmp_path, _bulk(10))
+    index = MemoryIndex.open(store)
+    try:
+        assert index.month_years(99) == set()
+        assert index.month_day_years(99, 99) == set()
+        assert index.person_years("Nobody") == set()
+        assert index.pair_years("Nobody", "Nobody Else") == set()
+        assert index.album_years("No Such Album") == set()
+        assert index.year_counts()[1999] == 0
+    finally:
+        index.close()
+        store.close()
+
+
+def test_the_year_aggregates_honour_an_exclusion(tmp_path):
+    """The aggregates return integers, so the leak sweep cannot see through
+    them. This is what does.
+
+    The blocked photograph is in a year, month, day, album, person and pair
+    that the allowed one is NOT in, so every aggregate would report a year
+    that exists only because of a photograph the user asked never to see. A
+    year is not a photograph, but "which years does Kashmir span?" answered
+    with a year that only an archived photograph reaches is the exclusion
+    leaking anyway - and it would put a wrong subtitle on a real memory.
+    """
+    photos = [
+        _p(
+            "hidden",
+            archived=True,
+            local=datetime(2011, 3, 7, 12, 0),
+            people=["Paramita", "Abhik Maiti"],
+            albums=["Kashmir"],
+        ),
+        _p(
+            "shown",
+            local=datetime(2020, 5, 1, 12, 0),
+            people=["Paramita", "Abhik Maiti"],
+            albums=["Kashmir"],
+        ),
+    ]
+    store = _store(tmp_path, photos)
+    index = MemoryIndex.open(store)
+    try:
+        assert index.album_years("Kashmir") == {2020}
+        assert index.person_years("Paramita") == {2020}
+        assert index.pair_years("Abhik Maiti", "Paramita") == {2020}
+        assert index.month_years(5) == {2020}
+        assert index.month_years(3) == set()
+        assert index.month_day_years(5, 1) == {2020}
+        assert index.month_day_years(3, 7) == set()
+        assert index.year_counts() == {2020: 1}
+        assert index.month_counts() == {5: 1}
+        assert index.month_day_counts() == {(5, 1): 1}
+    finally:
+        index.close()
+        store.close()
+
+
+def test_the_hidden_photo_of_that_fixture_really_would_show_up(tmp_path):
+    """Guards the test above against being vacuous, the way
+    `test_the_blocked_photo_really_is_reachable_without_the_guardrail` guards
+    the leak sweep. Built without the policy, every one of those aggregates
+    reports 2011."""
+    photos = [
+        _p(
+            "hidden",
+            archived=True,
+            local=datetime(2011, 3, 7, 12, 0),
+            people=["Paramita", "Abhik Maiti"],
+            albums=["Kashmir"],
+        ),
+        _p(
+            "shown",
+            local=datetime(2020, 5, 1, 12, 0),
+            people=["Paramita", "Abhik Maiti"],
+            albums=["Kashmir"],
+        ),
+    ]
+    store = _store(tmp_path, photos)
+    try:
+        unguarded = MemoryIndex(list(store.iter_photos()), ExclusionPolicy(), _empty_report())
+        assert unguarded.album_years("Kashmir") == {2011, 2020}
+        assert unguarded.person_years("Paramita") == {2011, 2020}
+        assert unguarded.pair_years("Abhik Maiti", "Paramita") == {2011, 2020}
+        assert unguarded.month_years(3) == {2011}
+    finally:
+        store.close()
+
+
+def test_a_dateless_photo_does_not_misalign_the_year_array(tmp_path):
+    """`_years` is aligned with `_ids` BY POSITION, so every row must append
+    to both or every year after the gap is read off its neighbour.
+
+    `deny_reason` rejects a dateless photo, so `MemoryIndex.open` can never
+    produce one - but the direct constructor does not apply the policy, and
+    that is deliberate and tested elsewhere. So the alignment line is
+    reachable, and without it `album_years` quietly returns the wrong years
+    for everything after the gap rather than failing.
+    """
+    photos = [
+        _p("dateless", local=None),
+        _p("a", local=datetime(2011, 3, 7, 12, 0), albums=["Kashmir"]),
+        _p("b", local=datetime(2020, 5, 1, 12, 0), albums=["Kashmir"]),
+    ]
+    index = MemoryIndex(photos, ExclusionPolicy(), _empty_report())
+    assert index.album_years("Kashmir") == {2011, 2020}
+    assert index.month_years(3) == {2011}
+    assert index.month_years(5) == {2020}
+    assert index.year_counts() == {2011: 1, 2020: 1}
