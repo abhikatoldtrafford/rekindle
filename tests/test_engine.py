@@ -1382,3 +1382,97 @@ def test_the_embedding_is_never_the_reason_a_shot_is_refused(tmp_path):
         )
     finally:
         store.close()
+
+
+# --------------------------------------------------------------------------
+# --limit as a cap per recipe, which is what `--all-recipes` needs
+#
+# Offers arrive in REGISTRY ORDER and the first recipe contributes most of
+# them - 192 of them from `on_this_day` alone on the reference library - so a
+# global `--limit` of any size a person would type never reaches a later
+# recipe. Measured here on `_rich_library`, where the effect is the same shape
+# at a size a test can read.
+
+
+def test_a_global_limit_never_reaches_a_later_recipe(tmp_path):
+    """The hole, as a test. No value of `limit` produces a second recipe."""
+    store, index = _index(tmp_path, _rich_library())
+    try:
+        offers = engine.all_offers(index)
+        assert len({o.recipe for o in offers}) >= 4, "the fixture must offer several recipes"
+        for limit in (1, 2, 3, 10, None):
+            specs, report = engine.build_all(index, offers, limit=limit)
+            assert {s.recipe for s in specs} == {"album_story"}, limit
+            assert report.accounted
+    finally:
+        store.close()
+
+
+def test_a_per_recipe_limit_does_reach_a_later_recipe(tmp_path):
+    """The fix. Same library, same offers, a different kind of cap."""
+    store, index = _index(tmp_path, _rich_library())
+    try:
+        offers = engine.all_offers(index)
+        specs, report = engine.build_all(index, offers, per_recipe_limit=1)
+        assert [(s.recipe, s.key) for s in specs] == [
+            ("album_story", "Kashmir"),
+            ("on_this_day", "10-05"),
+        ]
+        assert report.skipped[engine.SKIP_RECIPE_LIMIT] == 2
+        assert report.accounted
+    finally:
+        store.close()
+
+
+def test_a_per_recipe_limit_of_none_changes_nothing(tmp_path):
+    """The regression guard: every existing caller passes nothing."""
+    store, index = _index(tmp_path, _rich_library())
+    try:
+        offers = engine.all_offers(index)
+        plain = [s.dumps() for s in engine.build_all(index, offers)[0]]
+        explicit = [s.dumps() for s in engine.build_all(index, offers, per_recipe_limit=None)[0]]
+        assert plain == explicit
+        assert engine.SKIP_RECIPE_LIMIT not in engine.build_all(index, offers)[1].skipped
+    finally:
+        store.close()
+
+
+def test_the_recipe_cap_counts_what_was_BUILT_not_what_was_OFFERED(tmp_path):
+    """A dismissed offer must not consume the recipe's share, or one dismissal
+    silently costs a good memory that would have taken its place."""
+    store, index = _index(tmp_path, _rich_library())
+    try:
+        offers = engine.all_offers(index)
+        first = next(o for o in offers if o.recipe == "album_story")
+        specs, report = engine.build_all(
+            index, offers, per_recipe_limit=1, dismissed=frozenset({first.memory_id})
+        )
+        built = [(s.recipe, s.key) for s in specs]
+        assert ("album_story", "Mysore") in built, built
+        assert report.accounted
+    finally:
+        store.close()
+
+
+def test_the_two_limits_compose(tmp_path):
+    """`per_recipe_limit` shapes the spread; `limit` still caps the total."""
+    store, index = _index(tmp_path, _rich_library())
+    try:
+        offers = engine.all_offers(index)
+        specs, report = engine.build_all(index, offers, limit=1, per_recipe_limit=1)
+        assert len(specs) == 1
+        assert report.accounted
+    finally:
+        store.close()
+
+
+def test_a_per_recipe_limit_is_still_deterministic(tmp_path):
+    """Same library in, same memories out - the project's binding constraint."""
+    store, index = _index(tmp_path, _rich_library())
+    try:
+        offers = engine.all_offers(index)
+        first = [s.dumps() for s in engine.build_all(index, offers, per_recipe_limit=1)[0]]
+        second = [s.dumps() for s in engine.build_all(index, offers, per_recipe_limit=1)[0]]
+        assert first == second
+    finally:
+        store.close()

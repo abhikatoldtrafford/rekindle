@@ -33,13 +33,26 @@ alongside this code rather than left describing a fiction.
 
 from __future__ import annotations
 
-# `builtin` is imported for its SIDE EFFECT: every @register in it populates
-# REGISTRY, so `from rekindle.memory import recipes` is enough to have all
-# nine available. It imports base and registry directly rather than through
-# this module, so there is no import cycle despite appearances.
-from rekindle.memory.recipes import builtin as _builtin  # noqa: F401
+# THERE IS NO `import builtin` HERE ANY MORE, and its absence is the fix.
+#
+# This module used to import `recipes.builtin` for its SIDE EFFECT: every
+# `@register` in it populates REGISTRY. That worked for anyone who came
+# through this package and silently failed for anyone who did not - a script
+# reaching `recipes.registry` got an empty dict, iterated zero times, wrote
+# nothing and exited 0.
+#
+# A second, eager mechanism guarding a lazy one would be a mechanism nothing
+# exercises. So there is one: `REGISTRY` loads the built-ins itself, on first
+# read, wherever that read happens. See `registry._SelfLoadingRegistry`.
 from rekindle.memory.recipes.base import MIN_SHOTS, Offer, Recipe, Selection
-from rekindle.memory.recipes.registry import REGISTRY, get, register, registered
+from rekindle.memory.recipes.registry import (
+    REGISTRY,
+    ensure_loaded,
+    get,
+    names,
+    register,
+    registered,
+)
 
 __all__ = [
     "MIN_SHOTS",
@@ -47,7 +60,9 @@ __all__ = [
     "Recipe",
     "Selection",
     "REGISTRY",
+    "ensure_loaded",
     "get",
+    "names",
     "register",
     "registered",
 ]

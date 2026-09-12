@@ -252,7 +252,9 @@ def memory_cmd(
     captions: str = "deterministic",
     preview_width: int = 0,
     mp4_width: int = 0,
+    style: str = STYLE_FILM,
     today: datetime | None = None,
+    all_recipes: bool = False,
 ) -> None:
     store, index = open_index(data_dir, public_safe=public_safe)
     try:
@@ -298,6 +300,8 @@ def memory_cmd(
             offers = found
         else:
             offers = engine.all_offers(index)
+            if all_recipes:
+                _announce_all_recipes(offers)
 
         # Naming ONE memory overrides the cooldown. The cooldown exists to
         # stop `--auto` and an unfiltered build from showing the same memory
@@ -317,13 +321,19 @@ def memory_cmd(
         # on a deliberate rebuild. DISMISSAL is still honoured; only the
         # resurfacing clock is bypassed.
         named = bool(recipe and key) or force
+        # `--all-recipes` turns `--limit` from a cap on the batch into a cap
+        # per recipe. Without it, offers arrive in registry order and
+        # `on_this_day` alone contributes 192 of them, so no global cap a
+        # person would type ever reaches the ninth recipe. `--limit 0` under
+        # `--all-recipes` means every offer from every recipe.
         specs, report = engine.build_all(
             index,
             offers,
             max_shots=max_shots,
             dismissed=state.dismissed_memory_ids(),
             cooling=frozenset() if named else state.cooling(),
-            limit=limit,
+            limit=None if all_recipes else limit,
+            per_recipe_limit=(limit if limit > 0 else None) if all_recipes else None,
             semantic=_semantic_support(data_dir),
         )
         if not specs:
@@ -333,9 +343,21 @@ def memory_cmd(
 
         specs = _maybe_caption(specs, captions, index=index, store=store, data_dir=data_dir)
         for spec in specs:
-            _render_one(spec, index, out_dir, gif_frames, music, no_mp4, preview_width, mp4_width)
+            _render_one(
+                spec,
+                index,
+                out_dir,
+                gif_frames,
+                music,
+                no_mp4,
+                preview_width,
+                mp4_width,
+                style=style,
+            )
             state.record_surfaced(memory_id(spec.recipe, spec.key), title=spec.title)
         _render_build_report(report)
+        if all_recipes:
+            _render_per_recipe(specs, offers, report, cooled=not named)
     finally:
         store.close()
 
@@ -483,6 +505,68 @@ def _maybe_caption(
         + "[/dim]"
     )
     return out
+
+
+def _announce_all_recipes(offers: list[Offer]) -> None:
+    """Say what will be attempted, BEFORE anything is built.
+
+    `registered()` cannot be empty any more (see
+    `memory.recipes.registry`), but the number of recipes that actually
+    OFFERED something on this library can be, and a run that builds nothing
+    should say why before it spends ten minutes finding out.
+    """
+    from rekindle.memory.recipes import registered
+
+    all_names = [r.name for r in registered()]
+    offering = {o.recipe for o in offers}
+    silent = [n for n in all_names if n not in offering]
+    console.print(
+        f"[bold]--all-recipes[/bold]: {len(all_names)} recipes registered, "
+        f"{len(offering)} of them offered something ({len(offers)} offers)."
+    )
+    if silent:
+        console.print(f"  [dim]nothing to offer from: {', '.join(silent)}[/dim]")
+
+
+def _render_per_recipe(
+    specs: list[MemorySpec],
+    offers: list[Offer],
+    report: engine.BuildReport,
+    *,
+    cooled: bool,
+) -> None:
+    """One row per recipe: offered, built. The point of `--all-recipes`.
+
+    A single total cannot show the failure this flag exists to fix - 192
+    memories from one recipe and nothing from the other eight totals the same
+    as a spread. So the spread is printed.
+    """
+    from rekindle.memory.recipes import registered
+
+    built_by: dict[str, int] = {}
+    for spec in specs:
+        built_by[spec.recipe] = built_by.get(spec.recipe, 0) + 1
+    offered_by: dict[str, int] = {}
+    for offer in offers:
+        offered_by[offer.recipe] = offered_by.get(offer.recipe, 0) + 1
+
+    table = Table(title="every recipe, and what it built")
+    table.add_column("recipe")
+    table.add_column("offered", justify="right")
+    table.add_column("built", justify="right")
+    for recipe in registered():
+        made = built_by.get(recipe.name, 0)
+        table.add_row(
+            recipe.name,
+            str(offered_by.get(recipe.name, 0)),
+            f"[green]{made}[/green]" if made else "[dim]0[/dim]",
+        )
+    console.print(table)
+    if cooled and report.skipped.get(engine.SKIP_COOLDOWN):
+        console.print(
+            f"[dim]{report.skipped[engine.SKIP_COOLDOWN]} were inside the resurfacing "
+            "cooldown. `--force` rebuilds those too.[/dim]"
+        )
 
 
 def _render_build_report(report: engine.BuildReport) -> None:
@@ -925,6 +1009,7 @@ def prompt_cmd(
     judge: bool = True,
     preview_width: int = 0,
     mp4_width: int = 0,
+    style: str = STYLE_FILM,
     retrieve=None,
 ) -> None:
     """Build ONE memory from the user's own words.
@@ -1029,7 +1114,17 @@ def prompt_cmd(
             return
 
         for built in _maybe_caption([spec], captions, index=index, store=store, data_dir=data_dir):
-            _render_one(built, index, out_dir, gif_frames, music, no_mp4, preview_width, mp4_width)
+            _render_one(
+                built,
+                index,
+                out_dir,
+                gif_frames,
+                music,
+                no_mp4,
+                preview_width,
+                mp4_width,
+                style=style,
+            )
             state.record_surfaced(memory_id(built.recipe, built.key), title=built.title)
         _render_build_report(report)
         console.print(f"\n[yellow]{PROMPT_CAVEAT}[/yellow]")

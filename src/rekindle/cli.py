@@ -328,7 +328,27 @@ def memory(
     no_mp4: Annotated[
         bool, typer.Option("--no-mp4", help="Skip the MP4 even if ffmpeg is here.")
     ] = False,
-    limit: Annotated[int, typer.Option("--limit", help="Maximum memories to build.")] = 1,
+    limit: Annotated[
+        int,
+        typer.Option(
+            "--limit",
+            help=(
+                "Maximum memories to build. With --all-recipes this is PER "
+                "RECIPE, and 0 means no cap."
+            ),
+        ),
+    ] = 1,
+    all_recipes: Annotated[
+        bool,
+        typer.Option(
+            "--all-recipes",
+            help=(
+                "Build from every registered recipe, applying --limit to each "
+                "one instead of to the batch. `--all-recipes --limit 0` "
+                "rebuilds everything."
+            ),
+        ),
+    ] = False,
     force: Annotated[
         bool,
         typer.Option(
@@ -380,6 +400,18 @@ def memory(
             ),
         ),
     ] = True,
+    style: Annotated[
+        str,
+        typer.Option(
+            "--style",
+            help=(
+                "'film' (default): crossfades, slow pans and cards that "
+                "arrive. 'cuts': hard cuts and static frames - measured on one "
+                "24-shot memory, a third the file size and a third the time. "
+                "Affects the MP4 only; the previews are always hard cuts."
+            ),
+        ),
+    ] = "film",
     data_dir: DataDir = Path("./data"),
 ) -> None:
     """Build memories into a folder. Renders a GIF, and an MP4 if ffmpeg is on PATH.
@@ -392,9 +424,24 @@ def memory(
     """
     from rekindle.memory.captioning import MODES
     from rekindle.memory.cli import memory_cmd, prompt_cmd
+    from rekindle.memory.render.timeline import STYLES
 
     if captions not in MODES:
         console.print(f"[red]--captions must be one of {', '.join(MODES)}, not {captions!r}[/red]")
+        raise typer.Exit(code=2)
+    if style not in STYLES:
+        console.print(f"[red]--style must be one of {', '.join(STYLES)}, not {style!r}[/red]")
+        raise typer.Exit(code=2)
+
+    if all_recipes and (recipe or key or auto or text is not None):
+        # Refused rather than resolved by precedence. "Every recipe" and "this
+        # one recipe" are contradictory instructions, and the project's
+        # signature defect is a command that silently does something other
+        # than what its arguments say.
+        console.print(
+            "[red]--all-recipes cannot be combined with --recipe, --key, --auto "
+            "or a prompt.[/red] It means every recipe; those each mean one memory."
+        )
         raise typer.Exit(code=2)
 
     if text is not None:
@@ -420,6 +467,7 @@ def memory(
             judge=judge,
             preview_width=preview_width,
             mp4_width=mp4_width,
+            style=style,
         )
         return
 
@@ -439,6 +487,8 @@ def memory(
         captions,
         preview_width,
         mp4_width,
+        style=style,
+        all_recipes=all_recipes,
     )
 
 

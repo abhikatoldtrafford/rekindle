@@ -42,6 +42,10 @@ SKIP_TOO_FEW = "too_few_photos"
 SKIP_DISMISSED = "dismissed"
 SKIP_COOLDOWN = "in_cooldown"
 SKIP_OVERLAP = "overlaps_another"
+#: Reached, and refused only because this recipe had already filled its share
+#: of `--limit`. Distinct from every other reason: nothing is wrong with these
+#: memories and raising the limit builds them.
+SKIP_RECIPE_LIMIT = "recipe_limit_reached"
 SKIP_EMPTY = "no_candidates"
 # A recipe whose premise is spanning time could not span it: the quality or
 # composition gates left too few distinct periods standing.
@@ -298,6 +302,7 @@ def build_all(
     dismissed: frozenset[str] = frozenset(),
     cooling: frozenset[str] = frozenset(),
     limit: int | None = None,
+    per_recipe_limit: int | None = None,
     semantic: SemanticSupport | None = None,
 ) -> tuple[list[MemorySpec], BuildReport]:
     """Build a batch, refusing dismissed, cooling and redundant memories.
@@ -306,12 +311,28 @@ def build_all(
     offer order. That makes the result depend on the order offers arrive in -
     which is exactly why `all_offers` is deterministic: the first of two
     redundant memories wins, and "first" must mean the same thing every run.
+
+    `limit` caps the WHOLE batch and stops the loop. `per_recipe_limit` caps
+    each recipe's share and does not - later recipes are still reached. That
+    difference is the whole of `--all-recipes`: offers arrive in registry
+    order and `on_this_day` alone contributes 192 of them, so a global cap of
+    any sane size never gets past the second recipe.
+
+    They compose, and `per_recipe_limit` is applied FIRST, inside one batch
+    rather than by calling this function once per recipe. Per-recipe calls
+    would lose the cross-recipe overlap check - `accepted` is what stops the
+    same twelve photographs shipping as an album story and again as a year in
+    review - and that check is the reason a batch is a batch.
     """
     report = BuildReport(offered=len(offers))
     built: list[MemorySpec] = []
     accepted: list[list[str]] = []
+    per_recipe: dict[str, int] = {}
 
     for offer in offers:
+        if per_recipe_limit is not None and per_recipe.get(offer.recipe, 0) >= per_recipe_limit:
+            report.skip(SKIP_RECIPE_LIMIT)
+            continue
         if offer.memory_id in dismissed:
             report.skip(SKIP_DISMISSED)
             continue
@@ -337,6 +358,7 @@ def build_all(
             continue
         accepted.append(hashes)
         built.append(spec)
+        per_recipe[offer.recipe] = per_recipe.get(offer.recipe, 0) + 1
         if limit is not None and len(built) >= limit:
             # The remaining offers were never considered. They are not
             # "skipped" - they were not reached - so the offered count is

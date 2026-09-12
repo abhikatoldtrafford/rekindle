@@ -1289,3 +1289,173 @@ def test_shots_the_embedding_reordered_are_reported(tmp_path, monkeypatch):
     result = _build(tmp_path, _library(tmp_path), "--max-shots", "3")
     assert result.exit_code == 0, result.output
     assert "chosen differently" in _flat(result.output)
+
+
+# --------------------------------------------------------------- --all-recipes
+
+
+def _spread_library(tmp_path) -> Path:
+    """Five distinct albums, plus album-LESS photos of a person nobody else
+    appears with.
+
+    Distinct albums so five album stories can coexist without the overlap
+    guard eating four of them, and the album-less block so at least one other
+    recipe has photographs no album story can claim. Both shapes are taken
+    from the reference library, which has 34 real albums and 3,930 photos in
+    no album but a Takeout year bucket.
+    """
+    data = tmp_path / "data"
+    photos = []
+    n = 0
+    for year, album in ((2016, "Kashmir"), (2017, "Ladakh"), (2018, "Goa"), (2019, "Sikkim")):
+        for i in range(10):
+            path = _jpeg(
+                tmp_path / "lib" / f"p{n}.jpg", colour=((n * 37) % 240, (n * 11) % 200, 60)
+            )
+            photos.append(
+                _photo(
+                    f"h{n:03d}",
+                    path,
+                    local=datetime(year, 6, 11, 9, 0) + timedelta(hours=i),
+                    albums=[album],
+                    people=("Abhik Maiti",),
+                )
+            )
+            n += 1
+    for year in (2016, 2018, 2020):
+        for i in range(6):
+            path = _jpeg(tmp_path / "lib" / f"p{n}.jpg", colour=((n * 53) % 250, 40, (n * 7) % 200))
+            photos.append(
+                _photo(
+                    f"h{n:03d}",
+                    path,
+                    local=datetime(year, 11, 2, 9, 0) + timedelta(hours=i),
+                    albums=[],
+                    people=("Riya",),
+                )
+            )
+            n += 1
+    with PhotoStore(data / "rekindle.sqlite") as store:
+        store.upsert_many(photos)
+    return data
+
+
+def _built(out: Path) -> dict[str, int]:
+    if not out.exists():
+        return {}
+    counts: dict[str, int] = {}
+    for d in out.iterdir():
+        spec = json.loads((d / "memory.json").read_text(encoding="utf-8"))
+        counts[spec["recipe"]] = counts.get(spec["recipe"], 0) + 1
+    return counts
+
+
+def _memory(data, out, *argv):
+    return runner.invoke(
+        app, ["memory", *argv, "--out", str(out), "--no-mp4", "--data-dir", str(data)]
+    )
+
+
+def test_all_recipes_reaches_recipes_a_bigger_limit_never_does(tmp_path):
+    """The whole point, measured against the thing it replaces.
+
+    Raising `--limit` does not help: offers come in registry order, so a
+    bigger cap just builds more of the FIRST recipe. `--all-recipes` spends
+    the cap per recipe instead.
+    """
+    data = _spread_library(tmp_path)
+    plain = _memory(data, tmp_path / "o1", "--limit", "2")
+    assert plain.exit_code == 0, plain.output
+    assert _built(tmp_path / "o1") == {"album_story": 2}
+
+    bigger = _memory(data, tmp_path / "o2", "--limit", "4", "--force")
+    assert bigger.exit_code == 0, bigger.output
+    assert set(_built(tmp_path / "o2")) == {"album_story"}, "a bigger cap must not help"
+
+    every = _memory(data, tmp_path / "o3", "--all-recipes", "--limit", "2", "--force")
+    assert every.exit_code == 0, every.output
+    spread = _built(tmp_path / "o3")
+    assert spread.get("album_story") == 2
+    assert len(spread) > 1, f"--all-recipes built only {spread}"
+
+
+def test_all_recipes_with_limit_zero_builds_every_offer_it_can(tmp_path):
+    data = _spread_library(tmp_path)
+    capped = _memory(data, tmp_path / "o1", "--all-recipes", "--limit", "1")
+    assert capped.exit_code == 0, capped.output
+    uncapped = _memory(data, tmp_path / "o2", "--all-recipes", "--limit", "0", "--force")
+    assert uncapped.exit_code == 0, uncapped.output
+    assert sum(_built(tmp_path / "o2").values()) > sum(_built(tmp_path / "o1").values())
+    assert _built(tmp_path / "o2")["album_story"] == 4
+
+
+def test_all_recipes_reports_every_recipe_including_the_silent_ones(tmp_path):
+    """A run that builds nothing from six of nine recipes has to say so.
+
+    The reported failure exited 0 with an empty directory and no explanation.
+    Silence is the bug; the table is the fix.
+    """
+    data = _spread_library(tmp_path)
+    result = _memory(data, tmp_path / "o", "--all-recipes", "--limit", "1")
+    assert result.exit_code == 0, result.output
+    assert "9 recipes registered" in result.output
+    for name in ("album_story", "year_in_review", "place_cluster", "recurring_event"):
+        assert name in result.output
+
+
+def test_all_recipes_never_reports_zero_recipes(tmp_path):
+    """The registry cannot be empty, so the announcement cannot say it is."""
+    data = _spread_library(tmp_path)
+    result = _memory(data, tmp_path / "o", "--all-recipes", "--limit", "1")
+    assert "0 recipes registered" not in result.output
+
+
+@pytest.mark.parametrize(
+    "conflict",
+    [
+        ["--recipe", "album_story"],
+        ["--recipe", "album_story", "--key", "Kashmir"],
+        ["--auto"],
+    ],
+    ids=["recipe", "recipe+key", "auto"],
+)
+def test_all_recipes_refuses_a_contradictory_argument(tmp_path, conflict):
+    """ "Every recipe" and "this one memory" are contradictory instructions.
+    Resolving them by precedence is how this project's signature defect - a
+    command silently doing something other than what its arguments say - gets
+    in."""
+    data = _spread_library(tmp_path)
+    out = tmp_path / "o"
+    result = _memory(data, out, "--all-recipes", *conflict)
+    assert result.exit_code == 2, result.output
+    assert "--all-recipes cannot be combined" in result.output
+    assert not out.exists() or list(out.iterdir()) == []
+
+
+def test_all_recipes_refuses_a_prompt(tmp_path):
+    data = _spread_library(tmp_path)
+    out = tmp_path / "o"
+    result = runner.invoke(
+        app,
+        [
+            "memory",
+            "durga puja",
+            "--all-recipes",
+            "--out",
+            str(out),
+            "--no-mp4",
+            "--data-dir",
+            str(data),
+        ],
+    )
+    assert result.exit_code == 2, result.output
+    assert "--all-recipes cannot be combined" in result.output
+
+
+def test_without_all_recipes_nothing_changes(tmp_path):
+    """The default path must be byte-identical to what it was."""
+    data = _spread_library(tmp_path)
+    first = _memory(data, tmp_path / "o1", "--limit", "3")
+    assert first.exit_code == 0, first.output
+    assert "--all-recipes" not in first.output
+    assert "every recipe, and what it built" not in first.output

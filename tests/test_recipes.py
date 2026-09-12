@@ -597,3 +597,132 @@ def test_every_other_recipe_declares_a_dimension(tmp_path):
             assert selection.stratify == dimension, f"{name} declares {selection.stratify}"
     finally:
         store.close()
+
+
+# --------------------------------------------------------- the registry loads
+#
+# The reported failure: a script looped over `REGISTRY`, got an empty dict
+# because nothing had imported `recipes.builtin`, ran zero iterations and
+# **exited 0** with an empty output directory. An empty registry is never a
+# legitimate state - the nine built-ins are not optional - so every read of it
+# has to be able to fill it.
+
+
+def _forget_the_builtins():
+    """Put the process back in the state a fresh interpreter is in.
+
+    Both halves are needed: clearing the dict alone leaves `builtin` in
+    `sys.modules`, so `import_module` returns the cached module without
+    re-running a single `@register` and the registry stays empty. That is
+    itself a way this feature could silently not work, so the helper is
+    written to expose it rather than to avoid it.
+    """
+    import sys
+
+    from rekindle.memory.recipes import registry as reg
+
+    dict.clear(reg.REGISTRY)
+    sys.modules.pop(reg.BUILTIN_MODULE, None)
+
+
+@pytest.fixture
+def forgotten():
+    _forget_the_builtins()
+    yield
+    _forget_the_builtins()
+    from rekindle.memory.recipes import registry as reg
+
+    assert len(reg.REGISTRY) == 9  # restore for every test that follows
+
+
+#: Every way a caller can look at the registry, and what a WORKING one
+#: answers. One accessor per case: `bool()` falls through to `__len__`, and
+#: `len()` loading the registry would hide a broken `__contains__` from any
+#: test that checked both. Three mutants survived exactly that way before this
+#: was split up.
+_READS = [
+    pytest.param(lambda r: len(list(r.REGISTRY)), 9, id="iterate"),
+    pytest.param(lambda r: len(r.REGISTRY), 9, id="len"),
+    pytest.param(lambda r: bool(r.REGISTRY), True, id="bool"),
+    pytest.param(lambda r: len(r.REGISTRY.keys()), 9, id="keys"),
+    pytest.param(lambda r: len(r.REGISTRY.values()), 9, id="values"),
+    pytest.param(lambda r: len(r.REGISTRY.items()), 9, id="items"),
+    pytest.param(lambda r: "album_story" in r.REGISTRY, True, id="contains"),
+    pytest.param(lambda r: r.REGISTRY["album_story"].name, "album_story", id="getitem"),
+    pytest.param(lambda r: r.REGISTRY.get("album_story").name, "album_story", id="dict-get"),
+    pytest.param(lambda r: r.get("album_story").name, "album_story", id="get()"),
+    pytest.param(lambda r: len(r.registered()), 9, id="registered()"),
+    pytest.param(lambda r: len(r.names()), 9, id="names()"),
+]
+
+
+@pytest.mark.parametrize(("read", "expected"), _READS)
+def test_every_way_of_reading_the_registry_loads_it(forgotten, read, expected):
+    """Not just `registered()`. A caller reaching for the dict is doing a
+    reasonable thing and must not be handed nothing.
+
+    `forgotten` puts the process back to "the built-ins were never imported",
+    and this is the FIRST read afterwards - so each accessor is tested as the
+    one that has to do the loading, not as a passenger on another one.
+    """
+    from rekindle.memory.recipes import registry as reg
+
+    assert read(reg) == expected
+
+
+def test_a_script_that_loops_over_the_registry_cannot_silently_do_nothing(forgotten):
+    """The exact reported shape: enumerate, do a thing per recipe, exit 0."""
+    from rekindle.memory.recipes import registry as reg
+
+    done = [name for name in reg.REGISTRY]
+    assert done, "zero iterations and no error is the bug this guards"
+    assert len(done) == 9
+
+
+def test_names_agrees_with_registered_and_keeps_registration_order():
+    from rekindle.memory.recipes import names, registered
+
+    assert names() == [r.name for r in registered()]
+    assert names()[0] == "album_story"
+
+
+def test_a_third_party_recipe_cannot_get_ahead_of_the_builtins(forgotten):
+    """Registration order decides `rekindle memories` order and breaks `--auto`
+    ties, so it must not depend on which module a caller imported first."""
+    from rekindle.memory.recipes import registry as reg
+    from rekindle.memory.recipes.base import Offer
+
+    @reg.register
+    class _Late:
+        name = "zzz_third_party"
+        title = "Third party"
+
+        def offers(self, index) -> list[Offer]:
+            return []
+
+        def select(self, index, offer):
+            return None
+
+    try:
+        assert reg.names()[0] == "album_story"
+        assert reg.names()[-1] == "zzz_third_party"
+        assert len(reg.names()) == 10
+    finally:
+        dict.pop(reg.REGISTRY, "zzz_third_party", None)
+
+
+def test_registering_the_same_name_twice_is_still_refused():
+    from rekindle.memory.recipes import registry as reg
+
+    with pytest.raises(ValueError, match="duplicate recipe name"):
+
+        @reg.register
+        class _Dupe:
+            name = "album_story"
+            title = "Nope"
+
+            def offers(self, index):
+                return []
+
+            def select(self, index, offer):
+                return None
