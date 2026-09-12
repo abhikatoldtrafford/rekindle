@@ -1050,3 +1050,32 @@ found both of these. Neither was visible from the code.
   **captions are cached**, so an ungrounded run writes thin captions that are
   never regenerated; recovering means deleting the `gpt` rows from
   `photo_captions` by hand.
+
+## Closed by the independent audit
+
+Twenty-two defects, found by an agent given the repository with no context and
+told to work out what it does and what is wrong with it. Full account, with
+the measurements and the two findings that did not reproduce, in
+[the audit decision log](decision-log-independent-audit.md).
+
+What is worth carrying forward from it, rather than the list itself:
+
+- **`INSERT OR REPLACE` over a hand-typed column list destroyed data on every
+  ordinary run.** v6 added two columns and did not add them there, so
+  `rekindle index` wiped 18,363 orientation verdicts in 3.9 seconds. The
+  statement is now built from one tuple, `ON CONFLICT DO UPDATE` makes an
+  omission preserve rather than delete, and a test asserts every column of
+  `photos` is declared on one side of the line or the other. **Do not
+  reintroduce a second place that lists columns by hand.**
+- **Nine of the twenty-two were a docstring or README contradicting the code
+  beside it**, including a vocabulary rule written eighteen lines above the
+  term that broke it. Prose and code stay in step only when something asserts
+  they do; `test_caption_vocab.py` now ties the sensitive-word list to the
+  words rule 4 uses.
+- **Three were reports that looked like success.** `24/24 accepted` with no
+  grounding, `3 shots withheld` when five were, `Dates corrected: 1` for a
+  date that had just been destroyed. A count is a claim.
+
+Still true, and unchanged by the audit: the determinism promise holds byte for
+byte, and `--public-safe` was verified shot by shot against the raw tags with
+no violations.
