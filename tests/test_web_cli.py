@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 
 from rekindle.cli import app as cli
 from tests.fixtures.web import make_library
+from tests.helpers import unwrapped
 
 runner = CliRunner()
 
@@ -159,9 +160,9 @@ def test_two_uis_cannot_share_a_port(tmp_path):
 def test_render_help_names_the_spec(tmp_path):
     result = runner.invoke(cli, ["render", "--help"])
     assert result.exit_code == 0
-    collapsed = " ".join(result.output.split())
-    assert "memory.json" in collapsed
-    assert "--frame-ms" in collapsed
+    collapsed = unwrapped(result.output)
+    assert unwrapped("memory.json") in collapsed
+    assert unwrapped("--frame-ms") in collapsed
 
 
 def test_the_ui_reports_a_missing_semantic_extra_without_failing(tmp_path, capsys, monkeypatch):

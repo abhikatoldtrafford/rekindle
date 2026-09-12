@@ -15,6 +15,7 @@ from rekindle.cli import app
 from rekindle.semantic.cli import EXIT_UNAVAILABLE
 from rekindle.semantic.store import EmbeddingStore
 from tests.fixtures.semantic import TOY_DIM, make_index, make_photo, write_photo
+from tests.helpers import unwrapped
 
 runner = CliRunner()
 
@@ -77,7 +78,7 @@ def test_find_without_an_index_says_so_and_exits_2(tmp_path):
 def test_find_without_embeddings_names_the_command_to_run(library):
     result = runner.invoke(app, ["semantic", "find", "sunset", "--data-dir", str(library)])
     assert result.exit_code == EXIT_UNAVAILABLE
-    assert "semantic embed" in result.stdout
+    assert unwrapped("semantic embed") in unwrapped(result.stdout)
 
 
 def test_embed_without_the_extra_names_the_extra(library):

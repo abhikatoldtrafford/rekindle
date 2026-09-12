@@ -24,7 +24,12 @@ jobs:
           # was never actually verified. The input sets UV_PYTHON, which
           # `uv sync` and `uv run` both honour.
           python-version: ${{ matrix.python-version }}
-      - run: uv sync --all-extras
+      # `--all-extras` pulls torch on all six legs - ~2.5 GB each, and it was
+      # the reason a run took 14 minutes. The CPU `semantic` extra exercises
+      # every semantic code path; the GPU extra only swaps the runtime behind
+      # it, and CI has no GPU to swap to. One leg still installs everything so
+      # the full resolution is verified.
+      - run: uv sync --extra semantic --extra heic
       # Proves the pin took effect. A silently-ignored python-version would
       # otherwise leave this job green while testing the wrong interpreter.
       - run: uv run python -c "import sys; assert sys.version.startswith('${{ matrix.python-version }}'), sys.version"
@@ -33,8 +38,26 @@ jobs:
       - run: uv run ruff format --check .
       - run: uv run pytest -v
 
-  # --all-extras above means the no-HEIC path is never exercised. It is a
-  # supported configuration, so it needs a job.
+  # The full dependency set still has to resolve somewhere, or a broken
+  # `semantic-gpu` pin ships unnoticed. Resolution only - no test run, because
+  # the matrix above already covers behaviour.
+  test-all-extras-resolve:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --all-extras
+      - run: uv run rekindle --version
+
+  # The extras above mean the no-extra path is never exercised there. It is
+  # the DEFAULT configuration - four packages - and every semantic feature is
+  # supposed to degrade to a clear message rather than a failure.
+  #
+  # This job was red for ten pushes while local runs were green, because the
+  # developer's machine had torch, numpy and onnxruntime installed and five
+  # tests silently depended on them. That is the whole reason it exists.
   test-minimal:
     runs-on: ubuntu-latest
     steps:

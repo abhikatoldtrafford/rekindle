@@ -1175,8 +1175,30 @@ def _fake_store(monkeypatch, support):
 
     Patching `_semantic_support` itself would skip the messages that are the
     whole point of these tests.
+
+    ALSO reports the extra as installed. Without that, `test-minimal` - the CI
+    job that installs no extras, which is the whole reason it exists - takes
+    the "the semantic extra is not installed" branch and never reaches the
+    message under test. These tests were written on a machine where the extra
+    happened to be present, passed locally for ten pushes, and were red in CI
+    the entire time.
     """
+    _extra_present(monkeypatch)
     monkeypatch.setattr("rekindle.semantic.diversity.open_support", lambda *a, **k: support)
+
+
+def _extra_present(monkeypatch):
+    """Report the `semantic` extra as installed, whatever this machine has.
+
+    `test-minimal` installs no extras, so without this the code answers "the
+    semantic extra is not installed" and never reaches the branch under test.
+    """
+    from rekindle.semantic.availability import Availability
+
+    monkeypatch.setattr(
+        "rekindle.semantic.availability.probe",
+        lambda: Availability(cpu=True, gpu=False, missing_cpu=(), missing_gpu=("torch",)),
+    )
 
 
 def _build(tmp_path, data, *extra):
@@ -1233,6 +1255,7 @@ def test_a_corrupt_store_is_reported_and_the_build_carries_on(tmp_path, monkeypa
     def explode(*a, **k):
         raise RuntimeError("vectors.f32 is truncated")
 
+    _extra_present(monkeypatch)
     monkeypatch.setattr("rekindle.semantic.diversity.open_support", explode)
     result = _build(tmp_path, _library(tmp_path))
     assert result.exit_code == 0, result.output

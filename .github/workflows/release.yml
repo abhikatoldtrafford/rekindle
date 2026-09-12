@@ -1,0 +1,101 @@
+name: Release
+
+# Publishes to PyPI when a version tag is pushed. Deliberately NOT on every
+# push to main: a version number on PyPI can be yanked but never reused, so
+# publishing has to be something a person chose, not something a merge did.
+#
+#   git tag v0.2.0 && git push origin v0.2.0
+#
+# Uses PyPI Trusted Publishing (OIDC) rather than an API token. There is no
+# secret to leak, rotate, or accidentally paste somewhere public - GitHub
+# proves the workflow's identity to PyPI directly. Set it up once at
+# https://pypi.org/manage/project/rekindle/settings/publishing/ with:
+#
+#   owner        abhikatoldtrafford
+#   repository   rekindle
+#   workflow     release.yml
+#   environment  pypi
+#
+# Until that exists, this workflow fails at the publish step and nothing is
+# uploaded - which is the safe direction to fail in.
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  # The tag says nothing about whether the code works. Prove it before
+  # publishing something that cannot be unpublished.
+  verify:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: true
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync --extra semantic --extra heic
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - run: uv run pytest -q
+
+  # The default install is four packages and every semantic feature is meant
+  # to degrade to a message. A release that breaks that ships a broken tool to
+  # everyone who does not read the extras table.
+  verify-minimal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.12"
+      - run: uv sync
+      - run: uv run pytest -q
+
+  build:
+    needs: [verify, verify-minimal]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - run: uv build
+
+      # The tag and the packaged version must agree. Tagging v0.2.0 while
+      # pyproject still says 0.1.0 would publish 0.1.0 again - which PyPI
+      # rejects, but only after the whole pipeline has run.
+      - name: Tag matches the built version
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          built=$(ls dist/*.whl | sed -E 's/.*rekindle-([^-]+)-.*/\1/')
+          echo "tag=$tag built=$built"
+          test "$tag" = "$built"
+
+      # Nothing personal has ever been in a build, and a test asserts it. This
+      # is the last gate before the artifact becomes permanent, so check the
+      # artifact itself rather than trusting the test that checked the tree.
+      - name: No personal data in the artifacts
+        run: |
+          if tar tzf dist/*.tar.gz | grep -iE '(^|/)(data|memories|Takeout|\.claude)/|\.(jpg|jpeg|mp4|sqlite)$'; then
+            echo "personal data in the sdist"; exit 1
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write  # the OIDC token Trusted Publishing exchanges for upload rights
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1

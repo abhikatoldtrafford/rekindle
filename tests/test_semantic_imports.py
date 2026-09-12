@@ -67,7 +67,14 @@ def test_module_imports_nothing_heavy(module):
 
 
 def test_the_check_can_fail():
-    """A test you have not seen fail is not a test - so fail it on purpose."""
+    """A test you have not seen fail is not a test - so fail it on purpose.
+
+    Needs numpy to be importable, which is exactly what `test-minimal` does
+    not have. Skipped there rather than asserted: the point is that a present
+    module is reported present, and a job with no extras cannot demonstrate
+    that about a module it does not install.
+    """
+    pytest.importorskip("numpy")
     assert _import_check("numpy") == ["numpy"]
 
 
