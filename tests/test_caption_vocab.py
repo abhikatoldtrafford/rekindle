@@ -91,9 +91,26 @@ _SENSITIVE_WORDS = {
     "police",
     "prison",
     "arrest",
+    # A place of worship, named as such, whatever the tradition. `temple` was
+    # missing from this list and `caption_vocab.toml` shipped "at a temple" -
+    # applied to 429 photographs - so the rule and the test that enforces it
+    # disagreed with the file for an entire release. The list is now written
+    # to cover the traditions this library's own owner is most likely to
+    # photograph as well as the ones an English word list reaches for first.
     "church",
     "mosque",
     "synagogue",
+    "temple",
+    "shrine",
+    "chapel",
+    "cathedral",
+    "monastery",
+    "gurdwara",
+    "pagoda",
+    "mandir",
+    "masjid",
+    "altar",
+    "pandal",
     "prayer",
     "praying",
     "worship",
@@ -401,3 +418,39 @@ def test_every_caption_the_vocabulary_can_produce_fits():
     longest = [max(vocab.by_facet(f), key=lambda t: len(t.says)) for f in vocab.FACETS]
     line = vocab.phrase(vocab.Grounding(terms=tuple(longest)), "31 December 2019")
     assert 0 < len(line) <= vocab.MAX_CHARS
+
+
+def test_the_words_rule_4_names_are_all_in_the_sensitive_list():
+    """The gap that let "at a temple" ship.
+
+    Rule 4 is prose in `caption_vocab.toml`; `_SENSITIVE_WORDS` is the list
+    that enforces it. Nothing connected the two, so the rule could name a
+    category the list did not cover and every test would still pass. These are
+    the nouns rule 4 uses in so many words - if the rule is reworded, this
+    fails until the list is brought with it.
+    """
+    named_by_rule_4 = {"hospital", "clinic", "protest", "police", "illness"}
+    missing = named_by_rule_4 - _SENSITIVE_WORDS
+    assert not missing, f"rule 4 names {sorted(missing)} and the list does not cover them"
+
+    # "a place of worship named as such" is a category rather than a word, so
+    # it is spelled out here. A tradition missing from this set is a caption
+    # the rule forbids and nothing catches - which is exactly what happened.
+    worship = {
+        "church",
+        "mosque",
+        "synagogue",
+        "temple",
+        "shrine",
+        "chapel",
+        "cathedral",
+        "monastery",
+        "gurdwara",
+        "pagoda",
+        "mandir",
+        "masjid",
+    }
+    assert worship <= _SENSITIVE_WORDS, (
+        f"rule 4 forbids naming a place of worship; {sorted(worship - _SENSITIVE_WORDS)} "
+        "are not covered"
+    )

@@ -50,7 +50,16 @@ SOURCE_GPT = "gpt"
 #: v2 removed three subject terms - a boat, a vehicle, a bird - after grading
 #: the six photographs the library scores highest for each and finding 2, 1
 #: and about 3 of 6. Any caption cached under v1 may name one of them.
-VOCAB_VERSION = 2
+#:
+#: v3 removed "at a temple", which broke the vocabulary's OWN rule 4 - "not a
+#: place of worship named as such" - written eighteen lines above the term in
+#: the same file, and reached 429 photographs in this library. The test that
+#: exists to enforce rule 4 listed church, mosque and synagogue but not
+#: temple, so the rule, the file and the test disagreed for an entire release;
+#: that list now covers the traditions this library actually contains. The
+#: version moved rather than the term merely being deleted because a caption
+#: cached under v1 or v2 can still name a temple.
+VOCAB_VERSION = 3
 
 
 class VisionSupport(Protocol):

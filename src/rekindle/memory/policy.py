@@ -217,6 +217,22 @@ def _as_list(raw: dict, path: Path, key: str) -> list[str]:
     return value
 
 
+def _raw_lists(path: Path) -> dict[str, list[str]]:
+    """The `people`, `albums` and `paths` lists AS WRITTEN in the file.
+
+    `load_policy` normalises - album names are casefolded, paths become `Path`
+    objects - which is right for matching and wrong for rewriting the file.
+    `append_exclusion` needs what the user actually typed.
+    """
+    if not path.is_file():
+        return {}
+    raw = tomllib.loads(path.read_text(encoding="utf-8"))
+    out: dict[str, list[str]] = {}
+    for key in ("people", "albums", "paths"):
+        out[key] = [str(v) for v in _as_list(raw, path, key)]
+    return out
+
+
 def _as_date(value: object) -> date:
     """TOML gives a `date` for a bare YYYY-MM-DD and a `str` if it was quoted.
 
@@ -265,17 +281,37 @@ def append_exclusion(
     # produces a file that no longer parses. Merge scalar-list keys into what
     # is already there instead; [[dates]] is an array of tables and appends
     # cleanly, which is why it is handled separately above.
-    existing = load_policy(path) if path.is_file() else ExclusionPolicy()
+    #
+    # Merged from the RAW file, not from `load_policy`. `load_policy`
+    # casefolds album names on the way in - correctly, so the comparison does
+    # not have to remember - and merging from it wrote those casefolded
+    # strings back out, so adding "Kashmir" silently rewrote the user's
+    # existing "Diwali Kali Puja 22" as "diwali kali puja 22". Matching is
+    # casefolded either way, so nothing behaved differently; but this is a
+    # file the user hand-edits, and quietly rewriting what they typed is
+    # exactly what the docstring above says this function avoids.
+    #
+    # It is still validated: `load_policy` runs first and raises on a
+    # malformed file, so appending to a broken one fails here rather than on
+    # the user's next run.
+    if path.is_file():
+        load_policy(path)
+    raw = _raw_lists(path)
     merged: list[str] = []
-    for key, added, current in (
-        ("people", person, sorted(existing.people)),
-        ("albums", album, sorted(existing.albums)),
-        ("paths", str(dir_path) if dir_path else None, [str(p) for p in existing.paths]),
+    for key, added in (
+        ("people", person),
+        ("albums", album),
+        ("paths", str(dir_path) if dir_path else None),
     ):
         if added is None:
             continue
-        values = sorted({*current, added})
-        merged.append(f"{key} = [{', '.join(_toml_str(v) for v in values)}]")
+        current = raw.get(key, [])
+        # Case-insensitive dedup that KEEPS the spelling already in the file:
+        # adding "kashmir" to a file holding "Kashmir" must not produce two
+        # entries, and must not restyle the one that is there.
+        seen = {value.casefold() for value in current}
+        values = [*current] if added.casefold() in seen else [*current, added]
+        merged.append(f"{key} = [{', '.join(_toml_str(v) for v in sorted(values))}]")
 
     body = _rewrite_keys(path, merged)
     if date_from and date_to:

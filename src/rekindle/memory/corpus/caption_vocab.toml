@@ -162,11 +162,6 @@ facet = "setting"
 probe = "a photograph of open green fields and farmland"
 says = "in open country"
 
-[[term]]
-facet = "setting"
-probe = "a photograph of a carved temple with towers and pillars"
-says = "at a temple"
-
 # ------------------------------------------------------------ what the light is
 # Prepositional phrases, appended last and only when there is room.
 

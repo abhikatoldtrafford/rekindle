@@ -20,7 +20,10 @@ Three properties the cache has to have, none of them optional:
 
 from __future__ import annotations
 
+import contextlib
+import itertools
 import os
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,6 +31,9 @@ from PIL import Image
 
 from rekindle.meta.exif import open_upright
 from rekindle.models import Photo
+
+#: Distinguishes two writes from ONE thread, which the thread id cannot.
+_WRITE_COUNTER = itertools.count()
 
 #: Widths the UI asks for. Restricted to a fixed set so a hostile or buggy
 #: query string cannot fill the cache with 4,000 sizes of the same photo.
@@ -100,11 +106,40 @@ def _write_atomic(path: Path, data: bytes) -> None:
     `os.replace`, so a concurrent reader sees either the old file or the whole
     new one. A failure to cache is not a failure to serve: the bytes are
     already in hand, so every error here is swallowed deliberately.
+
+    THE TEMP NAME CARRIES THE THREAD, not just the process. `ThreadingHTTPServer`
+    serves a grid of thumbnails on many threads of ONE process, and this
+    module's own docstring says two requests for the same thumbnail at once is
+    "the normal case, not the rare one" - so a name built from the pid alone
+    was the SAME name for every one of them. Thread A could `replace()` a file
+    that thread B had just truncated with `write_bytes`, committing a
+    truncated JPEG; B's own `replace` then failed with `OSError` and was
+    swallowed by the very design above. The damaged file is a valid prefix of
+    the right one, so nothing detects it and `get()` serves it forever - the
+    exact outcome the atomic write exists to prevent.
+
+    Pid, thread and a counter rather than a random name: the set of names
+    stays small and is reused across runs, so a crash mid-write leaves a
+    `.part` file that the next run overwrites instead of accumulating one
+    orphan per interrupted request.
     """
+    temporary: Path | None = None
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f"{path.name}.{os.getpid()}.part")
+        unique = f"{os.getpid()}.{threading.get_ident()}.{next(_WRITE_COUNTER)}"
+        temporary = path.with_name(f"{path.name}.{unique}.part")
         temporary.write_bytes(data)
         temporary.replace(path)
     except OSError:
+        # Unique names made the cleanup necessary. With the old pid-only name
+        # a failed `replace` left a file the NEXT write would overwrite; now
+        # every writer picks its own, so the same failure would leave one
+        # orphan per occurrence in a cache directory nothing ever prunes.
+        #
+        # It is not hypothetical: eight threads replacing the same target on
+        # Windows reliably lose at least one to a sharing violation, which is
+        # how this line came to be written.
+        if temporary is not None:
+            with contextlib.suppress(OSError):
+                temporary.unlink(missing_ok=True)
         return

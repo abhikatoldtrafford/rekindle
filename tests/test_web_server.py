@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import http.client
 import json
+from pathlib import Path
 
 import pytest
 
@@ -532,6 +533,56 @@ def test_output_names_are_an_allow_list(running, tmp_path):
         "GET", f"/api/output/{session['session_id']}/memory.webp"
     )
     assert status == 200 and body[:4] == b"RIFF"
+
+
+def test_output_path_refuses_a_drive_relative_name_on_another_drive():
+    """The escape the character blacklist could not see.
+
+    `D:evil.gif` has no `/`, no `\`, no `..`, and an allowed suffix - and
+    joining it onto a folder on ANOTHER drive discards the folder entirely,
+    leaving a path Windows resolves against the current directory of drive D.
+
+    Tested on the function rather than over HTTP on purpose: reaching a file
+    outside the folder requires a file to BE there, and a test that puts one
+    there is a test that writes outside its own tmp directory. The rule is
+    about paths, so it is checked on paths.
+    """
+    from rekindle.web.server import output_path
+
+    folder = Path("C:/sessions/abc")
+    assert output_path(folder, "D:evil.gif") is None
+    assert output_path(folder, "D:memory.webp") is None
+
+
+def test_output_path_allows_a_same_drive_name_because_it_stays_inside():
+    """Narrower than it looks, and the narrowness is the point: a
+    drive-relative name on the folder's OWN drive joins inside the folder and
+    is merely another spelling of a bare name. A guard that refused it would
+    be refusing something safe, which is how blacklists grow."""
+    from rekindle.web.server import output_path
+
+    folder = Path("C:/sessions/abc")
+    resolved = output_path(folder, "C:memory.webp")
+    assert resolved is not None
+    assert resolved.name == "memory.webp"
+    assert resolved.is_relative_to(folder.resolve())
+
+
+@pytest.mark.parametrize(
+    "name",
+    ["../secret.webp", "..\secret.webp", "sub/memory.webp", "notes.txt", "memory.exe", ""],
+)
+def test_output_path_still_refuses_everything_it_refused_before(name):
+    from rekindle.web.server import output_path
+
+    assert output_path(Path("C:/sessions/abc"), name) is None
+
+
+def test_output_path_accepts_each_declared_output_type():
+    from rekindle.web.server import OUTPUT_TYPES, output_path
+
+    for suffix in OUTPUT_TYPES:
+        assert output_path(Path("C:/sessions/abc"), f"memory{suffix}") is not None
 
 
 def test_a_range_request_returns_a_partial_body(running):

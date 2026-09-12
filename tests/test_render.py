@@ -1102,3 +1102,81 @@ def test_truncation_keeps_as_much_of_the_text_as_will_FIT():
     assert draw.textlength(one_more, font=font) > max_width, (
         f"trimmed further than it had to: {got!r} left room for {one_more!r}"
     )
+
+
+# --------------------------------------------------------------------------
+# the title got none of the three guards the subtitle got
+
+
+def _title_ink(title: str, canvas: tuple[int, int]) -> tuple[int, int] | None:
+    """The leftmost and rightmost columns the TITLE alone put ink in.
+
+    Differenced against a card with no title, the same trick `_subtitle_ink`
+    uses, so the subtitle can never be mistaken for the thing under test.
+    """
+    from PIL import ImageChops
+
+    with_title = fr.title_card(title, "10 photos", canvas).convert("L")
+    without = fr.title_card("", "10 photos", canvas).convert("L")
+    diff = ImageChops.difference(with_title, without).load()
+    cols = [x for x in range(canvas[0]) if any(diff[x, y] > 40 for y in range(canvas[1]))]
+    return (min(cols), max(cols)) if cols else None
+
+
+#: One word, no space to wrap at, about eleven characters. The title face on a
+#: 9:16 preview is 227px against a 1120px box, so these overflowed BOTH edges.
+UNBREAKABLE = ["Bhubaneswar", "Kanyakumari", "Thanksgiving", "Wedding_arnab_pics"]
+
+
+@pytest.mark.parametrize("title", UNBREAKABLE)
+@pytest.mark.parametrize(
+    "canvas",
+    [(1280, 2276), (1280, 1707), (1280, 960), (640, 480), (320, 240)],
+    ids=lambda c: f"{c[0]}x{c[1]}",
+)
+def test_the_title_is_never_clipped_by_the_canvas(title, canvas):
+    """`title_size` comes from the canvas HEIGHT and `max_width` from its
+    WIDTH, so a tall narrow canvas sets a face far too big for its own box -
+    and `_wrap` deliberately leaves a single over-long word long. 1280x2276 is
+    not exotic: it is what `preview_canvas` returns for a 9:16 memory, on the
+    default path with no flags."""
+    ink = _title_ink(title, canvas)
+    assert ink is not None, "the title drew nothing at all"
+    assert ink[0] > 0, f"{title} touches the left edge at {canvas}"
+    assert ink[1] < canvas[0] - 1, f"{title} touches the right edge at {canvas}"
+
+
+def test_a_title_that_already_fits_is_drawn_EXACTLY_as_before():
+    """The same no-op requirement the subtitle fix was held to."""
+    canvas = (1280, 960)
+    draw = ImageDraw.Draw(Image.new("RGB", canvas))
+    size, lines = fr._fit(draw, "Kashmir", max(18, canvas[1] // 10), fr.MIN_TITLE_SIZE, 1120)
+    assert size == max(18, canvas[1] // 10), "the starting size is the one it always used"
+    assert lines == ["Kashmir"]
+
+
+def test_a_multi_word_title_WRAPS_before_it_shrinks():
+    canvas = (400, 300)
+    draw = ImageDraw.Draw(Image.new("RGB", canvas))
+    start = max(18, canvas[1] // 10)
+    size, lines = fr._fit(draw, "A place you kept coming back to", start, fr.MIN_TITLE_SIZE, 350)
+    assert len(lines) > 1
+    assert " ".join(lines) == "A place you kept coming back to", "wrapping lost a word"
+
+
+def test_an_unbreakable_title_is_ellipsised_once_shrinking_runs_out():
+    """The third guard, and the one that makes the promise unconditional: no
+    amount of shrinking fits one long word into a very narrow box."""
+    draw = ImageDraw.Draw(Image.new("RGB", (160, 1200)))
+    size, lines = fr._fit(draw, "Bhubaneswar" * 3, max(18, 1200 // 10), fr.MIN_TITLE_SIZE, 140)
+    assert size == fr.MIN_TITLE_SIZE, "it should have shrunk all the way down first"
+    assert lines[0].endswith(fr.ELLIPSIS)
+
+
+def test_an_empty_title_still_reserves_its_line():
+    """`_fit` returns no lines for empty text, which is right for the subtitle
+    and would silently re-centre every card that has a title. The caller keeps
+    the blank line; this pins that."""
+    canvas = (1280, 960)
+    blank = fr.title_card("", "10 photos", canvas)
+    assert blank.size == canvas

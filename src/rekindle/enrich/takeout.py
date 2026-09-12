@@ -725,14 +725,29 @@ def propagate_to_derivatives(photos: list[Photo], report: EnrichReport) -> list[
         before_description = dst.description
         before_favorite = dst.favorite
 
-        dst.taken_at_utc = src.taken_at_utc
-        dst.taken_at_local = src.taken_at_local
-        # NOT src.tz_source. This file has no EXIF of its own, so copying
-        # `exif_offset` onto 655 .MP videos makes doctor report a provenance
-        # that cannot exist. The instant and the wall clock are copied intact -
-        # only the claim about where they came from changes, and for this row
-        # the answer is the Takeout pass, via its sibling.
-        dst.tz_source = TzSource.TAKEOUT
+        # GUARDED, like every other field below it. The donor's date wins when
+        # there IS one - that is the point of the pass, since an `-edited`
+        # file's own EXIF often carries the moment of the EDIT rather than the
+        # moment of the photograph. A donor with no date has nothing to lend.
+        #
+        # Unconditional, this line DESTROYED data. `apply_sidecar` stamps
+        # `sidecar_match = "exact"` on any photograph whose sidecar was found,
+        # including one whose sidecar carried no parseable `photoTakenTime`,
+        # so such a donor reached here and nulled a derivative holding a
+        # perfectly good EXIF date. A dateless photograph is then refused by
+        # `ExclusionPolicy.deny_reason` as `no_date` and vanishes from every
+        # memory - and the run reported it as "Dates corrected: 1".
+        if src.taken_at_utc is not None:
+            dst.taken_at_utc = src.taken_at_utc
+            dst.taken_at_local = src.taken_at_local
+            # NOT src.tz_source. This file has no EXIF of its own, so copying
+            # `exif_offset` onto 655 .MP videos makes doctor report a
+            # provenance that cannot exist. The instant and the wall clock are
+            # copied intact - only the claim about where they came from
+            # changes, and for this row the answer is the Takeout pass, via
+            # its sibling. Inside the guard with them: a row that inherited no
+            # date must not be relabelled as having inherited one.
+            dst.tz_source = TzSource.TAKEOUT
         # Same fabrication risk, milder: a .MP video has no EXIF at all, not
         # even a displaced one, so it never inherits `exif_taken_at_utc`. An
         # `-edited` variant IS the same shot re-encoded, so it plausibly

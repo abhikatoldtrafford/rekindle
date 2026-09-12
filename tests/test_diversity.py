@@ -490,3 +490,27 @@ def test_displaced_merges_across_buckets():
     right = dv.DiversityReport(displaced=3)
     left.merge(right)
     assert left.displaced == 5
+
+
+def test_decode_colour_returns_an_immutable_histogram():
+    """It is memoised, so every caller holding the same string gets the SAME
+    object. A list would let one caller sort or scale it in place and change
+    what every other caller sees, including in a later memory - which for a
+    deterministic engine is the worst kind of bug: reproducible only in the
+    order the caches happened to warm."""
+    first = decode_colour("01" * 64)
+    second = decode_colour("01" * 64)
+    assert isinstance(first, tuple)
+    assert first is second, "the cache is what makes immutability necessary"
+
+
+def test_the_cache_does_not_change_what_is_decoded():
+    """Cheap, and it is the whole safety argument for adding a cache to a
+    deterministic pipeline: same input, same answer, before and after a hit."""
+    raw = "0f" * 32 + "f0" * 32
+    decode_colour.cache_clear()
+    cold = decode_colour(raw)
+    warm = decode_colour(raw)
+    assert cold == warm
+    assert sum(cold) == pytest.approx(1.0)
+    assert decode_colour.cache_info().hits >= 1

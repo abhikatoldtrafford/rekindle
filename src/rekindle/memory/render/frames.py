@@ -206,11 +206,14 @@ def title_card(title: str, subtitle: str, canvas: tuple[int, int]) -> Image.Imag
     subtitle = renderable(subtitle)
     frame = Image.new("RGB", canvas, BACKGROUND)
     draw = ImageDraw.Draw(frame)
-    title_size = max(18, canvas[1] // 10)
     max_width = canvas[0] - canvas[0] // 8
 
+    # `or [""]`: an empty title keeps its blank line, so the block height and
+    # therefore the vertical centring are unchanged for every memory that
+    # was already fitting.
+    title_size, lines = _fit(draw, title, max(18, canvas[1] // 10), MIN_TITLE_SIZE, max_width)
+    lines = lines or [""]
     title_font = _font(title_size)
-    lines = _wrap(draw, title, title_font, max_width)
     sub_size, sub_lines = _fit_subtitle(draw, subtitle, canvas, max_width)
     sub_font = _font(sub_size)
 
@@ -238,25 +241,54 @@ def title_card(title: str, subtitle: str, canvas: tuple[int, int]) -> Image.Imag
 MIN_SUBTITLE_SIZE = 10
 
 
-def _fit_subtitle(draw, subtitle: str, canvas: tuple[int, int], max_width: int):
-    """`(size, lines)` for a subtitle that fits inside `max_width`.
+#: The same floor for the title. A title is the larger of the two to begin
+#: with, so it reaches this only on a canvas narrow enough that nothing was
+#: going to look good; below it, ellipsising is the honest outcome.
+MIN_TITLE_SIZE = 14
 
-    Returns `(size, [])` for an empty subtitle so the caller has one shape to
-    handle. The starting size is the one this function has always used -
-    derived from the canvas HEIGHT - so an unclipped subtitle is drawn exactly
-    as it was before.
+
+def _fit(draw, text: str, size: int, min_size: int, max_width: int):
+    """`(size, lines)` for text that fits inside `max_width`.
+
+    Three guards, applied in that order, each doing what the one before it
+    cannot: WRAP on whitespace, SHRINK the face, then ELLIPSISE. The third is
+    what makes the promise unconditional - `_wrap` deliberately leaves a
+    single over-long word long, and no amount of shrinking helps once the
+    floor is reached.
+
+    Shared by the title and the subtitle. It was written for the subtitle
+    alone, and the title - drawn at a size derived from the canvas HEIGHT
+    against a box derived from its WIDTH - got none of the three. On a 9:16
+    preview (1280x2276, the default for a portrait memory) the title face is
+    227 px against a 1120 px box, so any single word of about eleven
+    characters overflowed BOTH edges, the text being centred: `Bhubaneswar`,
+    `Kanyakumari` and `Thanksgiving` all clipped. This library happens not to
+    trigger it - its one long album name, `Wedding_arnab_pics`, is
+    landscape-majority and lands on 1280x853 - which is exactly the kind of
+    luck that should not be the reason a bug is absent.
+
+    Returns `(size, [])` for empty text so a caller can distinguish "nothing
+    to draw" from "one blank line".
     """
-    size = max(12, canvas[1] // 22)
-    if not subtitle:
+    if not text:
         return size, []
     while True:
         font = _font(size)
-        lines = _wrap(draw, subtitle, font, max_width)
+        lines = _wrap(draw, text, font, max_width)
         if max(draw.textlength(line, font=font) for line in lines) <= max_width:
             return size, lines
-        if size <= MIN_SUBTITLE_SIZE:
+        if size <= min_size:
             return size, [_ellipsise(draw, line, font, max_width) for line in lines]
         size -= 1
+
+
+def _fit_subtitle(draw, subtitle: str, canvas: tuple[int, int], max_width: int):
+    """`(size, lines)` for a subtitle that fits inside `max_width`.
+
+    The starting size is the one this function has always used - derived from
+    the canvas HEIGHT - so an unclipped subtitle is drawn exactly as before.
+    """
+    return _fit(draw, subtitle, max(12, canvas[1] // 22), MIN_SUBTITLE_SIZE, max_width)
 
 
 #: What a truncated line ends with. Three dots rather than U+2026 because the

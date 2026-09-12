@@ -1109,6 +1109,7 @@ def prompt_cmd(
         query = prompt_mod.parse(text, index)
         try:
             generator = tags_mod.generator_from_env()
+            console.print(f"[dim]{tags_mod.NETWORK_NOTICE}[/dim]")
         except LLMUnavailable:
             generator = None
 

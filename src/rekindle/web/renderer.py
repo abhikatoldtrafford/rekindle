@@ -23,7 +23,7 @@ from pathlib import Path
 from rekindle.memory.composition import FIT_PAD, canvas_for
 from rekindle.memory.history import memory_id
 from rekindle.memory.index import MemoryIndex
-from rekindle.memory.render.frames import DROP_NOT_IN_INDEX, build_frames
+from rekindle.memory.render.frames import build_frames
 from rekindle.memory.render.gif import (
     DEFAULT_FRAME_MS,
     DEFAULT_MAX_FRAMES,
@@ -93,6 +93,9 @@ class RenderResult:
     video_rendered: int = 0
     padded: int = 0
     dropped: dict[str, int] = field(default_factory=dict)
+    #: Shots the SPEC names that the index no longer admits, counted over the
+    #: whole spec before anything is rendered. See `withheld`.
+    not_admitted: int = 0
     examples: dict[str, str] = field(default_factory=dict)
     mp4_skipped: str = ""
     mp4_error: str = ""
@@ -104,8 +107,24 @@ class RenderResult:
 
     @property
     def withheld(self) -> int:
-        """Shots the spec names that the guardrails no longer admit."""
-        return self.dropped.get(DROP_NOT_IN_INDEX, 0)
+        """Shots the spec names that the guardrails no longer admit.
+
+        Read from `not_admitted`, which is counted over EVERY shot, and not
+        from the frame report's `not_in_index`.
+
+        The frame report only sees what it was asked to render. The preview
+        stops at `preview_frames` - 16 by default - and the full-resolution
+        pass that sees the rest only runs when the MP4 does, so under
+        `--no-mp4` this was a count over the first sixteen shots being printed
+        as a statement about the spec. Measured: excluding a person who
+        appears in shots 1, 6, 8, 19 and 20 of a 24-shot memory reported
+        "3 shots ... are no longer admitted".
+
+        Nothing leaked - the shots past 16 were not rendered either - but this
+        is the one line that asks the user to trust a guardrail's count, and
+        it was wrong by nearly half.
+        """
+        return self.not_admitted
 
     def to_json(self) -> dict:
         return {
@@ -179,7 +198,10 @@ def render_spec(
     if options.write_spec:
         (folder / SPEC_NAME).write_text(spec.dumps(), encoding="utf-8")
 
+    # Every shot, before any limit applies - this loop already runs to pick
+    # the canvas, so the honest withheld count is free. See `withheld`.
     photos = [p for p in (index.get(s.file_hash) for s in spec.shots) if p is not None]
+    result.not_admitted = len(spec.shots) - len(photos)
     canvas = canvas_for(photos) or FALLBACK_CANVAS
     result.canvas = canvas
 

@@ -18,7 +18,7 @@ from rekindle.models import (
     TzSource,
     merge_meta,
 )
-from rekindle.sidecars import is_album_metadata
+from rekindle.sidecars import is_photo_sidecar
 from rekindle.sidecars import sidecar_target as _sidecar_target
 
 # Google localises the edited suffix, so this is a list, not a single string.
@@ -158,16 +158,25 @@ class FolderSource:
                     report.skip("sidecar_other")
                     continue
                 report.json_sidecars += 1
-                # `is_album_metadata`, not `path.name != "metadata.json"`: the
-                # bare compare is case-SENSITIVE, so a `Metadata.json` is
-                # treated as a per-photo sidecar here while `build_index`
-                # correctly classifies the same file as album metadata. Two
-                # implementations of one rule, disagreeing - and the one that
-                # is wrong fires the loudest warning the tool has ("INCOMPLETE
-                # EXPORT ... your library will be silently missing photos").
-                # Google writes it lowercase, so there are 0 live instances;
-                # this module exists precisely so that rule has one home.
-                if not is_album_metadata(path.name):
+                # `is_photo_sidecar`, not a comparison written here. Only a
+                # per-photo sidecar can be an orphan, and this file is not the
+                # place that decides what one is: two implementations of that
+                # rule produced two different orphan counts for one export,
+                # which is why `rekindle.sidecars` exists.
+                #
+                # It excludes album metadata case-INSENSITIVELY, so a
+                # `Metadata.json` is not counted here while `build_index`
+                # classifies the same file as album metadata (0 live
+                # instances; Google writes it lowercase). It also excludes the
+                # account-level JSONs Google puts at the root of
+                # `Google Photos/` - `shared_album_comments.json` and
+                # `user-generated-memory-titles.json` - which named no
+                # photograph, matched no media file, and were therefore
+                # counted as proof that the export was incomplete. On a
+                # genuinely complete export they were the entire count, so
+                # `rekindle doctor` told a new user their library was missing
+                # photos on the strength of two files about nothing.
+                if is_photo_sidecar(path.name):
                     sidecar_stems.append(_sidecar_target(path.name))
                 continue
 

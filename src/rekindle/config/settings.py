@@ -108,18 +108,38 @@ class Setting:
     def is_int(self) -> bool:
         return isinstance(self.default, int) and not isinstance(self.default, bool)
 
-    def loosens(self, new: float) -> bool:
-        """Does moving to `new` weaken this gate?
+    def loosens(self, new: float, current: float | None = None) -> bool:
+        """Does moving from `current` to `new` weaken this gate?
 
         False for every setting that is not marked, and false for a move that
         does not change the value. `rekindle calibrate` refuses to make a move
         for which this is true without a separate, explicit confirmation.
+
+        **`current` is where the user is now, and it is what the comparison is
+        against.** This used to compare against `self.default` - where the
+        user WOULD be if they had never touched anything - which got the
+        question wrong in both directions on any library that had been
+        calibrated once. With the publishing gate's default of 0.15:
+
+            tightened to 0.05, offered 0.14 -> False, and it widens them
+            loosened  to 0.30, offered 0.20 -> True, and it makes them safer
+
+        The first silently doubles what may be published from a gate the user
+        deliberately hardened, against a README that says "a drag of a slider
+        can never widen it". The second is worse than an annoyance: it makes
+        the user type the confirmation phrase in order to become SAFER, which
+        is how a safeguard turns into a formality.
+
+        `current` defaults to the shipped default for the case that has no
+        user value yet - a first sitting on a library with no config file,
+        where the two are the same thing anyway.
         """
         if not self.loosening:
             return False
+        against = self.default if current is None else current
         if self.loosening == LOOSEN_RAISE:
-            return new > self.default
-        return new < self.default
+            return new > against
+        return new < against
 
     def clamp_error(self, value: float) -> str:
         """Empty if `value` is in range, else the sentence to show."""

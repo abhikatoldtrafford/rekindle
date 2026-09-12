@@ -12,7 +12,13 @@ from pathlib import Path
 
 import pytest
 
-from rekindle.db import SCHEMA_VERSION, FingerprintRow, PhotoStore
+from rekindle.db import (
+    _INSERTED_COLUMNS,
+    _NOT_INSERTED,
+    SCHEMA_VERSION,
+    FingerprintRow,
+    PhotoStore,
+)
 from rekindle.models import MediaType, Photo, PhotoMeta, TzSource, merge_meta
 
 T0 = datetime(2026, 1, 1, 12, 0, tzinfo=UTC)
@@ -367,3 +373,88 @@ def test_set_fingerprints_reports_rows_that_do_not_exist(tmp_path):
             store.set_fingerprints([FingerprintRow("h1", phash=1), FingerprintRow("gone", phash=2)])
             == 1
         )
+
+
+# --------------------------------------------------------------------------
+# v6: the orientation columns, and the pattern that keeps eating them
+
+
+def test_every_column_of_photos_is_on_exactly_one_side_of_the_insert_line():
+    """The structural guard, and the reason the other tests in this section
+    exist.
+
+    Three times a schema version added a column and something had to be
+    remembered by hand; three times a preservation test was written after the
+    fact. v6 added `orient_ignore_exif` and `orient_evidence`, nobody
+    remembered, and `INSERT OR REPLACE` deleted them on every ordinary
+    re-index.
+
+    A convention did not hold. This does: a new column belongs to `_insert` or
+    it is declared as owned by something else, and until someone decides which,
+    the suite fails. That is cheap to satisfy and impossible to satisfy by
+    accident.
+    """
+    with PhotoStore(Path(":memory:")) as store:
+        columns = {r["name"] for r in store._conn.execute("PRAGMA table_info(photos)")}
+
+    inserted = set(_INSERTED_COLUMNS)
+    reserved = set(_NOT_INSERTED)
+
+    assert not inserted & reserved, "a column cannot be on both sides"
+    unaccounted = columns - inserted - reserved
+    assert not unaccounted, (
+        f"new column(s) {sorted(unaccounted)} in `photos`: add them to "
+        "_INSERTED_COLUMNS, or to _NOT_INSERTED with a comment saying what "
+        "writes them and why a re-index must not"
+    )
+    assert not (inserted | reserved) - columns, "a listed column no longer exists"
+
+
+def test_reindexing_preserves_an_orientation_verdict(tmp_path):
+    """v6's preservation test, the one that was missing.
+
+    `rekindle semantic orient` costs two image decodes a photograph over the
+    whole library. `rekindle index` must not spend that. Measured on the real
+    index before the fix: re-indexing 19,480 unchanged photographs destroyed
+    18,363 verdicts and 212 corrections in 3.9 seconds.
+    """
+    db = tmp_path / "db.sqlite"
+    with PhotoStore(db) as store:
+        store.upsert_many([_photo()])
+        store.set_orientations([("abc", True, '{"e_raw": 2.27, "e_tag": 0.57}')])
+
+        # A folder rescan seeing the same bytes again: the ordinary path.
+        store.upsert_many([_photo()])
+
+        row = store._conn.execute(
+            "SELECT orient_ignore_exif, orient_evidence FROM photos WHERE file_hash = 'abc'"
+        ).fetchone()
+    assert row["orient_ignore_exif"] == 1
+    assert row["orient_evidence"] == '{"e_raw": 2.27, "e_tag": 0.57}'
+
+
+def test_reindexing_preserves_a_verdict_of_NOT_stale_too(tmp_path):
+    """0 and NULL mean different things here - "examined, the tag is fine"
+    against "never examined" - and only the second should send the photograph
+    back through the pass. Losing the 0 costs a re-examination of the whole
+    library, which is the expensive half of the same bug and would survive a
+    test that only checked the True case."""
+    db = tmp_path / "db.sqlite"
+    with PhotoStore(db) as store:
+        store.upsert_many([_photo()])
+        store.set_orientations([("abc", False, '{"e_raw": 0.1}')])
+        store.upsert_many([_photo()])
+        row = store._conn.execute(
+            "SELECT orient_ignore_exif FROM photos WHERE file_hash = 'abc'"
+        ).fetchone()
+    assert row["orient_ignore_exif"] == 0, "a NULL here re-examines the whole library"
+
+
+def test_an_upsert_still_updates_everything_it_owns(tmp_path):
+    """The other half of ON CONFLICT DO UPDATE: preserving what it does not
+    name must not turn into preserving what it does."""
+    db = tmp_path / "db.sqlite"
+    with PhotoStore(db) as store:
+        store.upsert_many([_photo(meta=PhotoMeta(taken_at_utc=T0, description="first"))])
+        store.upsert_many([_photo(meta=PhotoMeta(taken_at_utc=T0, description="second"))])
+        assert store.get("abc").meta.description == "second"

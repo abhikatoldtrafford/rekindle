@@ -188,3 +188,81 @@ def test_an_edited_variant_still_inherits_an_exif_instant():
     edited = _photo("ed", lib / "IMG-edited.jpg", PhotoMeta(), edited_of="orig")
     propagate_to_derivatives([original, edited], EnrichReport())
     assert edited.meta.exif_taken_at_utc == datetime(2020, 3, 11, 10, 0, tzinfo=UTC)
+
+
+# --------------------------------------------------------------------------
+# a donor with nothing to lend
+
+
+def _dateless_donor() -> PhotoMeta:
+    """What `apply_sidecar` leaves behind when the sidecar was found but its
+    `photoTakenTime` was absent or unparseable. `sidecar_match` is still
+    stamped `"exact"` - the match succeeded, the date did not - so this
+    photograph is a donor."""
+    return PhotoMeta(tz_source=TzSource.NONE, people=["Ada"], takeout_people=["Ada"])
+
+
+def test_a_dateless_donor_does_not_null_a_derivative_that_has_a_date():
+    """The date was the ONE field copied unconditionally, while `gps`,
+    `description`, `favorite`, `archived` and `trashed` were all guarded.
+
+    The cost was not a wrong date but a missing one: `deny_reason` refuses a
+    dateless photograph as `no_date`, so the `-edited` variant disappeared
+    from every memory - and the run credited the loss as `dates_corrected`.
+    """
+    lib = Path("/lib")
+    original = _photo("orig", lib / "IMG.jpg", _dateless_donor(), sidecar_match="exact")
+    edited = _photo(
+        "ed",
+        lib / "IMG-edited.jpg",
+        PhotoMeta(taken_at_utc=TAKEN, taken_at_local=TAKEN, tz_source=TzSource.EXIF_OFFSET),
+        edited_of="orig",
+    )
+    report = EnrichReport()
+
+    propagate_to_derivatives([original, edited], report)
+
+    assert edited.meta.taken_at_utc == TAKEN
+    assert edited.meta.tz_source is TzSource.EXIF_OFFSET, "provenance was relabelled too"
+    assert report.dates_corrected == 0, "nothing was corrected; something was almost destroyed"
+
+
+def test_a_dateless_donor_still_lends_everything_else():
+    """The guard is on the date alone. A donor with people and no date is
+    still worth inheriting from - narrowing it to "skip the whole photo" would
+    lose the face tags that are the main reason this pass exists."""
+    lib = Path("/lib")
+    original = _photo("orig", lib / "IMG.jpg", _dateless_donor(), sidecar_match="exact")
+    edited = _photo("ed", lib / "IMG-edited.jpg", PhotoMeta(), edited_of="orig")
+
+    changed = propagate_to_derivatives([original, edited], EnrichReport())
+
+    assert changed == [edited]
+    assert edited.meta.people == ["Ada"]
+    assert edited.sidecar_match == "inherited"
+
+
+def test_a_donor_that_HAS_a_date_still_overrides_the_derivative_exif():
+    """The guard must not turn into "never overwrite". An `-edited` file's own
+    EXIF often carries the moment of the EDIT, which is why the donor's date
+    wins whenever there is one."""
+    lib = Path("/lib")
+    original = _photo("orig", lib / "IMG.jpg", _enriched(), sidecar_match="exact")
+    edited_exif = datetime(2021, 6, 6, 9, 0, tzinfo=UTC)
+    edited = _photo(
+        "ed",
+        lib / "IMG-edited.jpg",
+        PhotoMeta(
+            taken_at_utc=edited_exif,
+            taken_at_local=edited_exif,
+            tz_source=TzSource.EXIF_OFFSET,
+        ),
+        edited_of="orig",
+    )
+    report = EnrichReport()
+
+    propagate_to_derivatives([original, edited], report)
+
+    assert edited.meta.taken_at_utc == TAKEN
+    assert edited.meta.tz_source is TzSource.TAKEOUT
+    assert report.dates_corrected == 1

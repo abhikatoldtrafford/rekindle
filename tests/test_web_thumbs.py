@@ -11,6 +11,7 @@ kind of defect a size assertion cannot see.
 from __future__ import annotations
 
 import io
+from pathlib import Path
 
 import pytest
 from PIL import Image
@@ -104,3 +105,49 @@ def test_the_shard_keeps_one_directory_from_holding_the_whole_library(tmp_path):
     assert path.parent.parent.name == str(GRID)
     assert path.name.endswith(".jpg")
     assert GRID in SIZES and DETAIL in SIZES
+
+
+def test_two_threads_writing_the_same_thumbnail_use_different_temp_files(tmp_path, monkeypatch):
+    """The atomic write was atomic per PROCESS, and the server is threaded.
+
+    `ThreadingHTTPServer` serves a grid on many threads of one process, and
+    this module's docstring calls two simultaneous requests for the same
+    thumbnail "the normal case, not the rare one". With the temp name built
+    from the pid alone, every one of them wrote the same file: thread A could
+    `replace()` bytes that thread B had just truncated, committing a valid but
+    TRUNCATED JPEG that nothing detects and `get()` then serves forever.
+
+    Deterministic on purpose. Racing threads and hoping to catch corruption
+    would be a flaky test of a narrow window; what the fix has to guarantee is
+    simply that no two writers pick the same name.
+    """
+    import threading
+
+    from rekindle.web.thumbs import _write_atomic
+
+    seen: list[str] = []
+    lock = threading.Lock()
+    real = Path.write_bytes
+
+    def record(self, data):
+        with lock:
+            seen.append(self.name)
+        return real(self, data)
+
+    monkeypatch.setattr(Path, "write_bytes", record)
+
+    target = tmp_path / "cache" / "abcd.jpg"
+    threads = [
+        threading.Thread(target=_write_atomic, args=(target, b"x" * (10 + i))) for i in range(8)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(seen) == 8
+    assert len(set(seen)) == 8, f"two writers shared a temp file: {sorted(seen)}"
+    assert target.is_file()
+    # Whichever writer won, the file is one whole input and not a blend.
+    assert target.read_bytes() in {b"x" * (10 + i) for i in range(8)}
+    assert not list(target.parent.glob("*.part")), "a temp file was left behind"

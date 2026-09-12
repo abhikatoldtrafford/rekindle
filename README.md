@@ -77,8 +77,10 @@ section, not a disclaimer. A video appears only as one extracted still, and
 only if ffmpeg is installed. A photographed document can slip through. We
 write those down.
 
-**Nothing leaves your machine.** The default configuration makes no network
-calls at all.
+**Nothing leaves your machine.** With no `OPENAI_API_KEY` in your environment,
+rekindle makes no network calls at all — and it says so out loud on the one
+path where a key in your environment is enough to change that. See
+[Privacy](#privacy).
 
 ---
 
@@ -590,10 +592,21 @@ We'd rather tell you than let you find out:
 ## Privacy
 
 Everything runs locally by default — no API key needed, no network calls made,
-no audio downloaded, and your original files are never modified. If you enable
-the optional LLM captions, **only a fact sheet is sent** — dates, counts, names,
-albums and coordinates drawn from your index. Never the pixels, never a file
-path, never your library. See [SECURITY.md](https://github.com/abhikatoldtrafford/rekindle/blob/main/SECURITY.md).
+no audio downloaded, and your original files are never modified.
+
+Exactly two things send anything to a language model, and **both need
+`OPENAI_API_KEY` set in your environment**. Unset it and neither can run.
+
+| Path | Trigger | What is sent |
+| --- | --- | --- |
+| Captions | `--captions gpt` | A fact sheet for one memory — dates, counts, names, albums, coordinates. |
+| Prompt memories | a prompt like `rekindle memory "photos of puri"` — **no flag** | Your phrase, your album titles, the first and last year, and two counts. |
+
+Never the pixels, never a file path. The prompt path is reached by the
+environment variable alone, so it prints a line saying what it is about to
+send before the first request leaves. Model weights are downloaded once by
+`rekindle semantic setup`, and `rekindle fetch` downloads music only when you
+ask it to. See [SECURITY.md](https://github.com/abhikatoldtrafford/rekindle/blob/main/SECURITY.md).
 
 ## Contributing
 

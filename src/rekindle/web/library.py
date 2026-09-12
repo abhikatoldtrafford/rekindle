@@ -32,7 +32,7 @@ from pathlib import Path
 from rekindle import config
 from rekindle.db import PhotoStore
 from rekindle.memory.index import MemoryIndex
-from rekindle.memory.policy import CONFIG_NAME, PolicyError, load_policy
+from rekindle.memory.policy import CONFIG_NAME, load_policy
 from rekindle.models import Photo
 
 DB_NAME = "rekindle.sqlite"
@@ -114,9 +114,22 @@ class Library:
             finally:
                 store.close()
             self.state = STATE_READY
-        except (LibraryError, PolicyError, config.ConfigError, ValueError, OSError) as exc:
+        except Exception as exc:  # noqa: BLE001 - see below; this is the point
+            # EVERY failure has to land here, not a list of the ones somebody
+            # thought of. This runs on a worker thread: an exception that
+            # escapes kills the thread silently, `state` stays "loading" and
+            # `error` stays "", and the page polls a spinner forever with the
+            # real cause thrown away.
+            #
+            # The list this replaced named LibraryError, PolicyError,
+            # ConfigError, ValueError and OSError. A corrupt index raises
+            # `sqlite3.DatabaseError`, which is none of them and is not an
+            # OSError either, so the most ordinary way for an index to be
+            # unopenable was the one way the UI could not report. Enumerating
+            # exceptions is how that happened; catching broadly here and
+            # showing the message is strictly better than a spinner.
             self.state = STATE_FAILED
-            self.error = str(exc)
+            self.error = str(exc) or exc.__class__.__name__
         finally:
             self._ready.set()
 

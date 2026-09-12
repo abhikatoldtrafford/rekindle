@@ -203,3 +203,47 @@ def test_the_ui_reports_a_missing_semantic_extra_without_failing(tmp_path, capsy
         assert payload["state"] in ("ready", "loading")
     finally:
         stop(server)
+
+
+def test_a_corrupt_index_is_reported_and_does_not_hang_the_page(tmp_path):
+    """The UI polls until the loader says ready or failed. An exception the
+    loader's catch list did not name kills the worker thread, leaves
+    `{"state": "loading", "error": ""}` and spins forever with the real cause
+    thrown away.
+
+    A corrupt index raises `sqlite3.DatabaseError`, which is not an `OSError`
+    and was not in the list - so the most ordinary way for an index to be
+    unopenable was the one way this page could not report it.
+    """
+    from rekindle.web.library import STATE_FAILED, Library
+
+    (tmp_path / "rekindle.sqlite").write_bytes(b"this is not a database")
+    library = Library(tmp_path)
+
+    library.load()
+
+    assert library.state == STATE_FAILED
+    assert library.error, "a failure with no message is a spinner with extra steps"
+    assert library.wait(timeout=0), "waiters must be released on every path"
+
+
+def test_a_failed_store_open_does_not_leave_the_file_locked(tmp_path):
+    """`PhotoStore.__init__` guards `_migrate` and the version check and closes
+    on either, both with comments about Windows keeping the file locked. The
+    FIRST statement to touch the file - `executescript` - sat outside that
+    guard, so the likeliest failure was the one that leaked the handle, and a
+    caller catching the error to delete and rebuild got `PermissionError`.
+    """
+    import sqlite3
+
+    from rekindle.db import PhotoStore
+
+    db = tmp_path / "rekindle.sqlite"
+    db.write_bytes(b"this is not a database")
+
+    with pytest.raises(sqlite3.DatabaseError):
+        PhotoStore(db)
+
+    # The real test on Windows: the handle is gone, so the file can be replaced.
+    db.unlink()
+    assert not db.exists()

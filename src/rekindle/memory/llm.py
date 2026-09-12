@@ -1,9 +1,17 @@
 """The optional GPT caption layer. Additive, off by default, deletable.
 
-This module is the ONLY place in rekindle that touches a network, and nothing
-reaches it unless the user passes `--captions gpt`. Delete this file and the
-flag and v1 is still a complete product - that is the test of whether the
-layer is really additive, and the engine is built so that it passes.
+Nothing here runs unless the user passes `--captions gpt`. Delete this file
+and the flag and v1 is still a complete product - that is the test of whether
+the layer is really additive, and the engine is built so that it passes.
+
+**This module is not the only network in rekindle, and the claim that it was
+stood here for a release.** `memory.tags` imports `http_transport` from this
+file and posts to the same endpoint whenever `OPENAI_API_KEY` is set and a
+PROMPT memory is built - no flag involved. It sends album titles, a year range
+and two counts, never a caption and never a photograph; it announces itself
+through `tags.NETWORK_NOTICE`. `rekindle fetch` also reaches the network, and
+`rekindle semantic setup` downloads weights. What is true of THIS module is
+the narrower statement above: it is unreachable without the flag.
 
 What it does NOT do:
 

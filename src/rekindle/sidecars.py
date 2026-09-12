@@ -58,3 +58,36 @@ def sidecar_target(name: str) -> str:
 def is_album_metadata(name: str) -> bool:
     """`metadata.json` describes the ALBUM, never a photo."""
     return name.casefold() == "metadata.json"
+
+
+def is_photo_sidecar(name: str) -> bool:
+    """Does this `.json` describe one PHOTOGRAPH?
+
+    A Takeout export contains three kinds of JSON and only one of them is a
+    per-photo sidecar:
+
+    * `metadata.json`, one per album - `is_album_metadata`;
+    * account-level files at the root of `Google Photos/` -
+      `shared_album_comments.json`, `user-generated-memory-titles.json`,
+      `print-subscriptions.json` and friends;
+    * the sidecars, whose name is a MEDIA FILENAME with a suffix on it.
+
+    The test is that suffix. `sidecar_target("PXL_1234.jpg.supplemental-metadata.json")`
+    is `PXL_1234.jpg`; `sidecar_target("shared_album_comments.json")` is
+    `shared_album_comments`, which is not a filename any camera or phone ever
+    produced. Listing the account-level names instead would need updating
+    every time Google adds one, and would be wrong by omission until someone
+    noticed.
+
+    It matters because `doctor` counts sidecars with no matching media and
+    fires the loudest warning the tool has - "INCOMPLETE EXPORT ... your
+    library will be silently missing photos". On a genuinely complete export
+    those two account files are the entire count, so the first command a new
+    user runs tells them their data is incomplete when it is not. The same
+    class of false alarm has now been fixed three times in `sources.folder`
+    (`.aae` companions, unsniffable formats, a capitalised `Metadata.json`),
+    which is why the rule lives here with the others rather than there.
+    """
+    if is_album_metadata(name):
+        return False
+    return bool(PurePosixPath(sidecar_target(name)).suffix)

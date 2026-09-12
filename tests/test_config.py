@@ -715,6 +715,36 @@ def test_raising_the_gate_threshold_is_the_loosening_direction():
     assert gate.loosens(gate.default) is False
 
 
+def test_the_comparison_is_against_the_users_value_not_the_shipped_default():
+    """The safeguard measures a MOVE, and a move starts where the user is.
+
+    Comparing against the default answered a different question and got both
+    directions wrong on any library calibrated even once. The first case here
+    is the one that matters: 0.14 is below the shipped 0.15, so the old code
+    waved it through - onto a user who had deliberately hardened their gate to
+    0.05, roughly tripling what may be published, with no confirmation and a
+    README promising the opposite.
+    """
+    gate = CATALOGUE["faces.gate_threshold"]
+
+    assert gate.loosens(0.14, 0.05) is True, "widens a hardened gate; must be refused"
+    assert gate.loosens(0.04, 0.05) is False, "tightening further is always free"
+
+    # And the mirror: a user who loosened must not be made to type the
+    # confirmation phrase in order to become safer again.
+    assert gate.loosens(0.20, 0.30) is False, "a tightening must never demand the phrase"
+    assert gate.loosens(0.40, 0.30) is True
+
+
+def test_with_no_current_value_the_default_is_the_starting_point():
+    """A first sitting on a library with no config file: there is no user
+    value yet, and the two numbers are the same thing."""
+    gate = CATALOGUE["faces.gate_threshold"]
+    assert gate.loosens(0.16) is True
+    assert gate.loosens(0.14) is False
+    assert gate.loosens(gate.default) is False
+
+
 def test_an_unmarked_setting_never_reports_a_loosening():
     for key, setting in CATALOGUE.items():
         if key == "faces.gate_threshold":

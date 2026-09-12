@@ -214,6 +214,110 @@ _V6_COLUMNS = (
 )
 
 
+# ---------------------------------------------------------------------------
+# What `_insert` writes, and what it must NOT touch
+# ---------------------------------------------------------------------------
+#
+# THE STATEMENT IS BUILT FROM THESE TWO TUPLES, and `test_db.py` asserts that
+# together they account for every column of `photos`. Both halves are load
+# bearing.
+#
+# `_insert` used to be `INSERT OR REPLACE` over a hand-typed column list.
+# INSERT OR REPLACE DELETES the conflicting row and inserts a new one, so a
+# column left out of that list is not "left alone" - it is reset to its
+# default. That turns "someone forgot a column" into "an ordinary
+# `rekindle index` destroys that column's data", silently, on every row.
+#
+# It happened. v6 added the two orientation columns and did not add them here,
+# so re-indexing an unchanged library wiped all 18,363 orientation verdicts
+# and all 212 corrections in under four seconds, after which those 212
+# photographs render, embed and fingerprint sideways again. The pattern had
+# already been recognised and defended three times - v3, v4 and v5 each have a
+# preservation test - and missed on the fourth. That is the signal that a
+# convention is not enough and the shape of the code has to carry it.
+#
+# ON CONFLICT DO UPDATE names the columns it overwrites, so an omission now
+# PRESERVES rather than deletes: the worst case became a stale value instead
+# of a destroyed one. Building the statement from one list removes the second
+# half of the failure, because the SQL can no longer disagree with the
+# parameters. `_NOT_INSERTED` forces the third: adding a column to the schema
+# and running the tests fails until someone says, in writing, which side of
+# this line it belongs on.
+_INSERTED_COLUMNS = (
+    "file_hash",
+    "media_type",
+    "paths",
+    "albums",
+    "edited_of",
+    "first_seen",
+    "last_seen",
+    "taken_at_utc",
+    "taken_at_local",
+    "tz_source",
+    "gps_lat",
+    "gps_lon",
+    "gps_alt",
+    "people",
+    "face_regions",
+    "keywords",
+    "description",
+    "favorite",
+    "camera_make",
+    "camera_model",
+    "width",
+    "height",
+    "source",
+    "metadata_conflict",
+    "exif_taken_at_utc",
+    "takeout_people",
+    "archived",
+    "trashed",
+    "sidecar_match",
+    "phash",
+    "sharpness",
+    "phash_error",
+    "brightness",
+    "colour",
+)
+
+#: Columns `_insert` deliberately leaves alone, and why.
+#:
+#: `rekindle semantic orient` writes these, over the whole library, at two
+#: image decodes a photograph. They cost far more to recompute than anything
+#: an index pass produces, so re-indexing must not spend them. `set_orientations`
+#: owns them; `_load_orientation_overrides` reads them back.
+_NOT_INSERTED = (
+    "orient_ignore_exif",
+    "orient_evidence",
+)
+
+
+def _build_upsert() -> str:
+    """`INSERT ... ON CONFLICT DO UPDATE`, built from `_INSERTED_COLUMNS`.
+
+    One list produces the column names, the placeholders and the SET clause,
+    so the three cannot drift apart. The statement this replaced spelled all
+    three out by hand, and its own comment - "positional VALUES(...) breaks
+    silently the moment a column is added or reordered" - was right about the
+    risk and defending the wrong half of it.
+    """
+    names = ", ".join(_INSERTED_COLUMNS)
+    values = ", ".join(f":{column}" for column in _INSERTED_COLUMNS)
+    # `file_hash` is the conflict target, so it never appears in the SET.
+    assignments = ",\n                ".join(
+        f"{column} = excluded.{column}" for column in _INSERTED_COLUMNS if column != "file_hash"
+    )
+    return (
+        f"INSERT INTO photos ({names})\n"
+        f"            VALUES ({values})\n"
+        f"            ON CONFLICT(file_hash) DO UPDATE SET\n"
+        f"                {assignments}"
+    )
+
+
+_UPSERT_PHOTO = _build_upsert()
+
+
 _SIGN_BIT = 1 << 63
 _U64 = 1 << 64
 
@@ -322,20 +426,28 @@ class PhotoStore:
         db_path.parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(db_path)
         self._conn.row_factory = sqlite3.Row
-        self._conn.executescript(_SCHEMA)
-        self._conn.execute(
-            "INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)",
-            (str(SCHEMA_VERSION),),
-        )
-        self._conn.commit()
         try:
+            # INSIDE the guard, not above it. `executescript` is the FIRST
+            # thing to touch the file and therefore the first thing a corrupt
+            # or non-database file makes raise - `sqlite3.DatabaseError: file
+            # is not a database`, from this exact line. It sat outside, so the
+            # one failure most likely to happen was the one case that leaked
+            # the handle, while the two rarer paths below were both guarded.
+            self._conn.executescript(_SCHEMA)
+            self._conn.execute(
+                "INSERT OR IGNORE INTO meta(key, value) VALUES('schema_version', ?)",
+                (str(SCHEMA_VERSION),),
+            )
+            self._conn.commit()
             self._migrate()
         except BaseException:
             # Same reasoning as the version-mismatch branch below: a raise
             # from __init__ leaves the caller no handle to close the
             # connection, which on Windows keeps the file locked until GC or
-            # process exit. Close it ourselves so a retry sees the real error
-            # (e.g. corrupt JSON) instead of "database is locked".
+            # process exit - so a caller that catches the error and tries to
+            # delete and rebuild the index gets PermissionError instead. Close
+            # it ourselves so a retry sees the real error (e.g. corrupt JSON)
+            # instead of "database is locked".
             self._conn.close()
             raise
         # CREATE TABLE IF NOT EXISTS silently keeps an old table, so a version
@@ -953,25 +1065,8 @@ class PhotoStore:
     @staticmethod
     def _insert(cur: sqlite3.Cursor, p: Photo) -> None:
         m = p.meta
-        # Columns are named explicitly. Positional VALUES(...) breaks silently
-        # the moment a column is added or reordered.
         cur.execute(
-            """INSERT OR REPLACE INTO photos
-               (file_hash, media_type, paths, albums, edited_of, first_seen,
-                last_seen, taken_at_utc, taken_at_local, tz_source, gps_lat,
-                gps_lon, gps_alt, people, face_regions, keywords, description,
-                favorite, camera_make, camera_model, width, height, source,
-                metadata_conflict, exif_taken_at_utc, takeout_people, archived,
-                trashed, sidecar_match, phash, sharpness, phash_error,
-                brightness, colour)
-               VALUES
-               (:file_hash,:media_type,:paths,:albums,:edited_of,:first_seen,
-                :last_seen,:taken_at_utc,:taken_at_local,:tz_source,:gps_lat,
-                :gps_lon,:gps_alt,:people,:face_regions,:keywords,:description,
-                :favorite,:camera_make,:camera_model,:width,:height,:source,
-                :metadata_conflict,:exif_taken_at_utc,:takeout_people,:archived,
-                :trashed,:sidecar_match,:phash,:sharpness,:phash_error,
-                :brightness,:colour)""",
+            _UPSERT_PHOTO,
             {
                 "file_hash": p.file_hash,
                 "media_type": str(p.media_type),

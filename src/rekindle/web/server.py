@@ -93,6 +93,39 @@ OUTPUT_TYPES = {
 LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1", "[::1]"}
 
 
+def output_path(folder: Path, name: str) -> Path | None:
+    """`folder / name` when that is a rendered output inside `folder`, else None.
+
+    A function rather than four lines inside the handler because the escape it
+    refuses cannot be demonstrated over HTTP: reaching a file outside the
+    folder needs a file to be there, and a test that puts one there is a test
+    that writes outside its own tmp directory. Here the rule is checkable on
+    paths that need not exist at all.
+
+    Two layers, and the ORDER is not the interesting part - the second one is
+    the guard and the first is only a cheap reject:
+
+    1. A known suffix, and no `/`, `\\` or `..`.
+    2. Resolved, and still inside `folder`.
+
+    Layer 1 alone shipped, and missed the Windows drive-relative form
+    entirely. `D:evil.gif` has no separator, no `..` and an allowed suffix,
+    and joining it onto a folder on another drive DISCARDS the folder -
+    `Path("C:/sessions/abc") / "D:evil.gif"` is `D:evil.gif`, resolved against
+    the current directory of drive D. A drive-relative name on the same drive
+    as the folder joins inside it and is merely another spelling of a bare
+    name, which is why the answer is containment rather than a longer list of
+    forbidden characters.
+    """
+    if Path(name).suffix.lower() not in OUTPUT_TYPES:
+        return None
+    if "/" in name or "\\" in name or ".." in name:
+        return None
+    root = folder.resolve()
+    target = (root / name).resolve()
+    return target if target.is_relative_to(root) else None
+
+
 @dataclass
 class Config:
     data_dir: Path
@@ -483,10 +516,13 @@ class Handler(BaseHTTPRequestHandler):
     def _output(self, rest: str) -> None:
         """Serve a rendered file, and only from a session's own folder.
 
-        The path is never joined from user input: the session id names a
-        folder this process itself created, and the file name has to match one
-        of four known outputs. `<video>` needs byte ranges, so a single-range
-        request is honoured.
+        The session id names a folder this process itself created, and the
+        file name has to match one of four known suffixes. `<video>` needs
+        byte ranges, so a single-range request is honoured.
+
+        Which names are admissible is decided by `output_path`, a
+        module-level function so that the escape it refuses can be tested on
+        paths that need not exist. Its docstring says what used to get out.
         """
         session_id, _, name = rest.partition("/")
         session = self.app.workshop.get(session_id)
@@ -494,9 +530,9 @@ class Handler(BaseHTTPRequestHandler):
         if result is None:
             return self._json({"error": "nothing has been rendered yet"}, status=404)
         suffix = Path(name).suffix.lower()
-        if suffix not in OUTPUT_TYPES or "/" in name or "\\" in name or ".." in name:
+        target = output_path(result.folder, name)
+        if target is None:
             return self._json({"error": "no such output"}, status=404)
-        target = result.folder / name
         try:
             data = target.read_bytes()
         except OSError:

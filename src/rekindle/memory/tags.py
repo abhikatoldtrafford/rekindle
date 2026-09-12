@@ -538,6 +538,25 @@ class TagGenerator:
         return None
 
 
+#: Said out loud, by every caller, before the first request leaves.
+#:
+#: This path is reached by an ENVIRONMENT VARIABLE and no flag: a user with
+#: `OPENAI_API_KEY` exported for something else gets it on an ordinary
+#: `rekindle memory "photos of puri"`, and nothing said so. That is a
+#: reasonable design - the alternative is a flag nobody remembers - but only
+#: if it is announced, because a promise of privacy that depends on the user
+#: knowing about an env var is not a promise.
+#:
+#: Exactly what goes: the phrase they typed, their album TITLES, the first and
+#: last year in the library, and two counts. Never a photograph, never a path,
+#: never a person's name, never a coordinate.
+NETWORK_NOTICE = (
+    "Using the language model for this prompt: your phrase, your album titles, "
+    "the year range and two counts are sent to OpenAI. No photograph, path, "
+    "name or coordinate is. Unset OPENAI_API_KEY to work entirely offline."
+)
+
+
 def generator_from_env(transport: Transport = http_transport) -> TagGenerator:
     key = os.environ.get(ENV_KEY)
     if not key:

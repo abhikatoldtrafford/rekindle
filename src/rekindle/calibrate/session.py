@@ -257,10 +257,15 @@ class Session:
         problem = setting.clamp_error(value)
         if problem:
             raise config.ConfigError(problem)
-        if setting.loosens(value) and step.setting not in self._confirmed_loosening:
+        # Against `self.base` - what this user's config actually says today -
+        # and not against the shipped default. The `Refusal` below has always
+        # SHOWN the user their current value while the decision above it was
+        # made against a different number; see `Setting.loosens`.
+        current = self.base.get(step.setting)
+        if setting.loosens(value, current) and step.setting not in self._confirmed_loosening:
             return Refusal(
                 setting=step.setting,
-                current=self.base.get(step.setting),
+                current=current,
                 proposed=value,
                 meaning=_loosening_meaning(step.setting),
             )

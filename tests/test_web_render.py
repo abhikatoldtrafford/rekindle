@@ -255,3 +255,47 @@ def _durations(path) -> list[int]:
             image.seek(index)
             out.append(image.info.get("duration", 0))
     return out
+
+
+def test_withheld_counts_every_shot_and_not_just_the_preview(tmp_path):
+    """The count is a statement about the SPEC, so it has to see all of it.
+
+    It used to be read off the preview's frame report, which stops at
+    `preview_frames` - 16 by default - while the pass that sees the rest only
+    runs when the MP4 does. Under `--no-mp4` a memory whose withheld shots sit
+    past position 16 reported however many happened to fall inside the
+    preview, in the one line that asks the user to trust a guardrail.
+    """
+    from rekindle.memory.spec import FactSheet, Shot
+
+    data_dir, photos = make_library(tmp_path)
+    library = open_library(data_dir)
+    index = library.require_index()
+
+    admitted = [p.file_hash for p in photos if index.get(p.file_hash) is not None][:6]
+    assert len(admitted) == 6, "the fixture must supply six usable photographs"
+
+    # Two shots the index cannot resolve, deliberately placed LAST so a
+    # preview of two frames never reaches them.
+    shots = [Shot(h, "", "2020-05-01T09:00:00", True) for h in admitted]
+    shots += [Shot(f"gone{i}", "", "2020-05-01T09:00:00", True) for i in range(2)]
+
+    spec = MemorySpec(
+        recipe="album_story",
+        key=ALBUM,
+        title="A trip",
+        subtitle="",
+        shots=tuple(shots),
+        facts=FactSheet(title="A trip", recipe="album_story", photo_count=len(shots)),
+        public_safe=False,
+    )
+
+    result = render_spec(
+        spec,
+        index,
+        tmp_path / "out",
+        RenderOptions(no_mp4=True, preview_frames=2),
+    )
+
+    assert result.withheld == 2, "the two withheld shots are past the preview limit"
+    assert result.to_json()["withheld"] == 2

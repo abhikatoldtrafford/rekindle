@@ -1005,6 +1005,47 @@ def _run_prompt(data, text, tmp_path, hashes, **kw):
     )
 
 
+def test_a_prompt_memory_says_what_it_sends_before_it_sends_it(tmp_path, capsys, monkeypatch):
+    """The prompt path reaches OpenAI on an ENVIRONMENT VARIABLE and no flag.
+
+    A user with `OPENAI_API_KEY` exported for something else gets it on an
+    ordinary `rekindle memory "photos of puri"`, and nothing said so while the
+    README said "nothing leaves your machine". The design is defensible - a
+    flag nobody remembers is worse - but only if the tool announces it.
+    """
+    from rekindle.memory import tags as tags_mod
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-not-a-real-key")
+    monkeypatch.setattr(
+        tags_mod,
+        "generator_from_env",
+        lambda: tags_mod.TagGenerator(
+            "sk-not-a-real-key",
+            transport=lambda payload, api_key: {"output_text": ""},
+        ),
+    )
+    data = _festival_library(tmp_path)
+    seeds = [f"f{y}{i}" for y in (2019, 2020, 2021, 2022) for i in range(2)]
+
+    _run_prompt(data, "durga puja", tmp_path, seeds)
+
+    said = unwrapped(capsys.readouterr().out)
+    assert unwrapped("sent to OpenAI") in said
+    assert unwrapped("Unset OPENAI_API_KEY") in said
+
+
+def test_no_key_means_no_notice(tmp_path, capsys, monkeypatch):
+    """The notice must not appear on the offline path, where it would be a
+    false alarm about a request that never happens."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    data = _festival_library(tmp_path)
+    seeds = [f"f{y}{i}" for y in (2019, 2020, 2021, 2022) for i in range(2)]
+
+    _run_prompt(data, "durga puja", tmp_path, seeds)
+
+    assert unwrapped("sent to OpenAI") not in unwrapped(capsys.readouterr().out)
+
+
 def test_a_prompt_memory_writes_a_spec_keyed_on_the_normalised_prompt(tmp_path, capsys):
     data = _festival_library(tmp_path)
     seeds = [f"f{y}{i}" for y in (2019, 2020, 2021, 2022) for i in range(2)]

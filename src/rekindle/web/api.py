@@ -528,6 +528,7 @@ def _build_prompt(workshop: Workshop, text: str) -> Iterator[dict]:
 
     try:
         generator = tags_mod.generator_from_env()
+        yield _stage("model", tags_mod.NETWORK_NOTICE)
     except LLMUnavailable:
         generator = None
 
