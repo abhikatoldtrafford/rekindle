@@ -232,11 +232,46 @@ These entries were carried into M2 as open questions. Each is now closed.
   apart needs a model v1 deliberately does not have. Roughly 93 WhatsApp images
   are also caught by the size branch, which is the false-positive cost of the
   rule.
-- **Videos never appear in memories.** All 1,117 rows have no stored
-  dimensions, no perceptual hash, and rendering one needs ffmpeg - and
-  including them only when ffmpeg happens to be installed would make the
-  `MemorySpec` depend on the machine. 5.8% of the library is therefore
-  unreachable by any memory.
+- ~~**Videos never appear in memories.**~~ **Fixed.** `rekindle fingerprint`
+  now extracts one still frame per standalone video into `<data-dir>/frames/`
+  and fingerprints the video from it, so it flows through dedup, diversity,
+  composition and the face gate like any photograph. See
+  `memory/videoframe.py` for the frame choice and its measurement.
+
+  **The 5.8% figure was wrong, and it was wrong in the direction that
+  matters.** Of the 1,117 videos, 640 are `<name>.MP` beside `<name>.MP.jpg`
+  and 235 are `MVIMG_*.MP4` beside `MVIMG_*.jpg` - **875 (78%) are
+  motion-photo halves whose still is already in the library**, and extracting
+  a frame from those would have put two near-identical images into the same
+  memory. Only 242 videos (1.24% of the library) are standalone. All 242 got a
+  frame; none failed.
+
+  Measured against the live library: 46 of 339 memories now contain at least
+  one video shot (55 video shots in all), 57 of the 336 memories that exist in
+  both worlds changed their shot list, and three memories were displaced by
+  three others. The whole extraction pass is about four minutes and 58 MB of
+  cache; the frames are personal data and are gitignored twice over.
+
+  **The `MemorySpec` still does not depend on ffmpeg.** Extraction happens at
+  fingerprint time and writes a file; selection reads the index and that file
+  and never asks whether ffmpeg exists. Without ffmpeg no frames are cached,
+  videos stay excluded exactly as before, and the command says so before and
+  after the pass. Two machines sharing a data directory build the same memory
+  either way.
+- **A video is one frame, and the frame is chosen by sharpness alone.** The
+  five candidates are sampled at 10/30/50/70/90% of the duration and the
+  sharpest wins, which is the right measure for "not a blur" and says nothing
+  about whether the moment is the interesting one. Of 40 hand-checked
+  reference videos, best-of-five beat the first frame on 32 and was arguably
+  worse on 1 - a case where the first frame was the nicer photograph and the
+  later one was merely sharper. There is no way to override the choice short
+  of deleting the cached frame and re-running.
+- **A screen RECORDING is only caught by its filename.** `is_screenshot` no
+  longer applies its screen-size branch to a video, because 87 of the 242
+  extracted frames (36%) were being dropped as screenshots purely for being
+  1920x1080. The cost is that a screen recording that is not named
+  `Screenshot_*` now reaches memories; measured as zero occurrences on this
+  library, and 87 wrongly-dropped photographs is the larger error either way.
 - **`place_cluster` keys embed a visit's start date**, so adding a photo
   *earlier than the first photo of an existing visit* changes that visit's key
   and a dismissal of it stops applying. Every other recipe's key is derived
@@ -494,8 +529,14 @@ that killed the earlier seven signals in a different costume.
   so `composition.py` discards 20-30% of a prompt pool wholesale: 349 photos on
   the shipped Durga memory, 235 on the Kali one. It did not starve any measured
   prompt; it is not proven safe on a thin one.
-- **No video, ever.** All 1,117 videos are unembedded, so the search cannot see
-  them. The CLI says so on every build rather than leaving it here.
+- **Video, only through a still.** 242 standalone videos now carry an
+  extracted frame and 242 vectors were added for them (98.8 img/s on the
+  A4000), so a prompt search can find them. The other 875 are motion-photo
+  halves whose still is already searchable. A library whose owner has never
+  run `rekindle fingerprint` with ffmpeg on PATH still has no video in any
+  prompt memory, and the CLI says so on every build rather than leaving it
+  here. What a search matches is one frame, not the video: a moment the
+  camera caught two seconds later is not findable.
 - **The tag cache has no eviction, no versioning and no size bound.** A user
   who types a thousand prompts gets a thousand entries in
   `data/prompt_tags.json`. Fine at the scale anyone will reach by hand; not
@@ -657,7 +698,7 @@ degrees. Measured on the reference library:
 
 | | |
 |---|---|
-| images examined | 18,363 (1,117 videos are out of scope) |
+| images examined | 18,363 (1,117 videos were out of scope; 242 of them now have an extracted still) |
 | carrying a 90/270-degree tag | 2,503 (13.6%) |
 | **proved stale, now decoded without the tag** | **212 (1.15% of images, 8.5% of the suspects)** |
 | tag trusted — the picture agrees with it | 1,463 |

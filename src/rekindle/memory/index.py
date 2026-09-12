@@ -28,6 +28,7 @@ from pathlib import Path
 from rekindle.db import PhotoStore
 from rekindle.memory import albums
 from rekindle.memory.policy import ExclusionPolicy, is_public_safe
+from rekindle.memory.videoframe import frames_dir
 from rekindle.models import MediaType, Photo
 
 # Coarse enough that one town is one cell, fine enough that two towns are not.
@@ -82,12 +83,24 @@ class MemoryIndex:
     apply" that this class exists to prevent.
     """
 
-    def __init__(self, photos: list[Photo], policy: ExclusionPolicy, report: ExclusionReport):
+    def __init__(
+        self,
+        photos: list[Photo],
+        policy: ExclusionPolicy,
+        report: ExclusionReport,
+        frames: Path | None = None,
+    ):
         # Private and a tuple: a recipe holding a reference cannot append a
         # photo that never passed the policy.
         self._photos: tuple[Photo, ...] = tuple(photos)
         self._policy = policy
         self.report = report
+        #: Where `rekindle fingerprint` cached one still frame per video.
+        #: `resolve_path` hands those out INSTEAD of the video file, so the
+        #: renderer, the thumbnailer and anything else that wants pixels gets
+        #: a JPEG without knowing a video was involved. Optional, because a
+        #: `MemoryIndex` built by hand in a test has no data directory.
+        self._frames = frames
         self._by_hash = {p.file_hash: p for p in self._photos}
         self._build_indexes()
 
@@ -104,7 +117,7 @@ class MemoryIndex:
             else:
                 report.by_reason[reason] = report.by_reason.get(reason, 0) + 1
         report.allowed = len(allowed)
-        return cls(allowed, policy, report)
+        return cls(allowed, policy, report, frames=frames_dir(store.db_path.parent))
 
     def _build_indexes(self) -> None:
         self._by_year: dict[int, list[Photo]] = defaultdict(list)
@@ -293,7 +306,23 @@ class MemoryIndex:
         be partially mounted or partially extracted, so `paths[0]` is not
         reliably the one that is there. Returns None when none of them are,
         which the renderer reports as a dropped shot rather than crashing.
+
+        FOR A VIDEO this returns its CACHED STILL FRAME and never the video
+        file. That is the single substitution that lets a video flow through
+        the renderer: `frames.fit_photo` opens whatever it is handed with
+        Pillow, and handing it an .mp4 would raise. Returning None when no
+        frame is cached is correct rather than a fallback - `composition`
+        has already refused any video without one, so a shot reaching here
+        without a frame is a bug worth surfacing as a dropped shot.
         """
+        if photo.media_type is MediaType.VIDEO:
+            if self._frames is None:
+                return None
+            still = self._frames / f"{photo.file_hash}.jpg"
+            try:
+                return still if still.is_file() else None
+            except OSError:
+                return None
         for path in photo.paths:
             try:
                 if path.is_file():

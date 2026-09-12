@@ -39,6 +39,7 @@ from rekindle.memory.render.mp4 import mp4_canvas, write_mp4
 from rekindle.memory.render.music import NO_MUSIC_HINT, resolve_music
 from rekindle.memory.render.timeline import STYLE_FILM
 from rekindle.memory.spec import MemorySpec, safe_slug
+from rekindle.models import MediaType
 
 console = Console()
 
@@ -92,6 +93,7 @@ def _warn_unfingerprinted(index: MemoryIndex) -> None:
 
 
 def fingerprint_cmd(data_dir: Path) -> None:
+    from rekindle.memory import videoframe
     from rekindle.memory.fingerprint import run_fingerprints
 
     db_path = data_dir / DB_NAME
@@ -100,23 +102,53 @@ def fingerprint_cmd(data_dir: Path) -> None:
         raise typer.Exit(code=2)
 
     with PhotoStore(db_path) as store:
-        total = sum(1 for _ in store.iter_unfingerprinted())
-        if not total:
+        images = sum(1 for p in store.iter_unfingerprinted() if p.media_type is not MediaType.VIDEO)
+        videos = sum(1 for p in store.iter_videos() if p.meta.phash is None)
+        if not images and not videos:
             console.print("[green]Nothing to do[/green] - every photo already has a fingerprint.")
             return
-        console.print(f"Fingerprinting {total} photos. This is a one-time pass.")
+        console.print(
+            f"Fingerprinting {images} photos and examining {videos} videos. "
+            "This is a one-time pass."
+        )
+        if videos and not videoframe.have_ffmpeg():
+            # SAID BEFORE THE PASS, not only after. A user whose videos are
+            # about to be excluded for a fixable reason should learn it while
+            # they can still do something about it.
+            console.print(
+                "[yellow]![/yellow] ffmpeg and ffprobe are not on PATH, so no still frame "
+                "can be taken from a video.\n"
+                "  Videos stay out of every memory until they are. Nothing else is affected, "
+                "and re-running this command after installing them picks the videos up."
+            )
         with console.status("decoding...") as status:
 
             def progress(done: int, of: int) -> None:
                 status.update(f"decoding... {done}/{of}")
 
-            report = run_fingerprints(store, on_progress=progress)
+            report = run_fingerprints(store, on_progress=progress, data_dir=data_dir)
 
     console.print(
-        f"[green]Fingerprinted[/green] {report.hashed} photos. "
-        f"{report.skipped_video} videos skipped (never deduped by design), "
+        f"[green]Fingerprinted[/green] {report.hashed} photos "
+        f"({report.videos_hashed} of them videos, through an extracted still). "
+        f"{report.skipped_video} videos have no still, "
         f"{report.failed} could not be decoded."
     )
+    frames = report.frames
+    if frames is not None:
+        console.print(
+            f"  video frames: {frames.extracted} cached "
+            f"({frames.already_cached} already there), {frames.paired} skipped as a "
+            f"motion-photo half whose still is already in the library, "
+            f"{frames.failed} gave no readable frame"
+            + (
+                f", [yellow]{frames.skipped_no_ffmpeg} need ffmpeg[/yellow]"
+                if frames.skipped_no_ffmpeg
+                else ""
+            )
+        )
+        if not frames.accounted:
+            console.print("[red]![/red] Video accounting does not balance - this is a bug.")
     for reason, count in sorted(report.errors.items()):
         console.print(f"  [yellow]![/yellow] {count} {reason}")
 
@@ -925,8 +957,9 @@ WEAK_PATH_WARNING = (
 )
 
 NO_VIDEO_NOTE = (
-    "No video can appear in a prompt memory: videos are not embedded, so the "
-    "search cannot see them."
+    "A video can only appear in a prompt memory if `rekindle fingerprint` "
+    "cached a still frame for it and that frame has been embedded; without "
+    "one the search cannot see it."
 )
 
 _MONTH_NAMES = {

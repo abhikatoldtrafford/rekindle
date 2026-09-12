@@ -78,10 +78,37 @@ class IndexedPhoto:
     taken_at_local: str | None = None
     width: int | None = None
     height: int | None = None
+    #: For a VIDEO: the cached still frame that stands in for it, from
+    #: `<data-dir>/frames/`. None for a photograph, and None for a video that
+    #: has no frame - such a row is not offered by this reader at all.
+    still: Path | None = None
 
     @property
     def path(self) -> Path:
         return self.paths[0]
+
+    @property
+    def decode_paths(self) -> tuple[Path, ...]:
+        """The files a DECODER may open for this row.
+
+        Identical to `paths` for a photograph. For a video it is the single
+        cached still - never the video file, which Pillow cannot open and
+        which the encoder and the face detector must never be handed. Every
+        consumer of pixels in this package goes through here or through
+        `existing_path`, so a video is a still everywhere or nowhere.
+
+        A video with NO still returns the EMPTY tuple, not its own paths, and
+        that is the whole reason this is a method rather than an `or`. The
+        obvious `(self.still,) if self.still else self.paths` reads fine and
+        is a landmine: delete the frame cache while the fingerprints stay in
+        the index and it quietly starts handing `.mp4` files to the encoder.
+        Found by a test that deleted the cache; there is no shape of input for
+        which opening the video is the right answer, so it is unreachable by
+        construction instead of by luck.
+        """
+        if self.media_type == "video":
+            return (self.still,) if self.still is not None else ()
+        return self.paths
 
     @property
     def real_albums(self) -> tuple[str, ...]:
@@ -89,13 +116,13 @@ class IndexedPhoto:
         return tuple(a for a in self.albums if not a.startswith(DATE_BUCKET_PREFIX))
 
     def existing_path(self) -> Path | None:
-        """The first path that is actually on disk, or None.
+        """The first decodable path that is actually on disk, or None.
 
         A photo indexed from two folders keeps both; one of them may since
         have been deleted or be on an unmounted drive. Embedding must skip
         that photo with a reason, not raise.
         """
-        for p in self.paths:
+        for p in self.decode_paths:
             if p.is_file():
                 return p
         return None
@@ -104,6 +131,11 @@ class IndexedPhoto:
 @dataclass
 class ReadFilter:
     """Which rows the semantic pipeline is allowed to touch.
+
+    `images_only` means "rows this pipeline can decode", which since video
+    frames landed includes a VIDEO THAT HAS ONE. The name is kept because that
+    is still what it means to every caller: hand me things I can open. A video
+    with no cached still is excluded by the same flag, as it always was.
 
     `archived` defaults to EXCLUDED. A Google-archived photo is one the user
     deliberately hid; 162 of them exist on the reference export. Nothing in
@@ -124,8 +156,15 @@ class ReadFilter:
 class PhotoIndexReader:
     """Read-only access to the `photos` table. Never writes, never migrates."""
 
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, frames: Path | None = None) -> None:
         self.db_path = db_path
+        # `<data-dir>/frames`, where `rekindle fingerprint` cached one still
+        # per video. Derived rather than required, because every existing
+        # caller passes only a database path and the data directory is always
+        # its parent.
+        from rekindle.memory.videoframe import frames_dir
+
+        self.frames = frames if frames is not None else frames_dir(db_path.parent)
         if not db_path.is_file():
             raise IndexUnavailable(f"No index at {db_path}. Run `rekindle index <folder>` first.")
         # mode=ro, not immutable=1: the index may legitimately be open for
@@ -214,7 +253,11 @@ class PhotoIndexReader:
         clauses = ["1=1"]
         params: list[object] = []
         if f.images_only:
-            clauses.append("media_type = 'image'")
+            # A video with a phash is a video `rekindle fingerprint` measured
+            # through an extracted frame, and `_to_photo` will hand out that
+            # frame. Keyed on the DATA, not on whether ffmpeg is installed
+            # here and now - see `memory.videoframe`.
+            clauses.append("(media_type = 'image' OR (media_type = 'video' AND phash IS NOT NULL))")
         if not f.include_archived:
             clauses.append("archived = 0")
         if not f.include_trashed:
@@ -267,9 +310,13 @@ class PhotoIndexReader:
                 out[photo.file_hash] = photo
         return out
 
-    @staticmethod
-    def _to_photo(row: sqlite3.Row) -> IndexedPhoto:
+    def _to_photo(self, row: sqlite3.Row) -> IndexedPhoto:
+        still = None
+        if row["media_type"] == "video":
+            candidate = self.frames / f"{row['file_hash']}.jpg"
+            still = candidate if candidate.is_file() else None
         return IndexedPhoto(
+            still=still,
             file_hash=row["file_hash"],
             media_type=row["media_type"],
             paths=tuple(Path(p) for p in json.loads(row["paths"])),

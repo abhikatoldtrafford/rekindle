@@ -303,12 +303,46 @@ def test_an_unfingerprinted_photo_is_KEPT():
 # videos and unreadable files
 
 
-def test_videos_are_dropped_and_counted():
-    """1,117 rows. They have no dimensions, no hash, and rendering one needs
-    ffmpeg - including them only when ffmpeg happens to be installed would
-    make the MemorySpec depend on the machine."""
-    _, report = compose([_p("v", size=None, media_type=MediaType.VIDEO)])
+def test_a_video_with_no_extracted_still_is_dropped_and_counted():
+    """A video nothing has measured: no hash, no dimensions, nothing to gate."""
+    _, report = compose(
+        [_p("v", size=None, phash=None, phash_error="video", media_type=MediaType.VIDEO)]
+    )
     assert report.dropped[comp.DROP_VIDEO] == 1
+
+
+@pytest.mark.parametrize("reason", ["video", "video_no_ffmpeg", "video_paired", "video_no_frame"])
+def test_every_reason_a_video_lacks_a_still_drops_it_AS_A_VIDEO(reason):
+    """There are four of these now, and the old code compared against the
+    literal string "video". Three of the four would have been misreported as
+    an unreadable FILE - which is a bug report about the user's library rather
+    than a fact about ffmpeg."""
+    _, report = compose(
+        [_p("v", size=None, phash=None, phash_error=reason, media_type=MediaType.VIDEO)]
+    )
+    assert report.dropped[comp.DROP_VIDEO] == 1
+    assert comp.DROP_UNREADABLE not in report.dropped
+
+
+def test_a_video_WITH_an_extracted_still_is_kept_like_any_photograph():
+    """The gate is "has a still", not "ffmpeg is installed".
+
+    Once `rekindle fingerprint` has cached a frame, the row carries a phash
+    and the frame's dimensions, and there is nothing left for composition to
+    object to. This is what puts 242 of the reference library's videos into
+    memories for the first time.
+    """
+    kept, report = compose([_p("v", media_type=MediaType.VIDEO)])
+    assert [p.file_hash for p in kept] == ["v"]
+    assert comp.DROP_VIDEO not in report.dropped
+
+
+def test_a_video_with_a_still_still_faces_every_other_gate():
+    """It is treated as a photograph, which means it is judged as one - a
+    frame too small or too blurry is refused for that reason, not waved
+    through because it came from a video."""
+    _, small = compose([_p("v", size=(80, 60), media_type=MediaType.VIDEO)])
+    assert small.dropped[comp.DROP_TOO_SMALL] == 1
 
 
 def test_an_undecodable_file_is_counted_not_silently_dropped():

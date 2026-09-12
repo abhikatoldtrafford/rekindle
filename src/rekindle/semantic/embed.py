@@ -337,7 +337,9 @@ def embed_photos(
     keys: dict[str, str] = {}
     for photo in photos:
         report.considered += 1
-        key = decode_key(photo.paths, target_px=target_px, revision=decode_revision)
+        # `decode_paths`, not `paths`: a video's pixels come from its cached
+        # still, so that is the file whose orientation verdict matters.
+        key = decode_key(photo.decode_paths, target_px=target_px, revision=decode_revision)
         keys.setdefault(photo.file_hash, key)
         by_hash.setdefault(photo.file_hash, photo)
         wanted.append((photo.file_hash, key))

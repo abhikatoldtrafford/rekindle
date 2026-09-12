@@ -34,6 +34,7 @@ from pathlib import Path
 from PIL import Image, ImageChops, ImageFilter, ImageStat
 
 from rekindle.db import FingerprintRow, PhotoStore
+from rekindle.memory import videoframe
 from rekindle.meta.exif import open_upright
 from rekindle.models import MediaType, Photo
 
@@ -77,7 +78,12 @@ _DRAFT = (1024, 1024)
 # Values for `phash_error`. A recorded reason is FINISHED work: the resume
 # predicate skips these rows, so a permanently undecodable file is not
 # re-decoded on every run.
-ERR_VIDEO = "video"
+#
+# VIDEOS ARE THE EXCEPTION and do not go through that predicate at all - see
+# `PhotoStore.iter_videos`. Their reasons live in `memory.videoframe` because
+# there are now four of them and one, "ffmpeg is not installed", stops being
+# true the moment somebody installs ffmpeg.
+ERR_VIDEO = videoframe.ERR_LEGACY
 ERR_UNREADABLE = "unreadable"
 ERR_UNDECODABLE = "undecodable"
 ERR_MISSING = "missing"
@@ -441,13 +447,24 @@ class FingerprintReport:
     `considered == hashed + failed + skipped_video` is asserted by the tests:
     silently dropping input is the bug the accounting identities in this
     project exist to prevent.
+
+    A video that got a cached still frame is counted under `hashed`, not
+    `skipped_video`: it WAS fingerprinted, from that frame, and it now
+    participates in dedup and the quality gates like any photograph.
+    `skipped_video` keeps its old meaning - a video with no still to measure.
     """
 
     considered: int = 0
     hashed: int = 0
     failed: int = 0
     skipped_video: int = 0
+    #: Of `hashed`: how many were videos measured through an extracted frame.
+    videos_hashed: int = 0
     errors: dict[str, int] = field(default_factory=dict)
+    #: What the frame-extraction pass did, or None when it was not run
+    #: (`run_fingerprints` without a `data_dir` - every caller that only has a
+    #: store, which is most of the tests).
+    frames: videoframe.VideoFrameReport | None = None
 
     def _fail(self, reason: str) -> None:
         self.errors[reason] = self.errors.get(reason, 0) + 1
@@ -456,11 +473,48 @@ class FingerprintReport:
     def accounted(self) -> bool:
         return self.considered == self.hashed + self.failed + self.skipped_video
 
+    @property
+    def ffmpeg_missing(self) -> bool:
+        return self.frames is not None and self.frames.ffmpeg_missing
 
-def _rows(photos: list[Photo]) -> Iterator[FingerprintRow]:
+
+def _rows(
+    photos: list[Photo],
+    stills: dict[str, Path] | None = None,
+    reasons: dict[str, str] | None = None,
+) -> Iterator[FingerprintRow]:
+    stills = stills or {}
+    reasons = reasons or {}
     for photo in photos:
         if photo.media_type is MediaType.VIDEO:
-            yield FingerprintRow(file_hash=photo.file_hash, error=ERR_VIDEO)
+            still = stills.get(photo.file_hash)
+            if still is None:
+                # The SPECIFIC reason where the extraction pass supplied one.
+                # "needs ffmpeg" is the only one a user can act on, and it is
+                # indistinguishable from "it is a video" unless it is stored.
+                yield FingerprintRow(
+                    file_hash=photo.file_hash,
+                    error=reasons.get(photo.file_hash, ERR_VIDEO),
+                )
+            else:
+                # Measured through the EXTRACTED FRAME, not the video. Every
+                # number `set_fingerprints` writes - the hash, the sharpness,
+                # the brightness, the colour histogram and the stored
+                # width/height - is therefore a measurement of the exact
+                # pixels the renderer will draw for this row, which is the
+                # property that lets a video behave like a photograph
+                # everywhere downstream without any of those places knowing.
+                row = fingerprint_file(still)
+                yield FingerprintRow(
+                    file_hash=photo.file_hash,
+                    phash=row.phash,
+                    sharpness=row.sharpness,
+                    brightness=row.brightness,
+                    colour=row.colour,
+                    width=row.width,
+                    height=row.height,
+                    error=row.error,
+                )
             continue
         yield _row_for(photo)
 
@@ -494,6 +548,8 @@ def run_fingerprints(
     *,
     batch_size: int = 500,
     on_progress: Callable[[int, int], None] | None = None,
+    data_dir: Path | None = None,
+    ffmpeg: bool | None = None,
 ) -> FingerprintReport:
     """Fingerprint every photo that has not been attempted yet.
 
@@ -504,26 +560,55 @@ def run_fingerprints(
     single-transaction-per-run rule is right for `index` (seconds) and wrong
     here (minutes).
 
-    Videos are never decoded. Getting a frame out of one needs ffmpeg, which
-    must stay optional, so they are marked and skipped - which also means they
-    never participate in dedup, exactly as designed.
+    VIDEOS, GIVEN A `data_dir`. One still frame is extracted per standalone
+    video and cached under `<data-dir>/frames/`, and the video is then
+    fingerprinted FROM THAT FRAME - see `memory.videoframe` for which videos,
+    which frame, and why 875 of the reference library's 1,117 are deliberately
+    left alone. Without a `data_dir` this behaves exactly as it did before:
+    videos are marked and skipped.
+
+    Videos are collected with `iter_videos`, NOT `iter_unfingerprinted`. The
+    resume predicate is right for images and wrong here: it excludes any row
+    with a recorded reason, and the commonest recorded reason for a video is
+    "ffmpeg was not installed", which stops being true the moment somebody
+    installs ffmpeg. A video that already HAS a fingerprint is still skipped -
+    that check is on the row, not on the predicate.
     """
     report = FingerprintReport()
+    stills: dict[str, Path] = {}
+    video_reasons: dict[str, str] = {}
     # Materialised: iter_unfingerprinted yields from a live cursor and this
     # function writes through the same connection.
-    todo = list(store.iter_unfingerprinted())
+    todo = [p for p in store.iter_unfingerprinted() if p.media_type is not MediaType.VIDEO]
+    if data_dir is not None:
+        everything = list(store.iter_photos())
+        videos = [p for p in everything if p.media_type is MediaType.VIDEO]
+        stills, report.frames = videoframe.extract_for(
+            videos,
+            data_dir,
+            videoframe.index_by_dir_name(everything),
+            ffmpeg=ffmpeg,
+            progress=on_progress,
+        )
+        video_reasons = report.frames.reasons
+        todo += [p for p in videos if p.meta.phash is None]
+    else:
+        todo += [p for p in store.iter_unfingerprinted() if p.media_type is MediaType.VIDEO]
     total = len(todo)
 
+    by_hash = {p.file_hash: p for p in todo}
     batch: list[FingerprintRow] = []
-    for index, row in enumerate(_rows(todo), start=1):
+    for index, row in enumerate(_rows(todo, stills, video_reasons), start=1):
         report.considered += 1
-        if row.error == ERR_VIDEO:
+        if videoframe.is_video_reason(row.error):
             report.skipped_video += 1
         elif row.phash is None:
             report.failed += 1
             report._fail(row.error or ERR_UNDECODABLE)
         else:
             report.hashed += 1
+            if by_hash[row.file_hash].media_type is MediaType.VIDEO:
+                report.videos_hashed += 1
         batch.append(row)
         if len(batch) >= batch_size:
             store.set_fingerprints(batch)

@@ -763,6 +763,22 @@ class PhotoStore:
         ):
             yield self._row_to_photo(row)
 
+    def iter_videos(self) -> Iterator[Photo]:
+        """Every video row, whatever its fingerprint state.
+
+        NOT `iter_unfingerprinted`, deliberately. That predicate excludes a
+        row with a recorded `phash_error`, which is what makes the image pass
+        resumable - and is exactly wrong for videos, because the commonest
+        recorded reason is "ffmpeg was not installed", and installing it is
+        the one thing that should make the pass try again. See
+        `memory.videoframe.RETRYABLE`.
+
+        Same live-cursor hazard as `iter_photos`: a caller that writes must
+        materialise first.
+        """
+        for row in self._conn.execute("SELECT * FROM photos WHERE media_type = 'video'"):
+            yield self._row_to_photo(row)
+
     def set_fingerprints(self, rows: Iterable[FingerprintRow]) -> int:
         """Write the fingerprint columns for a batch, in one transaction.
 

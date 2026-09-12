@@ -264,12 +264,32 @@ def is_screenshot(photo: Photo) -> bool:
     untagged re-compressed photo at exactly a screen size is still dropped -
     face tags cover only 55.9% of this library, so the exemption is not
     available for the other 44%.
+
+    THE SIZE BRANCH DOES NOT APPLY TO A VIDEO FRAME, and this was found by
+    measurement, not by reasoning. When `rekindle fingerprint` began extracting
+    a still per video, **87 of the reference library's 242 extracted frames
+    (36%) were immediately classified as screenshots.** None of them is one.
+    The cause is that the commonest video resolutions and the commonest screen
+    sizes are the same numbers - 70 frames at 1920x1080, 29 at 1080x1920, 8 at
+    1280x720 - and a video carries no camera make or model at all (0 of 242),
+    so the conjunction that protects photographs protects nothing here.
+
+    The size branch's justification is specifically about DOWNLOADED IMAGES:
+    "mostly downloaded wallpapers at 1920x1200, which is the right answer".
+    Nobody downloads a wallpaper as a video. A file the user recorded is a
+    recording, and its frame dimensions carry no evidence either way.
+
+    The FILENAME branch still applies. `Screenshot_20161008-222024.mp4` is a
+    screen RECORDING, which is exactly the thing this gate exists to keep out,
+    and the operating system said so itself.
     """
     if photo.meta.camera_make or photo.meta.camera_model:
         return False
     if photo.paths and _SCREENSHOT_NAME.match(photo.paths[0].name):
         return True
     if any(photo.meta.people):
+        return False
+    if photo.media_type is MediaType.VIDEO:
         return False
     size = dimensions(photo)
     if size is None:
@@ -280,15 +300,30 @@ def is_screenshot(photo: Photo) -> bool:
 
 def _reject(photo: Photo, *, min_short_edge: int, max_aspect: float) -> str | None:
     """Per-photo gates, in a fixed order. None means the photo is usable."""
-    if photo.media_type is MediaType.VIDEO:
-        # Videos do not participate in memories in v1. They have no stored
-        # dimensions (all 1,117 rows), no perceptual hash, and rendering one
-        # needs ffmpeg - which must stay optional. Including them only when
-        # ffmpeg happens to be installed would make the MemorySpec itself
-        # depend on the machine, and the spec must be deterministic.
+    if photo.media_type is MediaType.VIDEO and photo.meta.phash is None:
+        # A video with no extracted still frame. `rekindle fingerprint` caches
+        # one per standalone video when ffmpeg is present (see
+        # `memory.videoframe`), and once it has, the video carries a phash,
+        # dimensions and a colour signature like any photograph and falls
+        # through to the same gates below.
+        #
+        # THE GATE IS "HAS A STILL", NOT "FFMPEG IS INSTALLED". That
+        # distinction is the whole of the design: selection reads the index
+        # and a cached file, never a capability, so two machines sharing a
+        # data directory build the same memory whether or not either of them
+        # can decode video today.
         return DROP_VIDEO
-    if photo.meta.phash_error and photo.meta.phash_error != "video":
+    if photo.meta.phash_error:
         # Tried and could not be decoded. Counted, never silently dropped.
+        #
+        # No video exemption here any more, and its absence is deliberate:
+        # every reason a video carries means "no still frame", and the branch
+        # above has already returned DROP_VIDEO for exactly those rows. A
+        # video that reaches this line has a phash, which means the fingerprint
+        # pass succeeded, which means it cleared `phash_error`. The old
+        # `!= "video"` test was reachable when "video" was the only reason;
+        # with four of them it was a string comparison guarding a branch
+        # nothing can enter, and a guard no test can fail is worse than none.
         return DROP_UNREADABLE
 
     size = dimensions(photo)
