@@ -37,6 +37,7 @@ from rekindle.memory.render.gif import preview_canvas, write_gif, write_webp
 from rekindle.memory.render.mp4 import DEFAULT_WIDTH as MP4_WIDTH
 from rekindle.memory.render.mp4 import mp4_canvas, write_mp4
 from rekindle.memory.render.music import NO_MUSIC_HINT, resolve_music
+from rekindle.memory.render.timeline import STYLE_CUTS, STYLE_FILM
 from rekindle.memory.spec import MemorySpec, safe_slug
 
 console = Console()
@@ -437,6 +438,7 @@ def _render_one(
     no_mp4: bool,
     preview_width: int = 0,
     mp4_width: int = 0,
+    style: str = STYLE_FILM,
 ) -> None:
     from rekindle.memory.composition import canvas_for
 
@@ -997,3 +999,201 @@ def _render_prompt_report(build, spec, index) -> None:
     console.print("  months: " + ", ".join(f"{_MONTH_NAMES[m]} {n}" for m, n in ordered))
     console.print(f"  {faces} of {len(spec.shots)} shots have face tags, {gps} have GPS.")
     console.print(f"[dim]{NO_VIDEO_NOTE}[/dim]")
+
+
+# --------------------------------------------------------------------------
+# scenery
+
+
+SCENERY_CAVEAT = (
+    "A scenery memory is retrieved by what a photograph LOOKS like, and no "
+    "automated check can confirm it got that right.\n"
+    "Look at the memory before you keep it - and if a concept keeps getting "
+    "it wrong, the descriptions are in `corpus/scenery.toml` and are yours "
+    "to edit."
+)
+
+
+def scenery_list_cmd() -> None:
+    """Print the corpus. Builds nothing, needs no index and no embeddings."""
+    from rekindle.memory import scenery as scenery_mod
+
+    table = Table(title="The scenery corpus", show_lines=True)
+    table.add_column("key")
+    table.add_column("title")
+    table.add_column("looks like")
+    table.add_column("months")
+    for concept in scenery_mod.all_concepts():
+        months = (
+            ", ".join(_MONTH_NAMES[m] for m in concept.months) if concept.months else "any"
+        )
+        table.add_row(concept.key, concept.title, "\n".join(concept.tags), months)
+    console.print(table)
+    console.print(
+        "[dim]This file is data. Edit "
+        f"{scenery_mod.CORPUS_PATH} to change what a concept looks for, or to "
+        "add one of your own.[/dim]"
+    )
+
+
+def scenery_cmd(
+    data_dir: Path,
+    concepts: list[str],
+    out_dir: Path,
+    *,
+    all_concepts: bool = False,
+    public_safe: bool = False,
+    max_shots: int = engine.DEFAULT_MAX_SHOTS,
+    gif_frames: int = 16,
+    music: Path | None = None,
+    no_mp4: bool = False,
+    min_votes: int = 0,
+    tag_k: int = 0,
+    captions: str = "deterministic",
+    preview_width: int = 0,
+    mp4_width: int = 0,
+    style: str = "film",
+    retrieve=None,
+) -> None:
+    """Build memories whose subject is a SCENE.
+
+    Like a prompt memory this is built only when asked for: it does not enter
+    `all_offers`, does not appear in `rekindle memories` and is never eligible
+    for `--auto`. The reason is narrower than the prompt one - the concepts
+    here are curated and checkable, where a prompt can say anything - and it
+    is structural: selection needs a retriever, and the `Recipe` protocol has
+    no way to receive one. CI has no embeddings at all.
+
+    Dismissal applies. The cooldown does not, for the same reason it does not
+    for `--recipe --key`: this is a person naming one memory and asking for it.
+    """
+    from rekindle.memory import scenery as scenery_mod
+
+    try:
+        wanted = scenery_mod.concept_keys(None if all_concepts else concepts)
+    except KeyError as exc:
+        console.print(f"[red]{exc.args[0]}[/red]")
+        raise typer.Exit(code=2) from exc
+
+    store, index = open_index(data_dir, public_safe=public_safe)
+    try:
+        if index.count() == 0:
+            console.print("[yellow]No photos available after the guardrails.[/yellow]")
+            _render_exclusions(index)
+            return
+        _warn_unfingerprinted(index)
+
+        if retrieve is None:
+            retrieve = _open_retriever(data_dir)
+
+        state = MemoryState(store)
+        dismissed = state.dismissed_memory_ids()
+        support = _semantic_support(data_dir, announce=False)
+        built = 0
+        for key in wanted:
+            concept = scenery_mod.get(key)
+            assert concept is not None  # concept_keys only returns known keys
+            memory = memory_id(scenery_mod.RECIPE, concept.key)
+            if memory in dismissed:
+                console.print(
+                    f"[yellow]Dismissed[/yellow]: {memory}. Undo it with `rekindle undismiss`."
+                )
+                continue
+            build = scenery_mod.build_selection(
+                index,
+                concept,
+                retrieve,
+                tag_k=tag_k or scenery_mod.TAG_K,
+                min_votes=min_votes or scenery_mod.MIN_VOTES,
+            )
+            spec = _build_scenery(index, build, max_shots, support)
+            if spec is None:
+                continue
+            for finished in _maybe_caption([spec], captions):
+                _render_one(
+                    finished,
+                    index,
+                    out_dir,
+                    gif_frames,
+                    music,
+                    no_mp4,
+                    preview_width,
+                    mp4_width,
+                    style=style,
+                )
+                state.record_surfaced(
+                    memory_id(finished.recipe, finished.key), title=finished.title
+                )
+                _render_scenery_report(build, finished, index)
+                built += 1
+        if built:
+            console.print(f"\n[yellow]{SCENERY_CAVEAT}[/yellow]")
+    finally:
+        store.close()
+
+
+def _build_scenery(index, build, max_shots: int, support):
+    """One SceneryBuild through the engine, or None with the reason printed."""
+    from rekindle.memory import scenery as scenery_mod
+
+    concept = build.concept
+    console.print(
+        f"\n[bold]{concept.title}[/bold] [dim](scenery:{concept.key})[/dim] - "
+        f"{len(concept.tags)} visual descriptions:"
+    )
+    for tag in concept.tags:
+        console.print(f"  [dim]-[/dim] {tag}")
+    if concept.months:
+        months = ", ".join(_MONTH_NAMES[m] for m in concept.months)
+        console.print(f"  [dim]Narrowed to {months}, from the corpus window.[/dim]")
+    console.print(
+        f"  [dim]{build.pool} photos matched at least one description; "
+        f"{build.reached} were reached by {scenery_mod.MIN_VOTES} or more "
+        f"({scenery_mod.describe_votes(build.votes)}), across "
+        f"{len(build.years)} years.[/dim]"
+    )
+    if build.selection is None:
+        console.print("  [yellow]Nothing agreed on enough to build a memory.[/yellow]")
+        return None
+
+    report = engine.BuildReport(offered=1)
+    spec = engine.build(
+        index,
+        Offer(recipe=scenery_mod.RECIPE, key=concept.key, title=concept.title),
+        selection=build.selection,
+        max_shots=max_shots,
+        report=report,
+        semantic=support,
+    )
+    if spec is None:
+        reasons = ", ".join(r.replace("_", " ") for r in sorted(report.skipped))
+        console.print(f"  [yellow]Not built: {reasons}.[/yellow]")
+        _render_build_report(report)
+        return None
+    _render_build_report(report)
+    return spec
+
+
+def _render_scenery_report(build, spec, index) -> None:
+    """The honesty surface: how much of this memory no other recipe could reach."""
+    from rekindle.memory import scenery as scenery_mod
+
+    years: dict[int, int] = {}
+    orphans = 0
+    for shot in spec.shots:
+        photo = index.get(shot.file_hash)
+        if photo is None:  # pragma: no cover - the spec was built from the index
+            continue
+        years[photo.meta.taken_at_local.year] = (
+            years.get(photo.meta.taken_at_local.year, 0) + 1
+        )
+        orphans += 1 if scenery_mod.orphan(photo) else 0
+    console.print(
+        f"  {len(spec.shots)} shots across {len(years)} years: "
+        + ", ".join(f"{y} ({n})" for y, n in sorted(years.items()))
+    )
+    console.print(
+        f"  [dim]{orphans} of {len(spec.shots)} have no face tag, no named album "
+        "and no GPS - no other recipe could have made them the subject of "
+        "anything.[/dim]"
+    )

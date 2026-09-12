@@ -1,0 +1,163 @@
+# The scenery corpus. DATA, not code - edit it.
+#
+# 6,419 photos in the reference library - 33.2% of it - have no face tag, no
+# album anyone named, and no GPS. Every recipe in `recipes/builtin.py` keys off
+# one of those three, so a third of a library can appear in `year_in_review`
+# and `on_this_day` and can never be the SUBJECT of a memory. The beaches, the
+# hills, the flowers, the food, the rain.
+#
+# This file is what makes them a subject. It maps a concept to the thing a
+# photograph of it LOOKS like, and `memory/scenery.py` matches those
+# descriptions with the SAME tag-consensus machinery prompt memories use.
+#
+# Three fields carry the weight:
+#
+#   title   what the memory is called. It is copied verbatim and is the ONLY
+#           title a scenery memory can have. Write something you would be
+#           happy to see over your own photographs, and never a place name -
+#           there is no gazetteer in this project and a title is not the place
+#           to start inventing one.
+#
+#   tags    what it looks like. These go to CLIP; the concept's name never
+#           does. Four sharp descriptions beat six blunt ones, and a blunt one
+#           is actively harmful: see `festivals.toml`, where two generic tags
+#           took a Durga Puja memory from 23 correct shots to 12.
+#
+#   months  an optional seasonal window, same meaning as in `festivals.toml`.
+#           Present only where the concept genuinely has one. `rain` in this
+#           library is the monsoon; `the sea` is not seasonal and says so by
+#           leaving the field out.
+#
+# WHY THIS FILE AND NOT THE SCENE CLUSTERS. `semantic/cluster.py` already
+# groups this library into 57 unsupervised clusters and names each one from a
+# 32-phrase vocabulary. Those names cannot be used here.
+# `docs/known-limitations.md` records why: cluster #16 is 270 photos of
+# institutional buildings and was labelled "a hospital or a clinic", and 12 of
+# 57 clusters were labelled "a religious ceremony or temple". The groups are
+# real; the labels are whatever phrase was nearest. A curated file is a
+# human-checkable artefact - you can read this line, disagree with it, and fix
+# it. A cluster label is a guess with nobody's name on it.
+#
+# EVERY ENTRY BELOW WAS GRADED BY LOOKING AT WHAT IT RETURNED on the reference
+# library - a 24-photograph contact sheet per concept, counted by eye. The
+# `graded` note on each entry is that count and the date. It is a measurement
+# of THIS library and it will not transfer to yours; re-grade before trusting
+# it. The two entries that graded badly are still here, with what was wrong
+# recorded, because a corpus that hides its weak entries teaches nobody.
+#
+# THIS FILE IS DELIBERATELY INCOMPLETE. It is not a taxonomy of the visible
+# world. It covers concepts the author could write an honest visual
+# description of and then check. Add your own.
+
+version = 1
+
+[[concept]]
+key = "sea"
+title = "The sea"
+names = ["sea", "the sea", "beach", "beaches", "seaside", "ocean", "coast"]
+tags = [
+    "waves breaking on a sandy shore",
+    "a wide empty beach meeting the open sea",
+    "the flat horizon of the open ocean under sky",
+    "fishing boats pulled up on the sand",
+]
+note = """Graded 2026-09-12: 22 of the top 24 were sea or beach. The two
+misses were a motion-blurred green frame and a sky of pink cloud with no
+water in it, and both fail the sharpness or the composition gate before they
+reach a memory. The strongest entry in this file."""
+
+[[concept]]
+key = "mountains"
+title = "The mountains"
+names = ["mountain", "mountains", "hills", "the hills", "snow", "himalaya"]
+tags = [
+    "a snow-covered mountain peak against the sky",
+    "a winding road cut into a steep bare mountainside",
+    "a deep valley of pine forest below high ridges",
+    "snow lying on the ground and on rooftops",
+]
+note = """Graded 2026-09-12: 24 of the top 24 were mountains, hills or snow.
+Agreement is weaker than `sea` - one photograph reached three tags and none
+reached four - but precision did not suffer, which is the point of ranking on
+how many descriptions agree rather than on how strongly one of them does."""
+
+[[concept]]
+key = "flowers"
+title = "Flowers and gardens"
+names = ["flower", "flowers", "garden", "gardens", "blossom", "blooms"]
+tags = [
+    "a close-up of a single flower blossom filling the frame",
+    "a flowerbed of many coloured blooms in a garden",
+    "a manicured garden lawn with clipped hedges and paths",
+]
+note = "Graded 2026-09-12: 24 of the top 24 were flowers or gardens."
+
+[[concept]]
+key = "temples"
+title = "Temples"
+names = ["temple", "temples", "mandir", "shrine"]
+tags = [
+    "a carved stone temple tower against the sky",
+    "a temple courtyard with stone pillars and steps",
+    "an ornate terracotta temple facade",
+]
+note = """Graded 2026-09-12: 23 of the top 24 were temples. The concern going
+in was Durga Puja bleed - a pandal is built to look like a temple and this
+library holds 2,297 Durga Puja photographs - and one shot of a brightly lit
+structure at night is genuinely ambiguous between the two. Nothing else in
+the 24 was a pandal, an idol or a crowd. The tags name architecture (stone,
+terracotta, pillars) and not celebration, which is what keeps them apart."""
+
+[[concept]]
+key = "food"
+title = "The food"
+names = ["food", "the food", "cooking", "meals", "street food"]
+tags = [
+    "a street food stall with a large pan and rising steam",
+    "a plate of fried snacks on a paper plate",
+    "a vendor frying food in a wok over a flame",
+]
+note = """Graded 2026-09-12: 22 of the top 24 were food. TITLED "The food" AND
+NOT "Street food", which is what the tags describe and what this concept was
+meant to be. What actually comes back is food of every kind - a karahi on a
+home stove, a catering tray, a plate of aubergine - because that is what this
+library photographs, and the two are not separable by any description tried.
+The title says what the memory contains rather than what it was aiming at."""
+
+[[concept]]
+key = "rain"
+title = "The rain"
+months = [6, 7, 8, 9]
+tags = [
+    "water droplets beading on a green leaf",
+    "a person holding an umbrella under falling rain",
+    "a dark grey monsoon sky over wet rooftops",
+    "a puddle of muddy water on a flooded road",
+]
+names = ["rain", "the rain", "monsoon", "rainy"]
+note = """Graded 2026-09-12, and THE WEAKEST ENTRY HERE: about 13 of the top
+24 were rain. Rain is mostly not a thing in the frame - it is a quality of
+the light - so the descriptions land on whatever is grey and wet-looking, and
+an earlier tag ("a wet road reflecting light in heavy rain") pulled a
+LED-lit fountain and a row of ordinary night streets into the set. The
+monsoon window is what makes this entry usable at all: it removes the winter
+night streets outright. Rewrite it if you can do better; the descriptions
+here are the fourth attempt, not a considered final answer."""
+
+[[concept]]
+key = "night"
+title = "After dark"
+names = ["night", "at night", "city lights", "after dark", "nightscape"]
+tags = [
+    "a night street with shop fronts lit by signs",
+    "an illuminated building facade against a black sky",
+    "a lit city skyline seen from a distance at night",
+]
+note = """Graded 2026-09-12: topically right and PHOTOGRAPHICALLY POOR. Nearly
+every one of the top 24 really was a night scene, and most were also
+underexposed to the point of being a black rectangle with a few pixels of
+light in it. This is not a retrieval failure, it is what this library's night
+photographs are: `composition.MIN_BRIGHTNESS` drops the worst of them and the
+memory is short as a result. Kept because the honest response to "your night
+photographs did not come out" is to let the guardrails say so, not to remove
+the concept and leave no explanation."""

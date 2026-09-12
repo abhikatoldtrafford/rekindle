@@ -439,6 +439,109 @@ def memory(
 
 
 @app.command()
+def scenery(
+    concept: Annotated[
+        list[str] | None,
+        typer.Argument(
+            help=(
+                "Which scenery concepts to build, e.g. `rekindle scenery sea "
+                "mountains`. Run with --list to see them all."
+            ),
+        ),
+    ] = None,
+    list_: Annotated[
+        bool,
+        typer.Option("--list", help="Show the corpus and exit. Needs no index."),
+    ] = False,
+    all_: Annotated[
+        bool, typer.Option("--all", help="Build every concept in the corpus.")
+    ] = False,
+    out: Annotated[Path, typer.Option("--out", help="Where to write memories.")] = Path("memories"),
+    public_safe: Annotated[
+        bool,
+        typer.Option(
+            "--public-safe",
+            help="Only use photos whose face tags are a subset of the allow-list.",
+        ),
+    ] = False,
+    max_shots: Annotated[int, typer.Option("--max-shots")] = 24,
+    gif_frames: Annotated[
+        int, typer.Option("--preview-frames", help="Frames in the GIF/WebP preview.")
+    ] = 16,
+    preview_width: Annotated[
+        int, typer.Option("--preview-width", help="0 uses the default (1280).")
+    ] = 0,
+    mp4_width: Annotated[int, typer.Option("--mp4-width", help="0 uses the default (2560).")] = 0,
+    music: Annotated[Path | None, typer.Option("--music", help="Audio bed for the MP4.")] = None,
+    no_mp4: Annotated[bool, typer.Option("--no-mp4", help="Skip the MP4.")] = False,
+    min_votes: Annotated[
+        int,
+        typer.Option(
+            "--min-votes",
+            help="How many descriptions must agree on a photo. 0 uses 2.",
+        ),
+    ] = 0,
+    tag_k: Annotated[
+        int, typer.Option("--tag-k", help="How deep each description is searched. 0 uses 100.")
+    ] = 0,
+    captions: Annotated[
+        str,
+        typer.Option(
+            "--captions",
+            help=(
+                "'deterministic' (default), 'clip' or 'gpt'. See "
+                "`rekindle memory --help`."
+            ),
+        ),
+    ] = "deterministic",
+    style: Annotated[
+        str,
+        typer.Option(
+            "--style", help="Motion style: 'film' (default) or 'cuts'."
+        ),
+    ] = "film",
+    data_dir: DataDir = Path("./data"),
+) -> None:
+    """Build a memory whose subject is a SCENE - the sea, the hills, the food.
+
+    A third of this library has no face tag, no album anyone named and no
+    GPS, so no other recipe can be ABOUT it. These memories can. They are
+    retrieved by what a photograph looks like, from the checked-in concept
+    list in `corpus/scenery.toml`, and like a prompt memory they are built
+    only when you ask for one by name.
+    """
+    from rekindle.memory.cli import scenery_cmd, scenery_list_cmd
+
+    if list_:
+        scenery_list_cmd()
+        return
+    names = list(concept or [])
+    if not names and not all_:
+        console.print(
+            "[red]Name a concept, or pass --all.[/red] "
+            "`rekindle scenery --list` shows what is available."
+        )
+        raise typer.Exit(code=2)
+    scenery_cmd(
+        _resolved(data_dir),
+        names,
+        out,
+        all_concepts=all_,
+        public_safe=public_safe,
+        max_shots=max_shots,
+        gif_frames=gif_frames,
+        music=music,
+        no_mp4=no_mp4,
+        min_votes=min_votes,
+        tag_k=tag_k,
+        captions=captions,
+        preview_width=preview_width,
+        mp4_width=mp4_width,
+        style=style,
+    )
+
+
+@app.command()
 def dismiss(
     recipe: Annotated[str, typer.Argument(help="Recipe name.")],
     key: Annotated[str, typer.Argument(help="Memory key.")],
