@@ -302,8 +302,9 @@ making `iter_all` bypass the guardrail is caught with the drain in place and
 
 ## 7. Mutations run
 
-Every line below was broken, the tests run, and the line restored. Twelve of
-thirteen were caught; the thirteenth is a demonstration rather than a defect.
+Every line below was broken, the tests run, and the line restored. Nineteen
+of twenty were caught; the twentieth is a demonstration rather than a defect.
+Mutations 1-13 are the lazy index, 14-20 the spine aggregates of §4a.
 
 | # | mutation | caught by |
 |---|---|---|
@@ -320,6 +321,13 @@ thirteen were caught; the thirteenth is a demonstration rather than a defect.
 | 11 | `MemoryIndex.close` does nothing | `test_config.py::…[selection.min_shots]` (Windows) |
 | 12 | `iter_all` bypasses the guardrail | `test_no_query_method_can_return_a_blocked_photo` |
 | 13 | …and the sweep stops draining iterators | **nothing — by design** |
+| 14 | `_years_in` reads by rowid instead of by position | `test_no_query_method_can_return_a_blocked_photo` |
+| 15 | `_years_in` is off by one | `test_every_spine_aggregate_agrees_with_the_photos_it_summarises` |
+| 16 | a dateless row does not append to `_years`, so it drifts | `test_a_dateless_photo_does_not_misalign_the_year_array` |
+| 17 | `month_day_counts` counts months instead of month-days | `test_every_spine_aggregate_agrees_with_the_photos_it_summarises` |
+| 18 | `year_counts` counts the whole library for every year | `test_every_spine_aggregate_agrees_with_the_photos_it_summarises` |
+| 19 | `year_in_review` reads the wrong count | `test_the_offer_count_is_the_real_number_of_photographs` |
+| 20 | `person_years` goes back to hydrating the slice | `test_offers_does_not_hydrate_a_single_photograph[person_years]` |
 
 Three of those found real defects in this work rather than confirming it:
 
@@ -337,6 +345,39 @@ Three of those found real defects in this work rather than confirming it:
   a merged album whose two spellings did not interleave, and a cache too small
   for the admission rule to be what kept it empty. Both tests were rewritten
   to be capable of failing.
+* **Mutations 16, 19 and 20 all survived their first run too**, and the three
+  reasons are worth keeping apart. 16 looked like dead code - `deny_reason`
+  rejects a dateless photograph so `MemoryIndex.open` can never produce one -
+  until the direct constructor, which deliberately does not apply the policy,
+  turned out to reach it; without the alignment line `album_years` returns
+  the wrong years for everything after the gap rather than failing. 19 had no
+  test because the count only reaches a subtitle and an offer's `size`, and
+  nothing compared either against the real number. 20 is the interesting one:
+  reverting `person_years` to hydrate its slice changes NO OUTPUT, so no
+  determinism check and no conformance sweep can see it - the whole of §4a is
+  invisible to every test that looks at what is produced. It needed a test
+  that looks at what is *read*, which is
+  `test_offers_does_not_hydrate_a_single_photograph`, with `album_story` as
+  the negative control that must still hydrate.
+
+### 7a. Six failures in `test_memory_cli.py` that are not this work
+
+The suite ends 6 failed / 2,415 passed on a `uv sync` with no extras. All six
+are in `test_memory_cli.py` and all six were checked against the pre-change
+source before this was committed:
+
+* Five are the semantic-extra tests that assume `onnxruntime` is present.
+* The sixth, `test_the_weak_path_is_named_when_no_source_describes_the_prompt`,
+  is **order-dependent**: it passes in a full-suite run and fails when
+  `test_memory_cli.py` runs alone, at the pre-change source as well as at
+  this one. Running the file by itself at `f8ae624` with none of this work's
+  tests collected reproduces it, which is what rules this work out as the
+  cause. Its prompt is refused by the judge rather than reaching the warning
+  the test asserts on.
+
+Recording that here rather than in the commit message because "six failures,
+none of them mine" is a claim that needs its experiment written down; the
+experiment is `pytest tests/test_memory_cli.py` on a clean checkout.
 
 ## 8. What this does not fix
 

@@ -726,3 +726,91 @@ def test_registering_the_same_name_twice_is_still_refused():
 
             def select(self, index, offer):
                 return None
+
+
+# --------------------------------------------------------------------------
+# offers() must not read the library
+#
+# The index answers a count and a set of distinct years off its spine, and
+# five recipes were changed to ask it rather than to load a slice and measure
+# it. Measured on a synthetic 300,000-photo library that took `all_offers`
+# from 185.9 s to 46.5 s, and `year_in_review.offers` alone from 38.7 s to
+# 0.010 s - it had been hydrating 298,000 photographs to produce 24 integers.
+#
+# Nothing about the OUTPUT changed, which is why a determinism check cannot
+# see this and why it needs its own test: a recipe that quietly went back to
+# `by_person(...)` in `offers()` would still produce the right offers.
+
+
+def _dense_years():
+    """Enough photographs per year for every count-and-years recipe to offer.
+
+    `year_in_review` wants 30 a year and `_across_years` can only place 15 in
+    one day (it walks the hour), so the density comes from several dates
+    rather than from one big group. Thin fixtures are how a "does it hydrate?"
+    test becomes a test of nothing, which is why the assertions below check
+    that offers were actually produced.
+    """
+    out = _across_years("a", people=["Amy", "Bob"], albums=["Kashmir"], gps=(22.5, 87.25))
+    out += _across_years("b", month=5, day=1, per_year=12, people=["Amy"], albums=["Mysore"])
+    out += _across_years("c", month=12, day=25, per_year=12, people=["Amy", "Bob"])
+    out += _across_years("d", month=6, day=11, per_year=12, people=["Bob"])
+    out += _across_years("e", month=9, day=3, per_year=12, people=["Amy", "Bob"])
+    return out
+
+
+SPINE_ONLY_OFFERS = ("on_this_day", "on_this_month", "person_years", "pair_years", "year_in_review")
+
+
+@pytest.mark.parametrize("name", SPINE_ONLY_OFFERS)
+def test_offers_does_not_hydrate_a_single_photograph(name, tmp_path):
+    store, index = _index(tmp_path, _dense_years())
+    try:
+        offers = REGISTRY[name].offers(index)
+        assert offers, f"{name} offered nothing, so the assertion below is vacuous"
+        assert len(index._cache) == 0, (
+            f"{name}.offers() hydrated {len(index._cache)} photographs; "
+            "counts and years are both on the spine"
+        )
+    finally:
+        index.close()
+        store.close()
+
+
+def test_a_recipe_that_reads_the_slice_really_would_show_up(tmp_path):
+    """Guards the test above against being vacuous. `album_story` is one of
+    the three that still loads photographs in `offers()` - it needs a
+    subtitle - so it must fail the same assertion."""
+    photos = _across_years("a", people=["Amy", "Bob"], albums=["Kashmir"])
+    store, index = _index(tmp_path, photos)
+    try:
+        assert REGISTRY["album_story"].offers(index)
+        assert len(index._cache) > 0, "the fixture never hydrates, so the test proves nothing"
+    finally:
+        index.close()
+        store.close()
+
+
+def test_the_offer_count_is_the_real_number_of_photographs(tmp_path):
+    """`size` orders the offers and the subtitle is shown to a person, and
+    both now come from a spine counter rather than from `len(photos)`. An
+    off-by-one there is invisible to every other test in this file."""
+    store, index = _index(tmp_path, _dense_years())
+    try:
+        checked = 0
+        for offer in REGISTRY["year_in_review"].offers(index):
+            checked += 1
+            real = len(index.by_year(int(offer.key)))
+            assert offer.size == real, f"{offer.key}: size {offer.size}, really {real}"
+            assert offer.subtitle == f"{real} photos"
+        for offer in REGISTRY["on_this_day"].offers(index):
+            checked += 1
+            month, day = (int(x) for x in offer.key.split("-"))
+            real = len(index.by_month_day(month, day))
+            years = len(index.years_present(index.by_month_day(month, day)))
+            assert offer.size == real
+            assert offer.subtitle == f"{years} years, {real} photos"
+        assert checked > 4, f"only {checked} offers compared; the fixture is too thin"
+    finally:
+        index.close()
+        store.close()

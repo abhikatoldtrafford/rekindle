@@ -997,3 +997,25 @@ def test_the_hidden_photo_of_that_fixture_really_would_show_up(tmp_path):
         assert unguarded.month_years(3) == {2011}
     finally:
         store.close()
+
+
+def test_a_dateless_photo_does_not_misalign_the_year_array(tmp_path):
+    """`_years` is aligned with `_ids` BY POSITION, so every row must append
+    to both or every year after the gap is read off its neighbour.
+
+    `deny_reason` rejects a dateless photo, so `MemoryIndex.open` can never
+    produce one - but the direct constructor does not apply the policy, and
+    that is deliberate and tested elsewhere. So the alignment line is
+    reachable, and without it `album_years` quietly returns the wrong years
+    for everything after the gap rather than failing.
+    """
+    photos = [
+        _p("dateless", local=None),
+        _p("a", local=datetime(2011, 3, 7, 12, 0), albums=["Kashmir"]),
+        _p("b", local=datetime(2020, 5, 1, 12, 0), albums=["Kashmir"]),
+    ]
+    index = MemoryIndex(photos, ExclusionPolicy(), _empty_report())
+    assert index.album_years("Kashmir") == {2011, 2020}
+    assert index.month_years(3) == {2011}
+    assert index.month_years(5) == {2020}
+    assert index.year_counts() == {2011: 1, 2020: 1}
