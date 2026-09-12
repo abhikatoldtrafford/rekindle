@@ -148,6 +148,14 @@ def test_the_readme_has_no_relative_links():
 
     text = (ROOT / PROJECT["readme"]).read_text(encoding="utf-8")
     bad = [m.group(1) for m in re.finditer(r"\]\((?!https?://|#|mailto:)([^)]+)\)", text)]
+    # HTML `<img src=...>` too. The markdown-only version of this test passed
+    # while four relative image sources sat in the gallery, because the gallery
+    # is a table of `<img>` tags - a rule that only inspects one syntax is a
+    # rule the other syntax walks past.
+    bad += [
+        m.group(1)
+        for m in re.finditer(r"""<img[^>]+src=["'](?!https?://|data:)([^"']+)["']""", text)
+    ]
     assert bad == [], f"relative links break on a package page: {bad}"
 
 

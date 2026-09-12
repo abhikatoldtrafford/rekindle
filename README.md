@@ -26,8 +26,8 @@ Point it at a folder. That's the whole setup.
 
 |  |  |
 |---|---|
-| <img src="docs/assets/2017.webp" width="100%"><br>**2017** · a year in fifteen frames<br>_Himalayas, May → December_<br>`rekindle memory --recipe year_in_review --key 2017` | <img src="docs/assets/gopalpur.webp" width="100%"><br>**Gopalpur** · an album becomes a trip<br>_24 photos · August 2025_<br>`rekindle memory --recipe album_story --key Gopalpur` |
-| <img src="docs/assets/11-june.webp" width="100%"><br>**11 June** · the same date, every year<br>_2023 → 2026_<br>`rekindle memory --recipe on_this_day --key 06-11` | <img src="docs/assets/24-december-kolkata.webp" width="100%"><br>**24 December in Kolkata**<br>_10 photos_<br>`rekindle memory --recipe album_story --key "24dec in Kolkata"` |
+| <img src="https://raw.githubusercontent.com/abhikatoldtrafford/rekindle/main/docs/assets/2017.webp" width="100%"><br>**2017** · a year in fifteen frames<br>_Himalayas, May → December_<br>`rekindle memory --recipe year_in_review --key 2017` | <img src="https://raw.githubusercontent.com/abhikatoldtrafford/rekindle/main/docs/assets/gopalpur.webp" width="100%"><br>**Gopalpur** · an album becomes a trip<br>_24 photos · August 2025_<br>`rekindle memory --recipe album_story --key Gopalpur` |
+| <img src="https://raw.githubusercontent.com/abhikatoldtrafford/rekindle/main/docs/assets/11-june.webp" width="100%"><br>**11 June** · the same date, every year<br>_2023 → 2026_<br>`rekindle memory --recipe on_this_day --key 06-11` | <img src="https://raw.githubusercontent.com/abhikatoldtrafford/rekindle/main/docs/assets/24-december-kolkata.webp" width="100%"><br>**24 December in Kolkata**<br>_10 photos_<br>`rekindle memory --recipe album_story --key "24dec in Kolkata"` |
 
 *Real output from a 19,318-photo library, rendered by the commands beneath them.
 Each is the WebP preview; the MP4 carries the full resolution, the music and the
