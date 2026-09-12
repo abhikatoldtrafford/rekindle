@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -535,6 +536,11 @@ def test_output_names_are_an_allow_list(running, tmp_path):
     assert status == 200 and body[:4] == b"RIFF"
 
 
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="a drive-relative path is a Windows concept; on POSIX 'D:evil.gif' "
+    "is an ordinary filename with a colon in it and joins inside the folder",
+)
 def test_output_path_refuses_a_drive_relative_name_on_another_drive():
     """The escape the character blacklist could not see.
 
@@ -554,6 +560,7 @@ def test_output_path_refuses_a_drive_relative_name_on_another_drive():
     assert output_path(folder, "D:memory.webp") is None
 
 
+@pytest.mark.skipif(os.name != "nt", reason="see the test above: Windows-only shape")
 def test_output_path_allows_a_same_drive_name_because_it_stays_inside():
     """Narrower than it looks, and the narrowness is the point: a
     drive-relative name on the folder's OWN drive joins inside the folder and
@@ -572,17 +579,32 @@ def test_output_path_allows_a_same_drive_name_because_it_stays_inside():
     "name",
     ["../secret.webp", "..\secret.webp", "sub/memory.webp", "notes.txt", "memory.exe", ""],
 )
-def test_output_path_still_refuses_everything_it_refused_before(name):
+def test_output_path_still_refuses_everything_it_refused_before(name, tmp_path):
     from rekindle.web.server import output_path
 
-    assert output_path(Path("C:/sessions/abc"), name) is None
+    assert output_path(tmp_path, name) is None
 
 
-def test_output_path_accepts_each_declared_output_type():
+def test_output_path_keeps_an_accepted_name_inside_the_folder(tmp_path):
+    """The containment guard itself, on every platform.
+
+    The two Windows-only tests above cover the shape that got OUT. This one
+    covers the property they are asserting: whatever comes back is inside the
+    folder it was given.
+    """
+    from rekindle.web.server import output_path
+
+    resolved = output_path(tmp_path, "memory.webp")
+    assert resolved is not None
+    assert resolved.is_relative_to(tmp_path.resolve())
+    assert resolved.name == "memory.webp"
+
+
+def test_output_path_accepts_each_declared_output_type(tmp_path):
     from rekindle.web.server import OUTPUT_TYPES, output_path
 
     for suffix in OUTPUT_TYPES:
-        assert output_path(Path("C:/sessions/abc"), f"memory{suffix}") is not None
+        assert output_path(tmp_path, f"memory{suffix}") is not None
 
 
 def test_a_range_request_returns_a_partial_body(running):
