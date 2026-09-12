@@ -10,6 +10,7 @@ numbers - the same method that produced the shipped values, automated.
 The layers, smallest first:
 
     judge      answers -> a number, plus how much to trust it
+    labels     labels.jsonl: every judgement ever given, append-only
     sampling   which photographs to ask about, and in what order
     plan       the sequence: what is asked, when, and in which mode
     state      calibration.json: finished, when, against how many, how far

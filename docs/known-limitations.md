@@ -983,3 +983,22 @@ Full measurements in [the scale decision log](decision-log-memory-scale.md).
   pass does and moved the 300k full-pass peak by 1.2 MB, because the offers
   phase drops what it loads as it goes. Independent of the index and
   untouched here.
+
+## Carried forward from the calibration-label measurement
+
+Full measurements in
+[the calibration-label decision log](decision-log-calibration-labels.md).
+
+- **The labels are gate judgements, not ranking judgements, and no step
+  produces a ranking judgement.** `score()` decides which of the *allowed*
+  photographs fill the twenty-four slots; every question the calibration
+  sequence asks is "is this one unusable?". Measured, the AUC of `score()`
+  against the real labels is 0.591 - barely above chance - so the two are
+  nearly unrelated. A learned scorer would need a pairwise preference step,
+  which is a design change and not a fit over what is already collected.
+
+- **A finished sitting produces at most 40 labels on a plain install**, not
+  the ~130 a count of steps suggests: 7 of the 13 steps are slider- or
+  default-only and record no judgement at all, and 2 of the remaining 6 need
+  an extra installed. `labels.jsonl` accumulates across sittings so the number
+  can grow, but one sitting will not get there.

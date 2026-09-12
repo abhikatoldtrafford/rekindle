@@ -510,6 +510,17 @@ Your choices land in `rekindle.toml` beside the index. Only what you changed
 is in it, so an upgrade improves the values you did *not* choose. It contains
 numbers and nothing else — no paths, no names — so it is safe to commit.
 
+Your *answers* land somewhere else, in `labels.jsonl` beside the index, and
+that file is append-only: a later sitting adds to it rather than replacing it,
+so what you thought of your photographs in September survives a recalibration
+in March. **It is personal data and is never committed** — it lives in the
+data directory, which `.gitignore` excludes. Nothing reads it. It is not a
+model and there is no learned component in rekindle: fitted to the seventeen
+labels one real sitting produces, a learned scorer scores exactly at the "say
+keep to everything" baseline while replacing 85% of the shots across 25 of 27
+memories, and [the measurement is written down](https://github.com/abhikatoldtrafford/rekindle/blob/main/docs/decision-log-calibration-labels.md)
+so the idea can be reconsidered on evidence rather than re-argued.
+
 **The face gate is different.** It decides what may reach a public repository
 and it is calibratable, but tightening it is free and widening it needs a
 separate confirmation in which you type out, in plain words, that more

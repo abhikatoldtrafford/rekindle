@@ -22,7 +22,7 @@ from rich.console import Console
 from rich.table import Table
 
 from rekindle import config
-from rekindle.calibrate import impact, plan, preview, session, state
+from rekindle.calibrate import impact, labels, plan, preview, session, state
 from rekindle.calibrate.plan import MODE_BLIND, MODE_DEFAULT, MODE_SLIDER, Step
 from rekindle.config.writer import write as write_toml
 
@@ -208,6 +208,22 @@ def _print_status(sess: session.Session) -> None:
             found.confidence() if found.judgements else "-",
         )
     console.print(table)
+
+    # Said out loud, because it is a file the user did not ask for and it
+    # holds judgements about their own photographs. Counts only - naming a
+    # photograph here would defeat the point of keeping the log private.
+    kept = labels.summary(sess.data_dir)
+    if kept:
+        console.print(
+            f"\n[dim]{sum(kept.values())} judgement"
+            f"{'s' if sum(kept.values()) != 1 else ''} on record across "
+            f"{len(kept)} threshold{'s' if len(kept) != 1 else ''} in "
+            f"{labels.log_path(sess.data_dir)}.\n"
+            f"That file is append-only, so a re-calibration adds to it rather than "
+            f"replacing it. It is personal data: it stays on this machine and is "
+            f"never committed. Nothing reads it - see "
+            f"docs/decision-log-calibration-labels.md.[/dim]"
+        )
 
 
 def _run_step(sess: session.Session, step: Step, *, rounds: int) -> bool:
