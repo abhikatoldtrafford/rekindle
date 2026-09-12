@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
 
+from rekindle.config import CATALOGUE, active
 from rekindle.models import MediaType, Photo
 
 # --------------------------------------------------------------------------
@@ -39,7 +40,7 @@ from rekindle.models import MediaType, Photo
 # square crops) and the band above it is nearly empty, so the exact tolerance
 # barely matters; 1.05 is forgiving of a crop that is a pixel off without
 # swallowing a real 4:3 (1.33).
-SQUARE_RATIO = 1.05
+SQUARE_RATIO = CATALOGUE["composition.square_ratio"].default
 
 # Minimum short edge, in native pixels.
 #
@@ -48,22 +49,22 @@ SQUARE_RATIO = 1.05
 # which is barcodes, thumbnails and tiny re-saves. Raising it to 640 would
 # remove 986 (5.42%) and start eating genuine early-2010s phone photos, so the
 # conservative end of the knee is the right place to stand.
-MIN_SHORT_EDGE = 480
+MIN_SHORT_EDGE = CATALOGUE["composition.min_short_edge"].default
 
 # Beyond this, letterboxing turns the photo into a sliver.
 #
 # Measured: 33 images (0.18%) exceed 2.5:1, and the extreme is a 8874x943 VR
 # panorama at 9.41:1. Excluding them costs essentially nothing and prevents a
 # panorama rendering as a 1280x136 band inside a black frame.
-MAX_ASPECT = 2.5
+MAX_ASPECT = CATALOGUE["composition.max_aspect"].default
 
 # Quality gates, measured on 1,149 real photos stratified across every year.
 #
 # Mean luminance percentiles: p1=33, p2=44, median=113, p99=186. The gates at
 # 20 and 235 therefore sit far outside anything the library actually contains
 # (0.26% and 0.09%) and catch only true pocket shots and blown frames.
-MIN_BRIGHTNESS = 20.0
-MAX_BRIGHTNESS = 235.0
+MIN_BRIGHTNESS = CATALOGUE["composition.min_brightness"].default
+MAX_BRIGHTNESS = CATALOGUE["composition.max_brightness"].default
 
 # Sharpness gate, RE-DERIVED from measurement when the measure changed, and
 # then re-derived AGAIN when the whole library disagreed with the sample.
@@ -100,7 +101,7 @@ MAX_BRIGHTNESS = 235.0
 # 90.3% of the time. The gate's only job is to stop the indefensible from
 # being ranked at all, and a false positive here deletes an irreplaceable
 # photograph outright - so it belongs below the 1st percentile, not near it.
-MIN_SHARPNESS = 0.12
+MIN_SHARPNESS = CATALOGUE["composition.min_sharpness"].default
 
 # Common phone and desktop screen sizes, either orientation. Used ONLY in
 # conjunction with a total absence of camera metadata - see `is_screenshot`.
@@ -208,7 +209,9 @@ def dimensions(photo: Photo) -> tuple[int, int] | None:
     return width, height
 
 
-def classify(photo: Photo, *, square_ratio: float = SQUARE_RATIO) -> Orientation:
+def classify(photo: Photo, *, square_ratio: float | None = None) -> Orientation:
+    if square_ratio is None:
+        square_ratio = active().composition.square_ratio
     size = dimensions(photo)
     if size is None:
         return Orientation.UNKNOWN
@@ -300,6 +303,7 @@ def is_screenshot(photo: Photo) -> bool:
 
 def _reject(photo: Photo, *, min_short_edge: int, max_aspect: float) -> str | None:
     """Per-photo gates, in a fixed order. None means the photo is usable."""
+    cfg = active().composition
     if photo.media_type is MediaType.VIDEO and photo.meta.phash is None:
         # A video with no extracted still frame. `rekindle fingerprint` caches
         # one per standalone video when ffmpeg is present (see
@@ -339,12 +343,12 @@ def _reject(photo: Photo, *, min_short_edge: int, max_aspect: float) -> str | No
 
     brightness = photo.meta.brightness
     if brightness is not None:
-        if brightness < MIN_BRIGHTNESS:
+        if brightness < cfg.min_brightness:
             return DROP_TOO_DARK
-        if brightness > MAX_BRIGHTNESS:
+        if brightness > cfg.max_brightness:
             return DROP_TOO_BRIGHT
     sharpness = photo.meta.sharpness
-    if sharpness is not None and sharpness < MIN_SHARPNESS:
+    if sharpness is not None and sharpness < cfg.min_sharpness:
         return DROP_OUT_OF_FOCUS
     # A photo with no measured brightness or sharpness has simply never been
     # fingerprinted. It is KEPT: the quality gates are a filter on measured
@@ -418,7 +422,7 @@ def _median(values: list[int]) -> int:
 # The tolerance matters because without it a photo 3% below the canvas would
 # be padded, which reads as an inconsistency rather than as a deliberate
 # signal that the photo is older and smaller.
-UPSCALE_TOLERANCE = 1.25
+UPSCALE_TOLERANCE = CATALOGUE["composition.upscale_tolerance"].default
 
 FIT_DOWNSCALE = "downscale"
 FIT_UPSCALE = "upscale"
@@ -426,7 +430,7 @@ FIT_PAD = "pad"
 
 
 def plan_placement(
-    size: tuple[int, int], canvas: tuple[int, int], *, tolerance: float = UPSCALE_TOLERANCE
+    size: tuple[int, int], canvas: tuple[int, int], *, tolerance: float | None = None
 ) -> tuple[tuple[int, int], str]:
     """How one photo meets the canvas: (rendered size, mode).
 
@@ -444,6 +448,8 @@ def plan_placement(
     memories - "person over the years" - whose whole subject is the span. Two
     individually reasonable rules would have combined to defeat each other.
     """
+    if tolerance is None:
+        tolerance = active().composition.upscale_tolerance
     width, height = size
     # scale > 1 means the CANVAS is larger, i.e. the photo would have to be
     # blown up. scale < 1 means the photo is larger and must come down.
@@ -458,8 +464,8 @@ def plan_placement(
 def compose(
     photos: list[Photo],
     *,
-    min_short_edge: int = MIN_SHORT_EDGE,
-    max_aspect: float = MAX_ASPECT,
+    min_short_edge: int | None = None,
+    max_aspect: float | None = None,
     enforce_orientation: bool = True,
 ) -> tuple[list[Photo], CompositionReport]:
     """Apply every composition guardrail. Returns (usable, report).
@@ -469,6 +475,9 @@ def compose(
     first would let a pile of rejected portrait thumbnails outvote the real
     landscape photos and empty the memory.
     """
+    cfg = active().composition
+    min_short_edge = cfg.min_short_edge if min_short_edge is None else min_short_edge
+    max_aspect = cfg.max_aspect if max_aspect is None else max_aspect
     report = CompositionReport(considered=len(photos))
 
     usable: list[Photo] = []

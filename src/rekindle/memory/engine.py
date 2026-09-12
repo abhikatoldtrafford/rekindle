@@ -18,14 +18,15 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import date, datetime
 
+from rekindle.config import CATALOGUE, active
 from rekindle.memory import captions
 from rekindle.memory.composition import CompositionReport, compose
 from rekindle.memory.dedup import collapse
 from rekindle.memory.diversity import DEFAULT_SIGNAL, CompositeSignal, DiversityReport
 from rekindle.memory.diversity import SemanticSupport as SemanticSupport
-from rekindle.memory.history import DEFAULT_MAX_OVERLAP, overlap
+from rekindle.memory.history import overlap
 from rekindle.memory.index import MemoryIndex
-from rekindle.memory.recipes import MIN_SHOTS, Offer, Selection, registered
+from rekindle.memory.recipes import Offer, Selection, registered
 from rekindle.memory.recipes.base import AS_GIVEN, chronological
 from rekindle.memory.spec import MemorySpec, Shot, build_fact_sheet
 from rekindle.memory.strata import StratumReport, stratify
@@ -34,7 +35,7 @@ from rekindle.models import Photo
 # How many photos reach a memory. 24 is already long for a montage - at 2.5
 # seconds a shot that is a minute - and the guide's own advice is "return
 # fewer photos than you think".
-DEFAULT_MAX_SHOTS = 24
+DEFAULT_MAX_SHOTS = CATALOGUE["selection.max_shots"].default
 
 # Reasons a candidate memory was not built. Counted and surfaced, never
 # silently dropped.
@@ -147,8 +148,8 @@ def build(
     offer: Offer,
     *,
     selection: Selection | None = None,
-    max_shots: int = DEFAULT_MAX_SHOTS,
-    min_shots: int = MIN_SHOTS,
+    max_shots: int | None = None,
+    min_shots: int | None = None,
     report: BuildReport | None = None,
     semantic: SemanticSupport | None = None,
 ) -> MemorySpec | None:
@@ -168,6 +169,13 @@ def build(
     a synthetic, non-registry Selection through this function and asserts the
     same guarantees.
     """
+    # `None` means "the active configuration, read now". A shipped number
+    # bound as a default argument would be frozen at import time, so a user's
+    # `rekindle.toml` could never reach it.
+    cfg = active().selection
+    max_shots = cfg.max_shots if max_shots is None else max_shots
+    min_shots = cfg.min_shots if min_shots is None else min_shots
+
     report = report if report is not None else BuildReport()
     if selection is None:
         recipe = _recipe_for(offer)
@@ -296,9 +304,9 @@ def build_all(
     index: MemoryIndex,
     offers: list[Offer],
     *,
-    max_shots: int = DEFAULT_MAX_SHOTS,
-    min_shots: int = MIN_SHOTS,
-    max_overlap: float = DEFAULT_MAX_OVERLAP,
+    max_shots: int | None = None,
+    min_shots: int | None = None,
+    max_overlap: float | None = None,
     dismissed: frozenset[str] = frozenset(),
     cooling: frozenset[str] = frozenset(),
     limit: int | None = None,
@@ -324,6 +332,7 @@ def build_all(
     same twelve photographs shipping as an album story and again as a year in
     review - and that check is the reason a batch is a batch.
     """
+    overlap_cap = active().selection.max_overlap if max_overlap is None else max_overlap
     report = BuildReport(offered=len(offers))
     built: list[MemorySpec] = []
     accepted: list[list[str]] = []
@@ -350,7 +359,7 @@ def build_all(
         if spec is None:
             continue
         hashes = [s.file_hash for s in spec.shots]
-        if any(overlap(hashes, other) >= max_overlap for other in accepted):
+        if any(overlap(hashes, other) >= overlap_cap for other in accepted):
             # `build` already counted this as built; undo that before
             # recording the real reason, or the accounting identity breaks.
             report.built -= 1

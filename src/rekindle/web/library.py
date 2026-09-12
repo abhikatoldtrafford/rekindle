@@ -24,6 +24,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from rekindle import config
 from rekindle.db import PhotoStore
 from rekindle.memory.index import MemoryIndex
 from rekindle.memory.policy import CONFIG_NAME, PolicyError, load_policy
@@ -85,6 +86,10 @@ class Library:
                 raise LibraryError(
                     f"No index at {self.db_path}. Run `rekindle index <folder>` first."
                 )
+            # Thresholds first, so the index and every later request see
+            # the same numbers. `open_index` does this too; the UI has its own
+            # entry point and must not be the one that skips it.
+            config.activate_from(self.data_dir)
             policy = load_policy(self.data_dir / CONFIG_NAME)
             store = PhotoStore(self.db_path)
             try:
@@ -99,7 +104,7 @@ class Library:
             finally:
                 store.close()
             self.state = STATE_READY
-        except (LibraryError, PolicyError, ValueError, OSError) as exc:
+        except (LibraryError, PolicyError, config.ConfigError, ValueError, OSError) as exc:
             self.state = STATE_FAILED
             self.error = str(exc)
         finally:

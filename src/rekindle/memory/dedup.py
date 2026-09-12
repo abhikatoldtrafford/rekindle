@@ -52,14 +52,15 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
+from rekindle.config import CATALOGUE, active
 from rekindle.models import Photo
 
 # Frames of one burst arrive seconds apart. 30s is generous enough for a
 # hand-triggered sequence and is the value the brief settled on.
-DEFAULT_GAP_SECONDS = 30.0
+DEFAULT_GAP_SECONDS = CATALOGUE["dedup.gap_seconds"].default
 # Hamming distance over 64 bits. See memory.fingerprint for the measurement
 # that chose 6: it touches 0.033% of unrelated pairs.
-DEFAULT_THRESHOLD = 6
+DEFAULT_THRESHOLD = CATALOGUE["dedup.phash_distance"].default
 # Cosine at which two photos taken within `gap_seconds` of each other are one
 # moment. See the module docstring for the six pairs this was read off.
 #
@@ -67,7 +68,7 @@ DEFAULT_THRESHOLD = 6
 # suggests, because this rule DELETES a photo: at 0.900 and 0.912 the pairs
 # were genuinely different pictures, and dedup's whole doctrine is that a
 # wrong collapse costs a memory while a wrong keep costs a mild annoyance.
-DEFAULT_COSINE = 0.92
+DEFAULT_COSINE = CATALOGUE["dedup.cosine"].default
 
 
 def hamming(a: int, b: int) -> int:
@@ -147,10 +148,10 @@ class DedupReport:
 def bursts(
     photos: list[Photo],
     *,
-    gap_seconds: float = DEFAULT_GAP_SECONDS,
-    threshold: int = DEFAULT_THRESHOLD,
+    gap_seconds: float | None = None,
+    threshold: int | None = None,
     cosine: Callable[[Photo, Photo], float | None] | None = None,
-    cosine_threshold: float = DEFAULT_COSINE,
+    cosine_threshold: float | None = None,
 ) -> list[list[Photo]]:
     """Group photos into bursts. Every input photo appears in exactly one group.
 
@@ -176,6 +177,16 @@ def bursts(
     its neighbours. A photo with only one of the two is judged on that one:
     an abstention is not a yes and not a no.
     """
+    # `None` means "whatever the active configuration says NOW". Binding the
+    # shipped number as a default argument would freeze it at import, so a
+    # user's `rekindle.toml` would reach this function only if it happened to
+    # be read before `rekindle.memory.dedup` was. `collapse` passes its own
+    # arguments straight through, so this is the one place that resolves them.
+    cfg = active().dedup
+    gap_seconds = cfg.gap_seconds if gap_seconds is None else gap_seconds
+    threshold = cfg.phash_distance if threshold is None else threshold
+    cosine_threshold = cfg.cosine if cosine_threshold is None else cosine_threshold
+
     groups: list[list[Photo]] = []
     anchor: Photo | None = None
     previous: Photo | None = None
@@ -244,16 +255,25 @@ def _joined_semantically(group: list[Photo], threshold: int) -> int:
 def collapse(
     photos: list[Photo],
     *,
-    gap_seconds: float = DEFAULT_GAP_SECONDS,
-    threshold: int = DEFAULT_THRESHOLD,
+    gap_seconds: float | None = None,
+    threshold: int | None = None,
     cosine: Callable[[Photo, Photo], float | None] | None = None,
-    cosine_threshold: float = DEFAULT_COSINE,
+    cosine_threshold: float | None = None,
 ) -> tuple[list[Photo], DedupReport]:
     """Keep the best photo of each burst. Returns (survivors, report).
 
     Survivors come back in the caller's own order, not burst order: this runs
     in the middle of a pipeline whose ordering the recipe already chose.
     """
+    # Resolved HERE as well as in `bursts`, and not merely passed through:
+    # the semantic accounting below compares hashes against `threshold`
+    # directly, and a `None` reaching that comparison is a TypeError inside a
+    # render. `tests/test_dedup.py` caught exactly that.
+    cfg = active().dedup
+    gap_seconds = cfg.gap_seconds if gap_seconds is None else gap_seconds
+    threshold = cfg.phash_distance if threshold is None else threshold
+    cosine_threshold = cfg.cosine if cosine_threshold is None else cosine_threshold
+
     report = DedupReport(considered=len(photos))
     groups = bursts(
         photos,

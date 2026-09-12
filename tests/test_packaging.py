@@ -173,8 +173,10 @@ needs_wheel = pytest.mark.skipif(not WHEELS, reason="no built wheel in dist/ (ru
 @needs_wheel
 def test_the_wheel_carries_every_data_file_the_code_reads():
     """A wheel of pure `.py` files installs cleanly and then cannot find its
-    own festival corpus, its caption vocabulary, its model checksums or the
-    web UI's HTML. Every one of those is loaded by path at runtime."""
+    own festival corpus, its caption vocabulary, its model checksums, its
+    default thresholds or the web UI's HTML. Every one of those is loaded by
+    path at runtime - and `config/defaults.toml` is read at IMPORT, so a wheel
+    without it does not degrade, it fails to start."""
     names = set(zipfile.ZipFile(WHEELS[-1]).namelist())
     for wanted in (
         "rekindle/memory/corpus/festivals.toml",
@@ -182,6 +184,7 @@ def test_the_wheel_carries_every_data_file_the_code_reads():
         "rekindle/memory/corpus/scenery.toml",
         "rekindle/memory/corpus/prompt_tags.json",
         "rekindle/semantic/model-locks.json",
+        "rekindle/config/defaults.toml",
         "rekindle/web/assets/index.html",
         "rekindle/web/assets/app.js",
         "rekindle/web/assets/app.css",

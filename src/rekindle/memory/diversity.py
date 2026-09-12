@@ -76,6 +76,7 @@ from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Protocol, runtime_checkable
 
+from rekindle.config import CATALOGUE, active
 from rekindle.memory.dedup import hamming
 from rekindle.models import Photo
 
@@ -83,7 +84,7 @@ from rekindle.models import Photo
 # chosen. Quality is normalised to (0, 1], so 0.5 means a photo indis-
 # tinguishable from a pick gives up half the entire quality range - enough to
 # lose to a clearly worse but different photo, not enough to be erased.
-LAMBDA = 0.5
+LAMBDA = CATALOGUE["diversity.lambda_penalty"].default
 
 # Hamming distance at which two photos are perceptually unrelated.
 #
@@ -93,13 +94,13 @@ LAMBDA = 0.5
 # slightly worse photo rather than a deleted memory. Measured on this library:
 # the median distance within a 30-second run is 22 and between unrelated
 # photos is 32, so 24 catches same-scene pairs and leaves unrelated ones be.
-PHASH_RADIUS = 24
+PHASH_RADIUS = CATALOGUE["diversity.phash_radius"].default
 
 # Weak, and weak on purpose. Two photos an hour apart are marginally more
 # likely to be redundant than two a year apart, but the calendar is a proxy
 # for content and a bad one - it is a tiebreak between otherwise equal
 # candidates, never a cap.
-TIME_TIEBREAK = 0.05
+TIME_TIEBREAK = CATALOGUE["diversity.time_tiebreak"].default
 TIME_SATURATION = timedelta(days=1)
 
 REJECT_TOO_SIMILAR = "too_similar_to_a_chosen_shot"
@@ -108,7 +109,7 @@ REJECT_TOO_SIMILAR = "too_similar_to_a_chosen_shot"
 # penalised. Only near-identity qualifies: the MMR penalty does the graded
 # work and this catches the case where a photo is so close to one already
 # chosen that showing both is simply a mistake.
-HARD_FLOOR = 0.08
+HARD_FLOOR = CATALOGUE["diversity.hard_floor"].default
 
 
 @runtime_checkable
@@ -162,7 +163,7 @@ class PerceptualSignal:
         if left is None or right is None:
             return None
         distance = hamming(left, right)
-        return min(1.0, distance / PHASH_RADIUS)
+        return min(1.0, distance / active().diversity.phash_radius)
 
 
 @dataclass(frozen=True)
@@ -311,7 +312,7 @@ def pick(
     already: list[Photo] | None = None,
     signal: DissimilaritySignal = DEFAULT_SIGNAL,
     binding: DissimilaritySignal | None = None,
-    lam: float = LAMBDA,
+    lam: float | None = None,
 ) -> tuple[list[Photo], DiversityReport]:
     """Greedy maximal-marginal-relevance pick.
 
@@ -362,6 +363,13 @@ def pick(
 
     chosen: list[Photo] = list(already or [])
     picked: list[Photo] = []
+    # Resolved here, not in the signature: a default argument binds the
+    # shipped number at import and would make a user override unreachable.
+    cfg = active().diversity
+    lam = cfg.lambda_penalty if lam is None else lam
+    tiebreak = cfg.time_tiebreak
+    hard_floor = cfg.hard_floor
+
     refused: list[Photo] = []
     remaining = list(ordered)
 
@@ -377,14 +385,14 @@ def pick(
         plain_value = -math.inf
         for photo in remaining:
             dissimilarity, spacing = _closest(photo, chosen, signal)
-            value = quality[photo.file_hash] - lam * (1.0 - dissimilarity) + TIME_TIEBREAK * spacing
+            value = quality[photo.file_hash] - lam * (1.0 - dissimilarity) + tiebreak * spacing
             # Strictly greater, so ties fall to the earlier ranked position -
             # `remaining` is in ranked order.
             if value > best_value:
                 best, best_value, best_dissimilarity = photo, value, dissimilarity
             if advisory:
                 other, spacing2 = _closest(photo, chosen, binding)
-                bare = quality[photo.file_hash] - lam * (1.0 - other) + TIME_TIEBREAK * spacing2
+                bare = quality[photo.file_hash] - lam * (1.0 - other) + tiebreak * spacing2
                 if bare > plain_value:
                     plain, plain_value = photo, bare
 
@@ -394,7 +402,7 @@ def pick(
         # The floor is the BINDING signals' call, always - never the advisory
         # one's. See the docstring: an embedding may reorder, never refuse.
         floor_dissimilarity = _closest(best, chosen, binding)[0] if advisory else best_dissimilarity
-        if chosen and floor_dissimilarity < HARD_FLOOR:
+        if chosen and floor_dissimilarity < hard_floor:
             # Near-identical to something already chosen. Showing both is not
             # a judgement call.
             report.reject(REJECT_TOO_SIMILAR)

@@ -82,6 +82,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from rekindle.config import CATALOGUE, active
 from rekindle.memory.diversity import DissimilaritySignal
 from rekindle.models import Photo
 from rekindle.semantic.store import EmbeddingStore
@@ -92,16 +93,16 @@ if TYPE_CHECKING:  # pragma: no cover
 #: `high` never falls below this. A pool whose own 95th percentile is lower
 #: than this is a genuinely varied one, and nothing in it has earned the full
 #: penalty - see the module docstring.
-CEILING = 0.90
+CEILING = CATALOGUE["semantic_diversity.ceiling"].default
 #: `high` is never closer to `low` than this, so the divisor cannot collapse
 #: on a uniform pool. 0.10 is a tenth of the whole cosine range these vectors
 #: occupy in practice (random 0.55, same-moment 0.95).
-MIN_SPREAD = 0.10
+MIN_SPREAD = CATALOGUE["semantic_diversity.min_spread"].default
 #: Quantiles read off the pool. The median is "a typical pair here", and it is
 #: the anchor of the scale; the 95th is "as alike as this memory's own most
 #: alike pairs".
-LOW_QUANTILE = 50.0
-HIGH_QUANTILE = 95.0
+LOW_QUANTILE = CATALOGUE["semantic_diversity.low_quantile"].default
+HIGH_QUANTILE = CATALOGUE["semantic_diversity.high_quantile"].default
 
 #: How much of the candidate pool the calibration looks at. 600 rows is
 #: 179,700 pairs, already far more than any quantile needs, and it bounds the
@@ -113,7 +114,7 @@ CALIBRATION_ROWS = 600
 #: How much weight the embedding carries against the two pixel signals, whose
 #: weights sum to 1.0. Equal billing: it is better than either at the question
 #: they are all being asked, and worse than both at being sure.
-WEIGHT = 1.0
+WEIGHT = CATALOGUE["semantic_diversity.weight"].default
 
 #: Pools smaller than this get their full cosine matrix precomputed - it is
 #: what makes `between` a dict lookup instead of a dot product inside the
@@ -141,6 +142,9 @@ class SemanticSignal:
     low: float
     high: float
     name: str = "semantic"
+    #: Resolved by `calibrate`, which is the only thing that builds one
+    #: of these in the pipeline. A default argument would freeze the
+    #: shipped weight at import.
     weight: float = WEIGHT
 
     def between(self, a: Photo, b: Photo) -> float | None:
@@ -237,9 +241,10 @@ def calibrate(photos: list[Photo], cosines: _Cosines) -> SemanticSignal | None:
     # `low` is the median and nothing is allowed to move it: that is what
     # makes a typical pair cost exactly nothing, in every memory, whatever its
     # subject. The floors go on `high`, where they cannot reach the invariant.
-    low = float(np.percentile(pairs, LOW_QUANTILE))
-    high = max(float(np.percentile(pairs, HIGH_QUANTILE)), CEILING, low + MIN_SPREAD)
-    return SemanticSignal(cosines=cosines, low=low, high=high)
+    cfg = active().semantic_diversity
+    low = float(np.percentile(pairs, cfg.low_quantile))
+    high = max(float(np.percentile(pairs, cfg.high_quantile)), cfg.ceiling, low + cfg.min_spread)
+    return SemanticSignal(cosines=cosines, low=low, high=high, weight=cfg.weight)
 
 
 def open_support(data_dir, model_key: str | None = None) -> Support | None:

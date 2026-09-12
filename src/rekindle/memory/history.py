@@ -41,6 +41,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 
+from rekindle.config import CATALOGUE, active
 from rekindle.db import PhotoStore
 from rekindle.memory.policy import DateRange, ExclusionPolicy
 
@@ -56,7 +57,7 @@ KIND_DATES = "dates"
 # blocked - `on_this_day:12-25` is 365 days apart by construction, so a
 # cooldown anywhere below a year cannot suppress it. A shorter value would let
 # `year_in_review:2016` reappear a fortnight later, which reads as a bug.
-DEFAULT_COOLDOWN_DAYS = 90
+DEFAULT_COOLDOWN_DAYS = CATALOGUE["selection.cooldown_days"].default
 
 # The largest share of photos two memories in one batch may have in common.
 #
@@ -65,7 +66,7 @@ DEFAULT_COOLDOWN_DAYS = 90
 # memory twice under two titles. The overlap is measured against the SMALLER
 # of the two, so a 24-shot memory fully contained in a 200-shot one counts as
 # 100% overlap rather than 12% - containment is the case that actually annoys.
-DEFAULT_MAX_OVERLAP = 0.5
+DEFAULT_MAX_OVERLAP = CATALOGUE["selection.max_overlap"].default
 
 
 def memory_id(recipe: str, key: str) -> str:
@@ -202,7 +203,8 @@ class MemoryState:
             )
         ]
 
-    def in_cooldown(self, memory_id_: str, *, days: int = DEFAULT_COOLDOWN_DAYS, now=None) -> bool:
+    def in_cooldown(self, memory_id_: str, *, days: int | None = None, now=None) -> bool:
+        days = active().selection.cooldown_days if days is None else days
         row = self._conn.execute(
             "SELECT surfaced_at FROM memory_history WHERE memory_id = ?", (memory_id_,)
         ).fetchone()
@@ -218,8 +220,9 @@ class MemoryState:
             moment = moment.replace(tzinfo=UTC)
         return moment - last < timedelta(days=days)
 
-    def cooling(self, *, days: int = DEFAULT_COOLDOWN_DAYS, now=None) -> frozenset[str]:
+    def cooling(self, *, days: int | None = None, now=None) -> frozenset[str]:
         """Every memory id still inside its cooldown. One query, not N."""
+        days = active().selection.cooldown_days if days is None else days
         moment = now or datetime.now(UTC)
         if moment.tzinfo is None:
             moment = moment.replace(tzinfo=UTC)

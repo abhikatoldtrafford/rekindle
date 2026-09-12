@@ -52,6 +52,7 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from rekindle.config import CATALOGUE, active
 from rekindle.semantic.availability import SemanticUnavailable
 from rekindle.semantic.registry import FaceModel, face_model
 
@@ -60,11 +61,11 @@ if TYPE_CHECKING:  # pragma: no cover
     from PIL.Image import Image
 
 #: A detection at or above this is shown to the user as a face.
-DEFAULT_DETECT_THRESHOLD = 0.45
+DEFAULT_DETECT_THRESHOLD = CATALOGUE["faces.detect_threshold"].default
 #: ANY detection at or above this blocks publication. Deliberately far below
 #: `DEFAULT_DETECT_THRESHOLD`: the asymmetry of the two errors is the whole
 #: design. Tuned against the hand-checked sample; see the audit document.
-DEFAULT_GATE_THRESHOLD = 0.15
+DEFAULT_GATE_THRESHOLD = CATALOGUE["faces.gate_threshold"].default
 #: IoU above which two boxes are the same face.
 DEFAULT_NMS_IOU = 0.4
 #: Threads decoding and detecting at once.
@@ -232,8 +233,8 @@ class FaceDetector:
         self,
         image: Image,
         *,
-        detect_threshold: float = DEFAULT_DETECT_THRESHOLD,
-        gate_threshold: float = DEFAULT_GATE_THRESHOLD,
+        detect_threshold: float | None = None,
+        gate_threshold: float | None = None,
         nms_iou: float = DEFAULT_NMS_IOU,
     ) -> tuple[tuple[Box, ...], float]:
         """`(boxes above gate_threshold, best score)` in original pixel coords.
@@ -241,7 +242,15 @@ class FaceDetector:
         Boxes are returned down to `gate_threshold`, not `detect_threshold`,
         because the gate needs to see the weak ones. Callers that only want
         confident faces filter on `.score`.
+
+        Both thresholds default to `None`, meaning the ACTIVE configuration
+        read now. See `rekindle.config` - a shipped number bound as a default
+        argument would be frozen at import and no `rekindle.toml` could reach
+        it, which for a PUBLISHING gate is the worst place for that bug.
         """
+        cfg = active().faces
+        detect_threshold = cfg.detect_threshold if detect_threshold is None else detect_threshold
+        gate_threshold = cfg.gate_threshold if gate_threshold is None else gate_threshold
         rgb = image.convert("RGB")
         tensor, scale, pad = self._letterbox(rgb)
         name = self._session.get_inputs()[0].name
@@ -384,8 +393,8 @@ def _iou(a: Box, b: Box) -> float:
 def classify(
     boxes: Sequence[Box],
     *,
-    detect_threshold: float = DEFAULT_DETECT_THRESHOLD,
-    gate_threshold: float = DEFAULT_GATE_THRESHOLD,
+    detect_threshold: float | None = None,
+    gate_threshold: float | None = None,
 ) -> Verdict:
     """The gate's decision rule, isolated so it can be tested without a model.
 
@@ -394,6 +403,9 @@ def classify(
     `tests/test_semantic_faces.py` breaks it deliberately to prove the test
     catches it.
     """
+    cfg = active().faces
+    detect_threshold = cfg.detect_threshold if detect_threshold is None else detect_threshold
+    gate_threshold = cfg.gate_threshold if gate_threshold is None else gate_threshold
     best = max((b.score for b in boxes), default=0.0)
     if best >= detect_threshold:
         return Verdict.HAS_FACE
@@ -406,8 +418,8 @@ def gate_photos(
     photos: Iterable,
     detector: FaceDetector,
     *,
-    detect_threshold: float = DEFAULT_DETECT_THRESHOLD,
-    gate_threshold: float = DEFAULT_GATE_THRESHOLD,
+    detect_threshold: float | None = None,
+    gate_threshold: float | None = None,
     allow_people: Sequence[str] = (),
     workers: int = DEFAULT_GATE_WORKERS,
     progress=None,
@@ -423,7 +435,14 @@ def gate_photos(
     """
     import time
 
+    cfg = active().faces
+    detect_threshold = cfg.detect_threshold if detect_threshold is None else detect_threshold
+    gate_threshold = cfg.gate_threshold if gate_threshold is None else gate_threshold
+
     allowed = {p.casefold() for p in allow_people}
+    # The report records the thresholds ACTUALLY used, resolved above, so a
+    # run under a user's `rekindle.toml` says so rather than reprinting the
+    # shipped numbers.
     report = GateReport(
         model_key=detector.spec.key,
         detect_threshold=detect_threshold,

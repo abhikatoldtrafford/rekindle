@@ -118,6 +118,8 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
+from rekindle.config import CATALOGUE, active
+
 #: EXIF orientation values that exchange the two axes, and are therefore the
 #: only ones whose staleness this module can even be asked about. Duplicated
 #: from `meta.exif` deliberately: importing it here would make the import
@@ -127,11 +129,11 @@ SWAPS_AXES = frozenset({5, 6, 7, 8})
 #: The winning decode must contain a detection a user would be shown as a
 #: face. Equal to `semantic.faces.DEFAULT_DETECT_THRESHOLD`, not imported from
 #: it, for the same no-heavy-import reason.
-MIN_FACE = 0.45
+MIN_FACE = CATALOGUE["orientation.min_face"].default
 
 #: How much more evidence the tag-ignored decode needs before the tag is
 #: called stale. See THE MARGIN above - hand-checked, not guessed.
-MIN_MARGIN = 0.35
+MIN_MARGIN = CATALOGUE["orientation.min_margin"].default
 
 #: The five outcomes, named rather than spelled out at each comparison. A
 #: caller that buckets on a reason string and a producer that writes one are
@@ -195,8 +197,8 @@ def decide(
     tagged_scores: Sequence[float],
     raw_scores: Sequence[float],
     *,
-    min_face: float = MIN_FACE,
-    min_margin: float = MIN_MARGIN,
+    min_face: float | None = None,
+    min_margin: float | None = None,
 ) -> Verdict:
     """The whole decision rule, as pure arithmetic over detection scores.
 
@@ -209,7 +211,17 @@ def decide(
     tag, a real face without it, and a decisive margin" returns
     `ignore_exif=False`, which leaves `open_upright` doing exactly what it
     does today.
+
+    `min_face` and `min_margin` default to `None`, which means the ACTIVE
+    configuration read at call time. `examine` and the batch pass hand their
+    own arguments straight down, so this is the single place that resolves
+    them - and a shipped number bound as a default argument here would be
+    frozen at import, which is the failure the config system exists to avoid.
     """
+    cfg = active().orientation
+    min_face = cfg.min_face if min_face is None else min_face
+    min_margin = cfg.min_margin if min_margin is None else min_margin
+
     if tag not in SWAPS_AXES:
         # Not a file this module has an opinion about. A tag of 1, 2, 3, 4 or
         # none at all cannot be "stale" in the sense meant here, and inventing
@@ -293,7 +305,9 @@ def ignores_exif(path: Path | str) -> bool:
 _ORIENTATION_TAG = 0x0112
 
 
-def examine(path: Path, detector, *, min_face: float = MIN_FACE, min_margin: float = MIN_MARGIN):
+def examine(
+    path: Path, detector, *, min_face: float | None = None, min_margin: float | None = None
+):
     """Run the detector both ways on one file and return its `Verdict`.
 
     Decodes ONCE and transposes in memory, so the two hypotheses are compared
@@ -383,7 +397,7 @@ def run_orientation(
     detector,
     *,
     workers: int = 4,
-    min_margin: float = MIN_MARGIN,
+    min_margin: float | None = None,
     progress=None,
 ) -> OrientationReport:
     """Examine every unexamined photo and record the verdicts.

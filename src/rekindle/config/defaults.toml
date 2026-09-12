@@ -1,0 +1,383 @@
+# rekindle's shipped defaults. READ-ONLY: this file is part of the package and
+# is replaced on every upgrade. Your own changes belong in `rekindle.toml`
+# inside your data directory, which overrides only the keys it names.
+#
+# THIS FILE IS DOCUMENTATION THAT HAPPENS TO BE EXECUTABLE.
+#
+# Every value below was derived by hand from ONE library - a Bengali family
+# archive spanning 2000-2026, 19,480 photos - and none of them had met a
+# second library when they were written. That is why `rekindle calibrate`
+# exists: to let you re-derive them from your own photographs the same way
+# these were derived from those.
+#
+# Each entry carries six fields, and all six are required:
+#
+#   value     the shipped number
+#   unit      what the number is measured in
+#   what      what it decides, in one sentence
+#   raising   what you pay for a larger number
+#   lowering  what you pay for a smaller one
+#   measured  the measurement that chose this number
+#
+# and two optional ones:
+#
+#   range     [min, max] the loader refuses to go outside
+#   loosening "raise" or "lower" - which direction weakens a safety gate.
+#             Only set where weakening has a consequence outside your own
+#             machine; `rekindle calibrate` demands a separate, explicit
+#             confirmation before it moves such a value that way.
+#
+# WHAT IS DELIBERATELY NOT HERE
+#
+# 107 module-level numeric constants exist in the source tree. 27 are here.
+# The rest are excluded on purpose, and the reasons are worth stating because
+# "make it configurable" is not free - every knob is a support surface, a
+# migration, and one more thing that can disagree with a test:
+#
+#   Identifiers and protocol numbers. `db.SCHEMA_VERSION`, `spec.SPEC_VERSION`,
+#     `store.STORE_SCHEMA_VERSION`, `tags.CACHE_VERSION`, `prompt.PARSER_VERSION`,
+#     `embed.DECODE_REVISION`, `cli.EXIT_UNAVAILABLE` / `EXIT_REFUSED`. Changing
+#     one does not tune anything; it lies about a format.
+#   Facts about a representation. `store.ITEM_SIZE = 4` is the width of a
+#     float32. `timeline.FPS = 25`. `aesthetic.SCORE_MIN` / `SCORE_MAX` are the
+#     published scale of someone else's model.
+#   Performance, not behaviour. `faces.DEFAULT_GATE_WORKERS`,
+#     `embed.DEFAULT_BATCH`, `embed.DEFAULT_WORKERS`, `embed.PREFETCH_BATCHES`,
+#     `semantic.diversity.CALIBRATION_ROWS`, `semantic.diversity.PRECOMPUTE_LIMIT`.
+#     These already have CLI flags where they matter and they change how long a
+#     run takes, not what it produces. Two of them - CALIBRATION_ROWS and
+#     PRECOMPUTE_LIMIT - would also change output if moved, which is precisely
+#     why they are not offered.
+#   Rendering. `timeline.DEFAULT_SECONDS`, `gif.DEFAULT_WIDTH`,
+#     `mp4.DEFAULT_WIDTH`, `motion.MAX_ZOOM` and the rest. They are real
+#     preferences, but they are per-render, not per-library, and
+#     `--preview-width`, `--mp4-width` and `--frame-ms` already expose the ones
+#     users ask for. Calibration is about which photographs are chosen; these
+#     are about how the chosen ones move.
+#   `faces.DEFAULT_NMS_IOU = 0.4`. An implementation detail of non-maximum
+#     suppression, named in the brief as an example of what not to ship.
+#   Recipe-shaped numbers. `recurring.DENSITY`, `MIN_DAY_PHOTOS`, `JOIN_GAP`,
+#     `HALF_WINDOW`, `MIN_YEARS`; `scenery.MIN_VOTES` / `MIN_YEARS`;
+#     `prompt.TAG_K` / `SEED_K` / `MIN_SEEDS` / `RRF_C`; `index.GPS_CELL`;
+#     `cluster.K_MIN` / `K_MAX`; `tags.MAX_TAGS`; `web.thumbs.*`. Each belongs
+#     to one feature rather than to the library, and none of them is a
+#     judgement a user can make by looking at their own photographs - which is
+#     the test this file applies.
+#
+# If you want one of those, open an issue with the photographs that made you
+# want it. That is how everything below got here.
+
+# ---------------------------------------------------------------------------
+# [composition] - can this photograph be shown at all?
+#
+# These are GATES: a photo that fails one is never ranked, never chosen, never
+# rendered. A false positive here removes an irreplaceable photograph from
+# every memory it could have been in, so every one of them sits below the 1st
+# percentile of the reference library rather than near it. They are not the
+# mechanism that keeps mildly blurry photos out of a memory - the RANKING is -
+# and tightening them to do that job is the most common way to make this
+# project worse.
+# ---------------------------------------------------------------------------
+
+[composition.min_sharpness]
+value = 0.12
+unit = "normalised sharpness score, 0-1"
+what = "Photos scoring below this are dropped as too blurry to show."
+raising = "Removes more soft photos, and eventually real ones. At 1% of a library the gate starts deleting photographs you cannot retake."
+lowering = "Lets genuinely unusable frames into the ranking, where a good photo has to beat them."
+measured = "1,149 photos stratified across every year. 0.12 drops 0.19% of the library: 0.15% of 2008-2013 against 0.16% of 2020-2026, worst year 0.70% - flat across the decades, which a per-year percentile gate was not (it spanned 3.84x). Sharpness earns its keep as the ranking signal, not as this gate: ranking a sharp photo above a mildly blurred one went from 51.9% to 90.3% correct."
+range = [0.0, 1.0]
+
+[composition.min_short_edge]
+value = 480
+unit = "pixels"
+what = "The shorter side a photo must have to be usable."
+raising = "Drops small photos - and early phone cameras are small. 640 removes 5.42% of the reference library and starts eating genuine early-2010s photographs."
+lowering = "Lets barcodes, thumbnails and tiny re-saves into memories, where they render as a soft smear."
+measured = "Short-edge percentiles: p1=240, p2=480, p5=600, p10=1080, median=2976. 480 sits exactly on the knee and removes 303 images (1.66%)."
+range = [1, 20000]
+
+[composition.max_aspect]
+value = 2.5
+unit = "ratio of long edge to short edge"
+what = "Beyond this a photo is refused, because letterboxing turns it into a sliver."
+raising = "Panoramas start appearing as a thin band inside a black frame."
+lowering = "Drops legitimate wide crops."
+measured = "33 images (0.18%) exceed 2.5:1; the extreme is an 8874x943 VR panorama at 9.41:1. Excluding them costs essentially nothing."
+range = [1.0, 20.0]
+
+[composition.min_brightness]
+value = 20.0
+unit = "mean luminance, 0-255"
+what = "Below this the photo is a pocket shot and is dropped."
+raising = "Starts removing deliberately dark photographs - night, candlelight, silhouettes."
+lowering = "Keeps frames that are black."
+measured = "Mean-luminance percentiles over 1,149 stratified photos: p1=33, p2=44, median=113, p99=186. The gate at 20 sits far outside anything the library contains and catches 0.26% of it."
+range = [0.0, 255.0]
+
+[composition.max_brightness]
+value = 235.0
+unit = "mean luminance, 0-255"
+what = "Above this the frame is blown out and is dropped."
+raising = "Keeps frames that are entirely blown out, where nothing in the picture is left."
+lowering = "Starts removing high-key photographs - snow, beach, a white wall."
+measured = "Same sample. p99 = 186, so the gate at 235 catches 0.09% of the library."
+range = [0.0, 255.0]
+
+[composition.square_ratio]
+value = 1.05
+unit = "ratio of long edge to short edge"
+what = "Within this of 1:1 a photo counts as square, and square fits either canvas."
+raising = "Mild 4:3 crops start being treated as square and stop voting for a canvas."
+lowering = "A square crop that is a pixel off is treated as landscape or portrait."
+measured = "178 live images are exactly 1:1, 210 are within 1.02, and only 21 more fall in the 1.02-1.05 band. There is a cliff at 1.02 and the band above it is nearly empty, so the exact tolerance barely matters; 1.05 forgives a crop that is a pixel off without swallowing a real 4:3 (1.33)."
+range = [1.0, 2.0]
+
+[composition.upscale_tolerance]
+value = 1.25
+unit = "linear stretch factor"
+what = "How far a photo may be enlarged to fill the canvas before it is padded instead."
+raising = "Small and old photographs are stretched until the softness shows."
+lowering = "A photo 3% below the canvas gets padded, which reads as a bug rather than as a deliberate signal that the photo is older and smaller."
+measured = "A 25% linear stretch is about 1.6x the pixel count and is imperceptible at viewing size; beyond that the softness starts to show."
+range = [1.0, 4.0]
+
+# ---------------------------------------------------------------------------
+# [dedup] - are these two files the same moment?
+#
+# Dedup DELETES a photo from a memory, so its doctrine is asymmetric: a wrong
+# collapse costs a photograph, a wrong keep costs a mild annoyance. Time gates
+# which pairs are worth comparing; the pixels or the embedding decide.
+# ---------------------------------------------------------------------------
+
+[dedup.gap_seconds]
+value = 30.0
+unit = "seconds"
+what = "Two photos further apart than this are never considered one burst, whatever they look like."
+raising = "More pairs are compared, so more distinct photographs of one event risk collapsing into one."
+lowering = "A slow hand-triggered sequence stops being recognised as a burst."
+measured = "59.2% of consecutive live images fall within 30s of the previous one, and time alone groups 14,425 of 18,201 photos into runs - the largest 80 photos over 40 minutes. Time on its own is therefore useless as a dedup rule; it is only the gate."
+range = [0.0, 3600.0]
+
+[dedup.phash_distance]
+value = 6
+unit = "Hamming distance over a 64-bit dHash"
+what = "Inside the time gate, two photos this close in pixels are one moment and only the best survives."
+raising = "Collapses genuinely different photographs. At 12, 0.133% of unrelated pairs match."
+lowering = "Near-identical frames both survive into the memory."
+measured = "414 photos from real 30-second runs. T=4: 15.99% of within-burst pairs, 0.000% of unrelated. T=6: 18.37% / 0.033%. T=8: 22.79% / 0.067%. T=12: 29.25% / 0.133%. aHash needed a 1.37% false-positive rate for comparable recall - 4-5x worse."
+range = [0, 64]
+
+[dedup.cosine]
+value = 0.92
+unit = "CLIP cosine similarity"
+what = "Inside the time gate, two photos this alike to the embedding are one moment even when the pixels differ."
+raising = "The embedding stops catching re-framings the dHash misses."
+lowering = "Deletes photographs. At 0.912 the pair was a flower shop's two shelves; at 0.900 two different groups of people at one wedding."
+measured = "Six within-30-second pairs were opened and judged by eye: 0.900 keep, 0.912 keep, 0.921 collapse, 0.925 collapse, 0.927 collapse, 0.931 collapse. 0.92 is where the eye changes its answer. The library could not have chosen it - within 30 seconds the median pair is already 0.917, so any percentile would have sat far too low."
+range = [0.0, 1.0]
+
+# ---------------------------------------------------------------------------
+# [diversity] - does this look like one I already picked?
+#
+# A different question from dedup's, with a different cost. Here a false
+# positive costs a slightly worse photograph rather than a deleted one, so
+# everything is looser.
+# ---------------------------------------------------------------------------
+
+[diversity.lambda_penalty]
+value = 0.5
+unit = "fraction of the quality range"
+what = "How far a candidate is pushed down for resembling something already chosen."
+raising = "Variety beats quality: a memory made of the most different photos rather than the best ones."
+lowering = "Quality beats variety: three near-identical good shots in one memory."
+measured = "Quality is normalised to (0, 1], so 0.5 means a photo indistinguishable from a pick gives up half the entire quality range - enough to lose to a clearly worse but different photo, not enough to be erased."
+range = [0.0, 2.0]
+
+[diversity.phash_radius]
+value = 24
+unit = "Hamming distance over a 64-bit dHash"
+what = "The distance at which two photos count as perceptually unrelated, which sets the scale of the resemblance penalty."
+raising = "Almost everything reads as similar, so the penalty applies to everything and stops discriminating."
+lowering = "Almost everything reads as unrelated and the penalty stops doing anything."
+measured = "On this library the median dHash distance within a 30-second run is 22 and between unrelated photos is 32, so 24 catches same-scene pairs and leaves unrelated ones alone. Deliberately far looser than dedup's 6, and with no time gate."
+range = [1, 64]
+
+[diversity.hard_floor]
+value = 0.08
+unit = "dissimilarity, 0-1"
+what = "Below this a candidate is refused outright rather than merely penalised."
+raising = "Refuses more candidates outright, which can shorten a memory when the pool is small."
+lowering = "Two photographs that are effectively the same picture can both appear."
+measured = "Only near-identity qualifies. The graded MMR penalty does the real work; this catches the case where showing both is simply a mistake."
+range = [0.0, 1.0]
+
+[diversity.time_tiebreak]
+value = 0.05
+unit = "fraction of the quality range, at a full day of separation"
+what = "A weak bonus for being far apart in time, used to break ties between otherwise equal candidates."
+raising = "The calendar starts outranking the photograph. The calendar is a proxy for content and a bad one."
+lowering = "Two equally good photos from the same hour become as likely as two from different months."
+measured = "Weak on purpose. Two photos an hour apart are marginally more likely to be redundant than two a year apart, but this is a tiebreak, never a cap."
+range = [0.0, 1.0]
+
+# ---------------------------------------------------------------------------
+# [semantic_diversity] - the same question, asked of the embedding
+#
+# The invariant these numbers protect is arithmetic, not tuned: the MEDIAN
+# pair of any pool maps to exactly 1.0 - no penalty at all - whatever its
+# absolute cosine is. A "durga puja over the years" memory is semantically
+# homogeneous by design, and an absolute threshold would reject the subject of
+# the memory itself, worse the better the memory is. Over the 399 candidate
+# pools this library produces, the per-pool median pairwise cosine runs from
+# 0.460 to 0.930. One number cannot mean the same thing in both.
+# ---------------------------------------------------------------------------
+
+[semantic_diversity.ceiling]
+value = 0.90
+unit = "CLIP cosine similarity"
+what = "The floor under the 'as alike as this pool gets' end of the scale."
+raising = "A varied pool has to be more alike before any penalty applies at all."
+lowering = "A genuinely varied pool starts having its most-alike pairs penalised as though they were duplicates."
+measured = "A pool whose own 95th percentile is below 0.90 is a genuinely varied one, and nothing in it has earned the full penalty."
+range = [0.0, 1.0]
+
+[semantic_diversity.min_spread]
+value = 0.10
+unit = "CLIP cosine similarity"
+what = "The smallest gap allowed between the two ends of the scale, so the divisor cannot collapse on a uniform pool."
+raising = "Flattens the penalty on tight pools."
+lowering = "A uniform pool produces a near-zero divisor and the penalty becomes all-or-nothing."
+measured = "0.10 is a tenth of the whole cosine range these vectors occupy in practice: random pairs sit at 0.55, same-moment pairs at 0.95."
+range = [0.001, 1.0]
+
+[semantic_diversity.low_quantile]
+value = 50.0
+unit = "percentile of this pool's pairwise cosines"
+what = "The 'a typical pair here' anchor. A pair at this quantile costs nothing at all."
+raising = "Typical pairs start being penalised, which penalises the subject of the memory."
+lowering = "Only the very most alike pairs are penalised, and the signal goes quiet."
+measured = "The median, and nothing is allowed to move it: that is the invariant. Every floor is applied to the other end, where it cannot reach this one."
+range = [0.0, 100.0]
+
+[semantic_diversity.high_quantile]
+value = 95.0
+unit = "percentile of this pool's pairwise cosines"
+what = "The 'as alike as this memory's own most alike pairs' end of the scale."
+raising = "Only near-duplicates take the full penalty."
+lowering = "More of the pool takes the full penalty."
+measured = "Over 399 pools the 95th percentile runs 0.682 to 0.986, so it tracks the pool rather than the library."
+range = [0.0, 100.0]
+
+[semantic_diversity.weight]
+value = 1.0
+unit = "weight, against two pixel signals that sum to 1.0"
+what = "How much the embedding counts against the perceptual hash and the colour histogram."
+raising = "The embedding decides, and two photographs of one scene from different angles start reading as duplicates."
+lowering = "The pixels decide, and the embedding only breaks ties."
+measured = "Equal billing. The embedding is better than either pixel signal at the question they are all asked, and worse than both at being sure - so it may reorder a memory but never shorten one."
+range = [0.0, 10.0]
+
+# ---------------------------------------------------------------------------
+# [faces] - the publishing gate
+#
+# READ THIS BEFORE CHANGING ANYTHING IN THIS SECTION.
+#
+# This gate decides what may reach a PUBLIC repository. Its failure mode is a
+# stranger's face on the internet. The two numbers are deliberately far apart
+# because the two errors are not comparable: showing you a box that is not a
+# face costs a glance, and missing one costs a person their privacy.
+#
+# It has already been measured failing open. When the semantic pipeline was
+# decoding photos without applying their EXIF orientation tag, 14.5% of gate
+# verdicts over 200 rotated photos changed once the transpose was applied and
+# 9.0% had been judged too permissively - one file showed the detector zero
+# faces sideways and eight upright. That is why `loosening` is set on
+# `gate_threshold`, and why `rekindle calibrate` will not widen it on a
+# drag-and-release.
+#
+# The gate PROPOSES; a human DISPOSES. The review queue is what actually
+# stands between a photograph and a public repository, and no value here
+# changes that.
+# ---------------------------------------------------------------------------
+
+[faces.detect_threshold]
+value = 0.45
+unit = "detector confidence, 0-1"
+what = "A detection at or above this is shown to you as a face."
+raising = "Fewer boxes to look at, and some real faces stop being drawn."
+lowering = "More boxes, more of them wrong."
+measured = "The usual operating point for this detector family, and the value `meta.orientation` reuses when it asks whether a decode found a face."
+range = [0.0, 1.0]
+
+[faces.gate_threshold]
+value = 0.15
+unit = "detector confidence, 0-1"
+what = "ANY detection at or above this blocks publication."
+raising = "MORE PHOTOGRAPHS CONTAINING OTHER PEOPLE BECOME PUBLISHABLE. This is the direction in which the gate fails open."
+lowering = "More photographs are held back for review, including ones with no face in them."
+measured = "Tuned against a hand-checked sample of 19 positives - a small sample, and stated as one. Nineteen consecutive successes bound the true miss rate loosely, not tightly. Deliberately far below `detect_threshold`: the asymmetry of the two errors is the whole design."
+range = [0.0, 1.0]
+loosening = "raise"
+
+# ---------------------------------------------------------------------------
+# [orientation] - is this photo's EXIF rotation tag stale?
+# ---------------------------------------------------------------------------
+
+[orientation.min_face]
+value = 0.45
+unit = "detector confidence, 0-1"
+what = "The winning decode must contain a detection this strong before the stored tag is called stale."
+raising = "Fewer stale tags are found, so more photos stay sideways."
+lowering = "Noise starts being treated as evidence about which way is up."
+measured = "Equal to `faces.detect_threshold` by intent - the winning decode must contain a detection a user would be shown as a face - but read separately, because `meta.orientation` must not import the semantic stack."
+range = [0.0, 1.0]
+
+[orientation.min_margin]
+value = 0.35
+unit = "difference in detector confidence"
+what = "How much more evidence the tag-ignored decode needs before the stored tag is overruled."
+raising = "Only blatant cases are corrected."
+lowering = "A correctly-tagged photo gets rotated on weak evidence, which is the worse error - it breaks a photo that was fine."
+measured = "Hand-checked rather than guessed. See THE MARGIN in `meta/orientation.py`."
+range = [0.0, 1.0]
+
+# ---------------------------------------------------------------------------
+# [selection] - how a memory is shaped
+# ---------------------------------------------------------------------------
+
+[selection.max_shots]
+value = 24
+unit = "photos"
+what = "The most photos that reach one memory."
+raising = "Longer memories. At 2.5 seconds a shot, 24 is already a minute."
+lowering = "Shorter, tighter memories, and more good photographs left out."
+measured = "24 is already long for a montage, and the design guide's own advice is 'return fewer photos than you think'."
+range = [1, 500]
+
+[selection.min_shots]
+value = 3
+unit = "photos"
+what = "Below this a memory is not built at all."
+raising = "Small real events disappear silently."
+lowering = "One- and two-photo 'memories', which are a photograph with a title, not a montage."
+measured = "Three is low on purpose. The reference library contains `Durga Puja 25` (6 photos) and `Puri 25` (3), and the owner named the former as an expected output. A floor of 8 would have deleted it."
+range = [1, 100]
+
+[selection.cooldown_days]
+value = 90
+unit = "days"
+what = "How long a memory stays out of the rotation after it has been surfaced."
+raising = "Above 365 an annual anniversary can be suppressed, which is a bug rather than a preference."
+lowering = "`year_in_review:2016` can reappear a fortnight later, which reads as a bug too."
+measured = "90 days: long enough that a weekly `rekindle memory --auto` never repeats itself within a season, short enough that `on_this_day:12-25` - 365 days apart by construction - is never blocked."
+range = [0, 3650]
+
+[selection.max_overlap]
+value = 0.5
+unit = "fraction of the smaller memory's photos"
+what = "The most photos two memories in one batch may have in common before the second is refused."
+raising = "The same memory can be shown twice under two titles."
+lowering = "Genuinely different memories that happen to share an event get suppressed."
+measured = "Below half, two memories still show mostly different photos. Measured against the SMALLER of the two, so a 24-shot memory fully contained in a 200-shot one counts as 100% overlap rather than 12% - containment is the case that actually annoys."
+range = [0.0, 1.0]

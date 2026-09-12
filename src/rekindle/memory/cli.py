@@ -17,6 +17,7 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from rekindle import config
 from rekindle.db import PhotoStore
 from rekindle.extras import install_command_markup, markup_safe
 from rekindle.memory import captioning, engine
@@ -60,6 +61,14 @@ def open_index(data_dir: Path, *, public_safe: bool = False) -> tuple[PhotoStore
     if not db_path.is_file():
         console.print(f"[red]No index at[/red] {db_path}. Run `rekindle index <folder>` first.")
         raise typer.Exit(code=2)
+    # The user's thresholds, before anything reads one. Fatal if malformed for
+    # the same reason a malformed exclusions.toml is: running on defaults the
+    # user believes they replaced is worse than refusing to run.
+    try:
+        config.activate_from(data_dir)
+    except config.ConfigError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=2) from exc
     try:
         policy = load_policy(data_dir / CONFIG_NAME)
     except PolicyError as exc:

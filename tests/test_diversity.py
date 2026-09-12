@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from rekindle import config
 from rekindle.memory import diversity as dv
 from rekindle.memory.diversity import (
     ColourSignal,
@@ -252,7 +253,7 @@ def test_the_first_pick_is_decided_purely_on_quality():
     assert picked[0].file_hash == "best"
 
 
-def test_time_is_a_weak_TIEBREAK(monkeypatch):
+def test_time_is_a_weak_TIEBREAK():
     """It breaks ties between ADJACENT ranks and nothing more.
 
     An earlier version of this test used two candidates and was vacuous: with
@@ -264,6 +265,12 @@ def test_time_is_a_weak_TIEBREAK(monkeypatch):
     0.042 and a temporally distant runner-up can overtake the leader. The same
     call with the bonus zeroed must choose differently, which is what proves
     the constant is doing the work.
+
+    The bonus is zeroed through `config.using`, not by monkeypatching the
+    module constant. `pick` reads the ACTIVE configuration, so patching
+    `dv.TIME_TIEBREAK` would leave the real code path untouched and this test
+    would pass whatever the tiebreak did - the exact "test that cannot fail"
+    shape this project keeps finding.
     """
     chosen = [_p("anchor", phash=0, colour=_hist(dominant=0), at=0)]
     # Identical structure and colour, so dissimilarity is equal for all and
@@ -277,8 +284,8 @@ def test_time_is_a_weak_TIEBREAK(monkeypatch):
     candidates[1] = _p("n01", phash=1 << 30, colour=_hist(dominant=30), at=5 * 86400, sharp=5.0)
 
     with_bonus, _ = pick(candidates, 1, rank=_rank, already=chosen)
-    monkeypatch.setattr(dv, "TIME_TIEBREAK", 0.0)
-    without_bonus, _ = pick(candidates, 1, rank=_rank, already=chosen)
+    with config.using({"diversity.time_tiebreak": 0.0}):
+        without_bonus, _ = pick(candidates, 1, rank=_rank, already=chosen)
 
     assert with_bonus[0].file_hash == "n01", "the time bonus did not break the tie"
     assert without_bonus[0].file_hash == "n00"

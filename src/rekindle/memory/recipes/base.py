@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Protocol, runtime_checkable
 
+from rekindle.config import CATALOGUE
 from rekindle.memory import strata
 from rekindle.memory.index import MemoryIndex
 from rekindle.memory.spec import FactSheet
@@ -18,7 +19,7 @@ AS_GIVEN = "as_given"
 # reference library contains `Durga Puja 25` (6 photos) and `Puri 25` (3), and
 # the user named the former as an expected output. A floor of 8 would have
 # silently deleted it.
-MIN_SHOTS = 3
+MIN_SHOTS = CATALOGUE["selection.min_shots"].default
 
 
 @dataclass(frozen=True)

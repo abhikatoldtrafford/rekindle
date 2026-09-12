@@ -9,6 +9,7 @@ import typer
 from rich.console import Console
 
 from rekindle import __version__
+from rekindle.config.cli import register as register_config
 from rekindle.db import PhotoStore
 from rekindle.doctor import diagnose, diagnose_index, render, render_enrich, render_index
 from rekindle.enrich.takeout import EmptyIndexError, TakeoutEnricher
@@ -32,6 +33,10 @@ console = Console()
 # heavy dependency at module level, so `rekindle --help` still works - and is
 # still fast - on an install that has none of the optional extras.
 register_semantic(app)
+
+# Same shape for `rekindle config`. It reads nothing but a TOML file, so it
+# costs `rekindle --help` nothing.
+register_config(app)
 
 DataDir = Annotated[Path, typer.Option("--data-dir", help="Where rekindle stores its index.")]
 
