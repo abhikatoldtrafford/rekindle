@@ -1,0 +1,182 @@
+# The caption vocabulary. DATA, not code - edit it.
+#
+# A wrong caption on a photograph of someone's family is worse than no
+# caption. This file is the first of the three layers that keeps that from
+# happening, and it is the one you can read.
+#
+# WHAT THIS IS. A closed list of things that can be SEEN in a photograph.
+# `probe` is what goes to CLIP; `says` is the fragment that reaches the
+# caption. Nothing outside this list can ever appear in a grounded caption -
+# the model is not asked "what is this?", it is asked "how much does this look
+# like each of these?", and the answer is one of these strings or nothing.
+#
+# WHAT MAY NOT BE IN IT. Five rules, all binding, all enforced by
+# `tests/test_caption_vocab.py`, which fails the build rather than trusting
+# this comment:
+#
+#   1. No proper nouns. No place, no country, no landmark, no brand, no
+#      festival, no person. There is no gazetteer in this project and a
+#      capitalised word in a caption is exactly the failure
+#      `docs/decision-log-prompt-memories.md` records a near-miss on.
+#   2. No people, no relationships, no identity. Not "a family", not "a
+#      mother", not "a couple", not an age, not a gender. Who is in a
+#      photograph comes from the user's own face tags or from nowhere.
+#   3. No sentiment and no occasion. Not "happy", not "a celebration", not
+#      "a wedding", not "a funeral". A montage that tells someone how they
+#      felt is inventing the only part of a memory that was theirs.
+#   4. No sensitive context. Not a hospital, not a clinic, not a place of
+#      worship named as such, not a protest, not police, not an illness.
+#      `docs/known-limitations.md` records cluster #16: 270 photographs of
+#      institutional buildings labelled "a hospital or a clinic", containing
+#      no hospital. That label was cosmetic and nothing read it. These are
+#      read, so the words are simply not here.
+#   5. Nothing that is not physically in the frame. "in the garden" is a
+#      thing you can see. "on holiday" is not.
+#
+# HOW A TERM IS CHOSEN, and why a raw cosine would be worthless here.
+# `semantic/describe.py` scores a photograph against every probe and then
+# converts each score to that PROBE'S OWN PERCENTILE across the whole embedded
+# library. This is the same discipline the rest of the project runs on: an
+# absolute cosine means nothing across queries, so 0.27 for "a plate of food"
+# and 0.27 for "a sandy beach" are not comparable numbers and picking the
+# larger would pick whichever phrase CLIP happens to score high on
+# everything. A percentile is comparable, because every probe is measured
+# against the same 18,201 photographs.
+#
+# A facet then contributes its highest-percentile term, and ONLY if that
+# percentile clears `MIN_PERCENTILE` in `memory/vocab.py`. A photograph in no
+# term's top few per cent gets no fragment, and a photograph that clears
+# nothing gets no caption at all. A blank is a correct answer here.
+#
+# `facet` groups terms that answer the same question, and a facet contributes
+# at most one fragment. The facets compose in a fixed order - subject, then
+# setting, then light - because that is the order that produces English.
+
+version = 1
+
+# -------------------------------------------------------------- what it is
+# Noun phrases. These lead the caption.
+
+[[term]]
+facet = "subject"
+probe = "a close-up photograph of a flower in bloom"
+says = "A flower"
+
+[[term]]
+facet = "subject"
+probe = "a photograph of a plate or bowl of cooked food"
+says = "Food"
+
+[[term]]
+facet = "subject"
+probe = "a photograph of a dog or a cat"
+says = "An animal"
+
+[[term]]
+facet = "subject"
+probe = "a photograph of a bird"
+says = "A bird"
+
+[[term]]
+facet = "subject"
+probe = "a photograph of a boat on the water"
+says = "A boat"
+
+[[term]]
+facet = "subject"
+probe = "a photograph of a car, a bus or a truck"
+says = "A vehicle"
+
+# REMOVED, and recorded rather than deleted silently: "a decorated painted
+# statue" / "A statue". Hand-graded on 36 random photographs it fired on a
+# framed printed picture of two deities - which is not a statue - and this
+# library's statues are almost all religious idols, so the term's whole
+# working range is a subject rule 4 says not to describe. There is no phrasing
+# that makes an image model reliably tell a clay idol from a print of one, and
+# the failure lands on exactly the photographs where being wrong matters most.
+
+[[term]]
+facet = "subject"
+probe = "a photograph of the sky filled with clouds"
+says = "Clouds"
+
+[[term]]
+facet = "subject"
+probe = "a photograph of tall trees and dense foliage"
+says = "Trees"
+
+[[term]]
+facet = "subject"
+probe = "a photograph of a large crowd of many people"
+says = "A crowd"
+
+[[term]]
+facet = "subject"
+probe = "a photograph of a large building seen from outside"
+says = "A building"
+
+# ------------------------------------------------------------- where it is
+# Prepositional phrases. These follow the subject.
+
+[[term]]
+facet = "setting"
+probe = "a photograph of a sandy beach beside the open sea"
+says = "at the sea"
+
+[[term]]
+facet = "setting"
+probe = "a photograph of high mountains and steep hillsides"
+says = "in the hills"
+
+[[term]]
+facet = "setting"
+probe = "a photograph of a garden with lawn and flowerbeds"
+says = "in a garden"
+
+[[term]]
+facet = "setting"
+probe = "a photograph of a busy road with shops and traffic"
+says = "on the street"
+
+[[term]]
+facet = "setting"
+probe = "a photograph taken inside a room with walls and furniture"
+says = "indoors"
+
+[[term]]
+facet = "setting"
+probe = "a photograph of a river, a lake or still water inland"
+says = "by the water"
+
+[[term]]
+facet = "setting"
+probe = "a photograph of open green fields and farmland"
+says = "in open country"
+
+[[term]]
+facet = "setting"
+probe = "a photograph of a carved temple with towers and pillars"
+says = "at a temple"
+
+# ------------------------------------------------------------ what the light is
+# Prepositional phrases, appended last and only when there is room.
+
+[[term]]
+facet = "light"
+probe = "a photograph taken at sunset with an orange and pink sky"
+says = "at sunset"
+
+[[term]]
+facet = "light"
+probe = "a photograph taken outdoors at night in darkness"
+says = "after dark"
+
+[[term]]
+facet = "light"
+probe = "a photograph taken under a flat grey overcast sky"
+says = "under a grey sky"
+
+[[term]]
+facet = "light"
+probe = "a photograph taken in bright hard sunshine with sharp shadows"
+says = "in bright sun"

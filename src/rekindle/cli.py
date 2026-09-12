@@ -344,8 +344,11 @@ def memory(
         typer.Option(
             "--captions",
             help=(
-                "'deterministic' (default) or 'gpt'. GPT sees only the fact "
-                "sheet - never your photos - and needs OPENAI_API_KEY."
+                "'deterministic' (default), 'clip' or 'gpt'. 'clip' grounds "
+                "each caption in what an image model recognised, from a closed "
+                "vocabulary. 'gpt' has a language model phrase those terms and "
+                "the fact sheet - it never sees your photos - and needs "
+                "OPENAI_API_KEY."
             ),
         ),
     ] = "deterministic",
@@ -387,10 +390,11 @@ def memory(
     can check that the photos match the words. Looking at the result is a
     required step rather than one a threshold pretends to replace.
     """
+    from rekindle.memory.captioning import MODES
     from rekindle.memory.cli import memory_cmd, prompt_cmd
 
-    if captions not in ("deterministic", "gpt"):
-        console.print(f"[red]--captions must be 'deterministic' or 'gpt', not {captions!r}[/red]")
+    if captions not in MODES:
+        console.print(f"[red]--captions must be one of {', '.join(MODES)}, not {captions!r}[/red]")
         raise typer.Exit(code=2)
 
     if text is not None:
@@ -453,9 +457,7 @@ def scenery(
         bool,
         typer.Option("--list", help="Show the corpus and exit. Needs no index."),
     ] = False,
-    all_: Annotated[
-        bool, typer.Option("--all", help="Build every concept in the corpus.")
-    ] = False,
+    all_: Annotated[bool, typer.Option("--all", help="Build every concept in the corpus.")] = False,
     out: Annotated[Path, typer.Option("--out", help="Where to write memories.")] = Path("memories"),
     public_safe: Annotated[
         bool,
@@ -488,17 +490,12 @@ def scenery(
         str,
         typer.Option(
             "--captions",
-            help=(
-                "'deterministic' (default), 'clip' or 'gpt'. See "
-                "`rekindle memory --help`."
-            ),
+            help=("'deterministic' (default), 'clip' or 'gpt'. See `rekindle memory --help`."),
         ),
     ] = "deterministic",
     style: Annotated[
         str,
-        typer.Option(
-            "--style", help="Motion style: 'film' (default) or 'cuts'."
-        ),
+        typer.Option("--style", help="Motion style: 'film' (default) or 'cuts'."),
     ] = "film",
     data_dir: DataDir = Path("./data"),
 ) -> None:
@@ -510,8 +507,16 @@ def scenery(
     list in `corpus/scenery.toml`, and like a prompt memory they are built
     only when you ask for one by name.
     """
+    from rekindle.memory.captioning import MODES
     from rekindle.memory.cli import scenery_cmd, scenery_list_cmd
+    from rekindle.memory.render.timeline import STYLES
 
+    if captions not in MODES:
+        console.print(f"[red]--captions must be one of {', '.join(MODES)}, not {captions!r}[/red]")
+        raise typer.Exit(code=2)
+    if style not in STYLES:
+        console.print(f"[red]--style must be one of {', '.join(STYLES)}, not {style!r}[/red]")
+        raise typer.Exit(code=2)
     if list_:
         scenery_list_cmd()
         return

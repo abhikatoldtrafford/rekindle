@@ -18,7 +18,7 @@ from rich.console import Console
 from rich.table import Table
 
 from rekindle.db import PhotoStore
-from rekindle.memory import engine
+from rekindle.memory import captioning, engine
 from rekindle.memory.composition import FIT_PAD, describe_drops
 from rekindle.memory.history import (
     KIND_ALBUM,
@@ -37,7 +37,7 @@ from rekindle.memory.render.gif import preview_canvas, write_gif, write_webp
 from rekindle.memory.render.mp4 import DEFAULT_WIDTH as MP4_WIDTH
 from rekindle.memory.render.mp4 import mp4_canvas, write_mp4
 from rekindle.memory.render.music import NO_MUSIC_HINT, resolve_music
-from rekindle.memory.render.timeline import STYLE_CUTS, STYLE_FILM
+from rekindle.memory.render.timeline import STYLE_FILM
 from rekindle.memory.spec import MemorySpec, safe_slug
 
 console = Console()
@@ -331,7 +331,7 @@ def memory_cmd(
             _render_build_report(report)
             return
 
-        specs = _maybe_caption(specs, captions)
+        specs = _maybe_caption(specs, captions, index=index, store=store, data_dir=data_dir)
         for spec in specs:
             _render_one(spec, index, out_dir, gif_frames, music, no_mp4, preview_width, mp4_width)
             state.record_surfaced(memory_id(spec.recipe, spec.key), title=spec.title)
@@ -340,32 +340,134 @@ def memory_cmd(
         store.close()
 
 
-def _maybe_caption(specs: list[MemorySpec], mode: str) -> list[MemorySpec]:
-    """The ONE place the optional LLM layer is reached from.
+def _vision_support(data_dir: Path):
+    """The caption vocabulary scored against this library, or None + a sentence.
 
-    Off unless `--captions gpt`. A missing key, an unreachable service or a
-    rejected caption all fall back to the deterministic captions with a
-    warning and exit 0 - `rekindle` must keep working for everyone who never
-    sets an API key, which is the default configuration.
+    Like `_semantic_support`, the import is inside the body and absence is a
+    supported configuration rather than a failure: without it captions are the
+    deterministic ones, which is what ships and what CI runs.
     """
-    if mode != "gpt":
+    from rekindle.semantic.availability import probe
+
+    if not probe().any:
+        console.print(
+            "[dim]Grounded captions need the 'semantic' extra "
+            "(`uv sync --extra semantic`); the deterministic captions were "
+            "used.[/dim]"
+        )
+        return None
+    try:
+        from rekindle.semantic import describe
+        from rekindle.semantic.encoder import load_encoder
+        from rekindle.semantic.registry import embed_model
+        from rekindle.semantic.setup import cache_dir_for
+        from rekindle.semantic.store import EmbeddingStore, store_root
+
+        spec = embed_model(None)
+        root = store_root(data_dir, spec.key)
+        if not (root / "manifest.sqlite").is_file():
+            console.print(
+                "[dim]This library has no embeddings, so nothing could ground a "
+                "caption. Run `rekindle semantic embed`.[/dim]"
+            )
+            return None
+        store = EmbeddingStore(
+            root,
+            dim=spec.dim,
+            model_key=spec.key,
+            model_revision=spec.pin("torch").revision if spec.torch else "",
+        )
+        encoder = load_encoder(spec.key, device="auto", cache_dir=cache_dir_for(data_dir)).encoder
+        return describe.build(store, encoder)
+    except Exception as exc:  # pragma: no cover - reported, never fatal
+        console.print(f"[yellow]Caption grounding unavailable ({exc}); continuing.[/yellow]")
+        return None
+
+
+def _maybe_caption(
+    specs: list[MemorySpec],
+    mode: str,
+    *,
+    index: MemoryIndex | None = None,
+    store: PhotoStore | None = None,
+    data_dir: Path | None = None,
+    vision=None,
+) -> list[MemorySpec]:
+    """The ONE place the optional caption layers are reached from.
+
+    `deterministic` returns the specs untouched. `clip` adds what an image
+    model recognised, from a closed vocabulary. `gpt` adds a language model
+    phrasing those terms - never the pixels - and verifies every sentence
+    against the index before it renders.
+
+    Every failure degrades one level and exits 0. A missing extra, an
+    un-embedded library, a missing key, an unreachable service and a rejected
+    caption all end with the deterministic caption in place, because
+    `rekindle` must keep working for everyone who has none of these - which is
+    the default configuration and is what CI runs.
+    """
+    if mode == captioning.MODE_DETERMINISTIC:
         return specs
 
-    from rekindle.memory.llm import LLMUnavailable, apply_captions, captioner_from_env
+    if vision is None and data_dir is not None:
+        vision = _vision_support(data_dir)
+
+    groundings: dict[str, dict] = {}
+    if vision is not None:
+        out: list[MemorySpec] = []
+        totals = captioning.GroundingReport()
+        for spec in specs:
+            found, report = captioning.ground(spec, vision)
+            groundings[spec.key] = found
+            totals.requested += report.requested
+            totals.grounded += report.grounded
+            totals.silent += report.silent
+            totals.unembedded += report.unembedded
+            for facet, n in report.facets.items():
+                totals.facets[facet] = totals.facets.get(facet, 0) + n
+            out.append(
+                captioning.apply_clip(spec, found, store=store)
+                if mode == captioning.MODE_CLIP
+                else spec
+            )
+        console.print(f"[dim]{captioning.describe_grounding(totals)}[/dim]")
+        if mode == captioning.MODE_CLIP:
+            return out
+
+    if mode != captioning.MODE_GPT:
+        return specs
+
+    from rekindle.memory.llm import MODEL, LLMUnavailable, apply_captions, captioner_from_env
 
     try:
         captioner = captioner_from_env()
     except LLMUnavailable as exc:
         console.print(f"[yellow]![/yellow] {exc}")
+        # Grounded captions are strictly better than the deterministic ones
+        # and cost nothing more, so a missing key falls back to CLIP rather
+        # than all the way to the year.
+        if vision is not None:
+            return [captioning.apply_clip(s, groundings.get(s.key, {}), store=store) for s in specs]
         return specs
 
-    out: list[MemorySpec] = []
-    accepted = requested = 0
+    cache = captioning.gpt_cache(store, MODEL) if store is not None else None
+    out = []
+    accepted = requested = cached = 0
     rejected: dict[str, int] = {}
     for spec in specs:
-        rewritten, report = apply_captions(spec, captioner)
+        found = groundings.get(spec.key, {})
+
+        def context(shot, _found=found):
+            grounding = _found.get(shot.file_hash)
+            terms = grounding.says if grounding else ()
+            return captioning.shot_facts(index, shot, terms) if index is not None else None
+
+        rewritten, report = apply_captions(
+            spec, captioner, context if index is not None else None, cache=cache
+        )
         out.append(rewritten)
         accepted += report.accepted
+        cached += report.cached
         requested += report.requested
         for reason, count in report.rejected.items():
             rejected[reason] = rejected.get(reason, 0) + count
@@ -376,7 +478,7 @@ def _maybe_caption(specs: list[MemorySpec], mode: str) -> list[MemorySpec]:
             break
     detail = ", ".join(f"{n} {r}" for r, n in sorted(rejected.items()))
     console.print(
-        f"[dim]GPT captions: {accepted}/{requested} accepted"
+        f"[dim]GPT captions: {accepted}/{requested} accepted, {cached} from cache"
         + (f"; rejected {detail}" if detail else "")
         + "[/dim]"
     )
@@ -867,7 +969,7 @@ def prompt_cmd(
             )
             return
 
-        for built in _maybe_caption([spec], captions):
+        for built in _maybe_caption([spec], captions, index=index, store=store, data_dir=data_dir):
             _render_one(built, index, out_dir, gif_frames, music, no_mp4, preview_width, mp4_width)
             state.record_surfaced(memory_id(built.recipe, built.key), title=built.title)
         _render_build_report(report)
@@ -1024,9 +1126,7 @@ def scenery_list_cmd() -> None:
     table.add_column("looks like")
     table.add_column("months")
     for concept in scenery_mod.all_concepts():
-        months = (
-            ", ".join(_MONTH_NAMES[m] for m in concept.months) if concept.months else "any"
-        )
+        months = ", ".join(_MONTH_NAMES[m] for m in concept.months) if concept.months else "any"
         table.add_row(concept.key, concept.title, "\n".join(concept.tags), months)
     console.print(table)
     console.print(
@@ -1089,6 +1189,10 @@ def scenery_cmd(
         state = MemoryState(store)
         dismissed = state.dismissed_memory_ids()
         support = _semantic_support(data_dir, announce=False)
+        # Built once for the whole run, not once per concept: the expensive
+        # part is scoring every vocabulary probe against all 18,201 vectors,
+        # and it depends on the library rather than on the memory.
+        vision = _vision_support(data_dir) if captions != captioning.MODE_DETERMINISTIC else None
         built = 0
         for key in wanted:
             concept = scenery_mod.get(key)
@@ -1109,7 +1213,9 @@ def scenery_cmd(
             spec = _build_scenery(index, build, max_shots, support)
             if spec is None:
                 continue
-            for finished in _maybe_caption([spec], captions):
+            for finished in _maybe_caption(
+                [spec], captions, index=index, store=store, vision=vision
+            ):
                 _render_one(
                     finished,
                     index,
@@ -1184,9 +1290,7 @@ def _render_scenery_report(build, spec, index) -> None:
         photo = index.get(shot.file_hash)
         if photo is None:  # pragma: no cover - the spec was built from the index
             continue
-        years[photo.meta.taken_at_local.year] = (
-            years.get(photo.meta.taken_at_local.year, 0) + 1
-        )
+        years[photo.meta.taken_at_local.year] = years.get(photo.meta.taken_at_local.year, 0) + 1
         orphans += 1 if scenery_mod.orphan(photo) else 0
     console.print(
         f"  {len(spec.shots)} shots across {len(years)} years: "

@@ -120,6 +120,39 @@ CREATE TABLE IF NOT EXISTS memory_history (
     title       TEXT NOT NULL DEFAULT ''
 );
 
+-- One grounded caption per photograph, generated once and then never again.
+--
+-- The engine's promise is that the same library produces the same memory byte
+-- for byte. A caption that reached a language model would break that promise
+-- on the second run - the same photograph in two memories, or the same memory
+-- rebuilt next year, would carry different words - so the caption is written
+-- here the first time it is produced and read from here forever after.
+--
+-- **This table is personal data and is never committed.** It describes the
+-- contents of the user's own photographs. It lives in the index, which
+-- `.gitignore` has always excluded, for exactly that reason.
+--
+-- A new TABLE needs no migration rung: `CREATE TABLE IF NOT EXISTS` runs in
+-- this script on an old database too. `memory_exclusions` and
+-- `memory_history` arrived the same way.
+--
+-- `source` is 'clip' | 'gpt', so the two layers cache independently and
+-- turning the model on does not discard the grounding underneath it.
+-- `vocab_version` and `model` are stored rather than keyed on: a reader that
+-- finds a row from a different vocabulary or a different model treats it as
+-- absent and overwrites it, so an edited caption_vocab.toml regenerates
+-- captions instead of silently mixing two vocabularies.
+CREATE TABLE IF NOT EXISTS photo_captions (
+    file_hash     TEXT NOT NULL,
+    source        TEXT NOT NULL,
+    caption       TEXT NOT NULL,
+    terms         TEXT NOT NULL DEFAULT '',
+    vocab_version INTEGER NOT NULL DEFAULT 0,
+    model         TEXT NOT NULL DEFAULT '',
+    created_at    TEXT NOT NULL,
+    PRIMARY KEY (file_hash, source)
+);
+
 CREATE INDEX IF NOT EXISTS idx_photos_taken ON photos(taken_at_utc);
 CREATE INDEX IF NOT EXISTS idx_photos_type  ON photos(media_type);
 CREATE INDEX IF NOT EXISTS idx_photos_edited ON photos(edited_of);
@@ -499,8 +532,7 @@ class PhotoStore:
         n = 0
         for file_hash, ignore, evidence in rows:
             cur.execute(
-                "UPDATE photos SET orient_ignore_exif = ?, orient_evidence = ?"
-                " WHERE file_hash = ?",
+                "UPDATE photos SET orient_ignore_exif = ?, orient_evidence = ? WHERE file_hash = ?",
                 (1 if ignore else 0, evidence, file_hash),
             )
             if ignore:
@@ -612,6 +644,88 @@ class PhotoStore:
             (key, value),
         )
         self._conn.commit()
+
+    # ---------------------------------------------------------- captions
+
+    def caption_get(
+        self, file_hash: str, source: str, *, vocab_version: int = 0, model: str = ""
+    ) -> tuple[str, tuple[str, ...]] | None:
+        """A cached caption and the terms it was grounded on, or None.
+
+        A row written against a DIFFERENT vocabulary version or a different
+        model is reported as absent. Mixing two vocabularies inside one memory
+        would make half its captions say one thing and half another, with
+        nothing on screen to say why - and the caller's response to None is to
+        regenerate, which is exactly right.
+        """
+        row = self._conn.execute(
+            "SELECT caption, terms, vocab_version, model FROM photo_captions "
+            "WHERE file_hash = ? AND source = ?",
+            (file_hash, source),
+        ).fetchone()
+        if row is None:
+            return None
+        if row["vocab_version"] != vocab_version or row["model"] != model:
+            return None
+        terms = tuple(t for t in json.loads(row["terms"] or "[]"))
+        return row["caption"], terms
+
+    def caption_put(
+        self,
+        file_hash: str,
+        source: str,
+        caption: str,
+        *,
+        terms: Iterable[str] = (),
+        vocab_version: int = 0,
+        model: str = "",
+    ) -> None:
+        """Record a caption. Committed immediately.
+
+        Per-row commits are the wrong default everywhere else in this file and
+        are right here: generating a caption can cost a network round trip, and
+        an interrupted run that had to ask for all of them again would be
+        paying twice for work already done.
+        """
+        self._conn.execute(
+            "INSERT INTO photo_captions"
+            "(file_hash, source, caption, terms, vocab_version, model, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT(file_hash, source) DO UPDATE SET "
+            "caption = excluded.caption, terms = excluded.terms, "
+            "vocab_version = excluded.vocab_version, model = excluded.model, "
+            "created_at = excluded.created_at",
+            (
+                file_hash,
+                source,
+                caption,
+                json.dumps(list(terms)),
+                vocab_version,
+                model,
+                datetime.now().astimezone().isoformat(),
+            ),
+        )
+        self._conn.commit()
+
+    def caption_count(self, source: str | None = None) -> int:
+        if source is None:
+            return int(
+                self._conn.execute("SELECT COUNT(*) AS n FROM photo_captions").fetchone()["n"]
+            )
+        return int(
+            self._conn.execute(
+                "SELECT COUNT(*) AS n FROM photo_captions WHERE source = ?", (source,)
+            ).fetchone()["n"]
+        )
+
+    def caption_clear(self, source: str | None = None) -> int:
+        """Forget cached captions. Returns how many rows went."""
+        if source is None:
+            cursor = self._conn.execute("DELETE FROM photo_captions")
+        else:
+            cursor = self._conn.execute("DELETE FROM photo_captions WHERE source = ?", (source,))
+        self._conn.commit()
+        return cursor.rowcount
 
     def hashes_for_filename(self, name: str) -> set[str]:
         """Every photo having a path whose filename casefolds to `name`.
