@@ -36,6 +36,7 @@ from pathlib import Path
 import pytest
 
 from rekindle.db import PhotoStore
+from rekindle.memory import albums as album_names
 from rekindle.memory import engine, festivals, prompt, tags
 from rekindle.memory.index import MemoryIndex
 from rekindle.memory.policy import load_policy
@@ -429,3 +430,82 @@ def test_the_gate_evaluation_is_not_vacuous(index, retrieve):
         query = prompt.parse(concept, index)
         build = prompt.build_selection(index, query, concept_tags, retrieve)
         assert build.pool > 0, f"{concept} retrieved nothing at all"
+
+
+# --------------------------------------------------------------------------
+# Albums.
+#
+# These need the index and NOT the embedding store, so they are the cheap end
+# of this file. They exist because every album figure in
+# `docs/decision-log-prompt-memories.md` was measured here and this project
+# has now had thirteen carried-forward numbers turn out to be wrong.
+
+
+def _named_albums(index):
+    return sorted(n for n in index.album_counts() if album_names.presentable(n))
+
+
+def test_every_named_album_is_reachable_from_an_ordinary_prompt(index):
+    """The measurement this whole change came from. With bare all-token
+    matching, 0 of the 37 named albums could be reached by `memories of
+    <album>` - `Puri 25` does not contain the words "memories" or "of"."""
+    unreachable = []
+    for name in _named_albums(index):
+        core = album_names.family(name).casefold()
+        if name not in prompt.album_matches(index, f"memories of {core}"):
+            unreachable.append(name)
+    assert unreachable == []
+
+
+def test_the_auto_and_untitled_albums_stay_unreachable(index):
+    """`photos` matched all 23 `Photos from YYYY` albums before the
+    presentability filter, unioning 17,004 photographs into the pool."""
+    for subject in ("photos", "photos from", "untitled", "some of my photos"):
+        assert prompt.album_matches(index, subject) == []
+
+
+def test_the_four_prompts_split_the_way_the_decision_log_says(index):
+    """`kashmir` and `ladakh` are answered by the user's own curation;
+    `puri` and `durga puja` are not, and the tags are still needed."""
+    decided = {}
+    for text in ("memories of puri", "durga puja", "kashmir", "ladakh"):
+        match = prompt.match_albums(index, prompt.parse(text, index))
+        decided[text] = (match.led, match.names, match.total)
+
+    assert decided["memories of puri"][0] is False
+    assert decided["memories of puri"][1] == ("Puri 25",)
+    assert decided["memories of puri"][2] < prompt.LEAD_MIN
+
+    assert decided["durga puja"][0] is False
+    assert decided["durga puja"][1] == ("Durga Puja 25",)
+
+    assert decided["kashmir"][0] is True
+    assert decided["kashmir"][1] == ("Kashmir", "Kashmir day 3", "Kashmir, day 1 and 2")
+    assert decided["kashmir"][2] > 400
+
+    assert decided["ladakh"][0] is True
+    assert decided["ladakh"][1] == ("Leh Ladakh", "ladakh")
+
+
+def test_one_trip_under_two_names_is_counted_once(index):
+    """`Leh Ladakh` and `ladakh` overlap heavily, and `album_aliases` has not
+    been asked to merge them. Summing their sizes overstates the memory."""
+    match = prompt.match_albums(index, prompt.parse("ladakh", index))
+    assert match.total < sum(match.sizes.values())
+
+
+def test_the_album_decision_needs_no_embeddings_at_all(index):
+    """An album-led memory is buildable on a machine with no `semantic`
+    extra. `retrieve` here would raise if anything reached it."""
+
+    def explode(text, k):
+        raise AssertionError("an album-led build must not search")
+
+    query = prompt.parse("memories of kashmir", index)
+    match = prompt.match_albums(index, query)
+    assert match.led is True
+    build = prompt.build_selection(index, query, ["a tag"], explode, album_match=match)
+    assert build.tags == ()
+    assert build.pool == match.total
+    albums_of = {a for photo in build.selection.photos for a in photo.albums}
+    assert set(match.names) <= albums_of

@@ -14,8 +14,9 @@ import pytest
 
 from rekindle.db import PhotoStore
 from rekindle.memory import festivals, prompt, tags
-from rekindle.memory.index import MemoryIndex
+from rekindle.memory.index import ExclusionReport, MemoryIndex
 from rekindle.memory.llm import LLMUnavailable
+from rekindle.memory.policy import ExclusionPolicy
 from rekindle.models import MediaType, Photo, PhotoMeta
 
 
@@ -308,3 +309,145 @@ def test_no_key_is_a_clear_message_not_a_traceback(monkeypatch):
 
 def test_the_generator_never_repr_s_its_key():
     assert "secret" not in repr(tags.TagGenerator("secret"))
+
+
+# ------------------------------------------------- shortlisting the albums
+#
+# The model is never called here either. What is asserted is what the layer
+# DOES with a reply.
+
+
+def _album_index(tmp_path):
+    store = PhotoStore(tmp_path / "albums.sqlite")
+    store.upsert_many(
+        [_p(f"k{i}", local=datetime(2015, 5, 15, 6, i), albums=["Leh Ladakh"]) for i in range(4)]
+        + [_p("p", local=datetime(2025, 9, 6, 18, 0), albums=["Puri 25"], people=["Avyan Maiti"])]
+    )
+    return store, MemoryIndex.open(store)
+
+
+def test_a_shortlist_reply_is_looked_up_and_never_taken_on_trust():
+    titles = ["Leh Ladakh", "Puri 25"]
+    names, rejected = tags.parse_album_reply("Leh Ladakh\nKashmir Trip", titles)
+    assert names == ["Leh Ladakh"]
+    assert rejected == [tags.REJECT_NOT_AN_ALBUM]
+
+
+def test_a_shortlist_reply_is_matched_on_the_normalised_title():
+    """A model that lower-cases a title has still named a real album; a model
+    that made one up has not. The library's own spelling comes back."""
+    names, rejected = tags.parse_album_reply("leh  ladakh", ["Leh Ladakh"])
+    assert names == ["Leh Ladakh"]
+    assert rejected == []
+
+
+def test_none_is_an_answer_and_not_an_album():
+    assert tags.parse_album_reply("NONE", ["Leh Ladakh"]) == ([], [])
+
+
+def test_the_album_request_carries_the_titles_and_nothing_else(tmp_path):
+    """The titles are the user's own words and the plausibility judge is
+    already given them. Nothing else about the library may go with them."""
+    seen = {}
+
+    def transport(payload, api_key):
+        seen["payload"] = payload
+        return {"output_text": "Puri 25"}
+
+    store, index = _album_index(tmp_path)
+    try:
+        titles = sorted(index.album_counts())
+        tags.TagGenerator("k", transport=transport).albums_for("puri", titles)
+        body = json.dumps(seen["payload"])
+        assert "Puri 25" in body
+        for forbidden in ("Avyan", "2015-05-15", "/lib/", "2025-09-06"):
+            assert forbidden not in body
+    finally:
+        store.close()
+
+
+def test_no_key_means_token_matching_and_never_an_error(tmp_path):
+    """The whole layer is optional. With no generator and no cache the answer
+    is empty, which leaves the caller exactly where it was."""
+    query = prompt.parse("ladhak", MemoryIndex([], ExclusionPolicy(), ExclusionReport()))
+    assert tags.shortlist_albums(query, ["Leh Ladakh"], data_dir=tmp_path).names == ()
+
+
+def test_a_shortlist_is_cached_so_the_same_prompt_answers_the_same_way(tmp_path):
+    calls = []
+
+    def transport(payload, api_key):
+        calls.append(1)
+        return {"output_text": "Leh Ladakh"}
+
+    store, index = _album_index(tmp_path)
+    try:
+        query = prompt.parse("ladhak", index)
+        titles = sorted(index.album_counts())
+        generator = tags.TagGenerator("k", transport=transport)
+        first = tags.shortlist_albums(query, titles, data_dir=tmp_path, generator=generator)
+        second = tags.shortlist_albums(query, titles, data_dir=tmp_path, generator=generator)
+        assert first.names == second.names == ("Leh Ladakh",)
+        assert (first.source, second.source) == (tags.SOURCE_MODEL, tags.SOURCE_CACHE)
+        assert len(calls) == 1
+    finally:
+        store.close()
+
+
+def test_an_empty_shortlist_is_cached_too(tmp_path):
+    """Otherwise every prompt that names no album pays for a call, every run."""
+    calls = []
+
+    def transport(payload, api_key):
+        calls.append(1)
+        return {"output_text": "NONE"}
+
+    store, index = _album_index(tmp_path)
+    try:
+        query = prompt.parse("scuba diving", index)
+        titles = sorted(index.album_counts())
+        generator = tags.TagGenerator("k", transport=transport)
+        tags.shortlist_albums(query, titles, data_dir=tmp_path, generator=generator)
+        again = tags.shortlist_albums(query, titles, data_dir=tmp_path, generator=generator)
+        assert again.names == ()
+        assert again.source == tags.SOURCE_CACHE
+        assert len(calls) == 1
+    finally:
+        store.close()
+
+
+def test_a_cached_shortlist_is_dropped_when_the_albums_change(tmp_path):
+    """A cached answer to "which of THESE albums" is only an answer while the
+    album list is the same one. Without the fingerprint, an album added today
+    could never be shortlisted for a prompt asked yesterday."""
+    calls = []
+
+    def transport(payload, api_key):
+        calls.append(1)
+        return {"output_text": "Leh Ladakh"}
+
+    store, index = _album_index(tmp_path)
+    try:
+        query = prompt.parse("ladhak", index)
+        generator = tags.TagGenerator("k", transport=transport)
+        tags.shortlist_albums(query, ["Leh Ladakh"], data_dir=tmp_path, generator=generator)
+        after = tags.shortlist_albums(
+            query, ["Leh Ladakh", "ladakh"], data_dir=tmp_path, generator=generator
+        )
+        assert after.source == tags.SOURCE_MODEL
+        assert len(calls) == 2
+    finally:
+        store.close()
+
+
+def test_the_shortlist_cache_holds_no_more_than_the_prompt_and_the_titles(tmp_path):
+    store, index = _album_index(tmp_path)
+    try:
+        query = prompt.parse("ladhak", index)
+        generator = tags.TagGenerator("k", transport=_reply("Leh Ladakh"))
+        tags.shortlist_albums(query, ["Leh Ladakh"], data_dir=tmp_path, generator=generator)
+        written = (tmp_path / tags.ALBUM_CACHE_NAME).read_text(encoding="utf-8")
+        assert "ladhak" in written and "Leh Ladakh" in written
+        assert "Avyan" not in written
+    finally:
+        store.close()

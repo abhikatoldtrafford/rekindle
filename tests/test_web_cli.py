@@ -187,7 +187,7 @@ def test_the_ui_reports_a_missing_semantic_extra_without_failing(tmp_path, capsy
     )
     try:
         printed = " ".join(capsys.readouterr().out.split())
-        assert "uv sync --extra semantic" in printed
+        assert unwrapped("uv sync --extra semantic") in unwrapped(printed)
         assert "Everything else works without it" in printed
         # And the server is up regardless: the extra gates one panel, not the
         # command.

@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 from rekindle.db import PhotoStore
-from rekindle.memory import prompt, strata
+from rekindle.memory import engine, prompt, strata
 from rekindle.memory.index import MemoryIndex
 from rekindle.memory.policy import ExclusionPolicy
 from rekindle.models import MediaType, Photo, PhotoMeta
@@ -534,5 +534,280 @@ def test_a_prompt_fact_sheet_marks_its_title_unsubstantiated(tmp_path):
         # two independent reasons a place name in a prompt cannot reach a
         # caption. See tests/test_llm.py for which one is load-bearing.
         assert facts.title == "christmas in midnapur"
+    finally:
+        store.close()
+
+
+# ------------------------------------------------------------------- albums
+#
+# Every test below was written against a measurement on the reference library,
+# and the measurements are in `docs/decision-log-prompt-memories.md`.
+
+
+def _album_library():
+    """A library shaped like the reference one: one album that can carry a
+    memory, one that cannot, and one trip filed under three names."""
+    photos = [_p(f"k{i}", local=datetime(2015, 5, 15, 6, i), albums=["Kashmir"]) for i in range(30)]
+    photos += [
+        _p(f"k1_{i}", local=datetime(2015, 5, 16, 6, i), albums=["Kashmir, day 1 and 2"])
+        for i in range(4)
+    ]
+    photos += [
+        _p(f"k3_{i}", local=datetime(2015, 5, 17, 6, i), albums=["Kashmir day 3"]) for i in range(3)
+    ]
+    photos += [
+        _p(f"puri{i}", local=datetime(2025, 9, 6, 18, i), albums=["Puri 25"]) for i in range(3)
+    ]
+    photos += [_p(f"other{i}", local=datetime(2019, 10, 4, 12, i)) for i in range(10)]
+    return photos
+
+
+def test_a_framing_word_no_longer_hides_an_album(tmp_path):
+    """`memories of puri` is the prompt the owner actually typed, and under
+    bare all-token matching it reached NOTHING: `Puri 25` does not contain the
+    words "memories" or "of". Measured on the reference library, 37 of 37
+    named albums self-match from their bare title and 0 of 37 from
+    `memories of <title>`."""
+    store, index = _index(tmp_path, _album_library())
+    try:
+        assert prompt.album_matches(index, "puri") == ["Puri 25"]
+        assert prompt.album_matches(index, "memories of puri") == ["Puri 25"]
+        assert prompt.album_matches(index, "show me all our photos of kashmir") == [
+            "Kashmir",
+            "Kashmir day 3",
+            "Kashmir, day 1 and 2",
+        ]
+    finally:
+        store.close()
+
+
+def test_googles_own_per_year_albums_can_never_be_matched(tmp_path):
+    """`Photos from YYYY` is on every photograph. Measured on the reference
+    library BEFORE this rule: the one-word prompt `photos` matched all 23 of
+    them and unioned 17,004 photographs - 88% of the library - into the
+    candidate pool."""
+    photos = [
+        _p(f"auto{i}", local=datetime(2019, 3, 4, 12, i), albums=[f"Photos from 201{i}"])
+        for i in range(5)
+    ]
+    photos.append(_p("named", local=datetime(2019, 3, 4, 13, 0), albums=["Untitled(1)"]))
+    store, index = _index(tmp_path, photos)
+    try:
+        assert prompt.album_matches(index, "photos") == []
+        assert prompt.album_matches(index, "photos from") == []
+        assert prompt.album_matches(index, "untitled") == []
+    finally:
+        store.close()
+
+
+def test_a_prompt_of_nothing_but_framing_words_matches_no_album(tmp_path):
+    store, index = _index(tmp_path, _album_library())
+    try:
+        assert prompt.album_matches(index, "show me some of my photos") == []
+    finally:
+        store.close()
+
+
+def test_the_lead_floor_is_the_length_of_a_memory():
+    """LEAD_MIN is not a free parameter: it is how many shots a memory holds.
+    An album that can fill one on its own needs nothing inferred to complete
+    it. Asserted rather than imported, because `engine` imports `prompt`."""
+    assert prompt.LEAD_MIN == engine.DEFAULT_MAX_SHOTS
+
+
+def test_an_album_that_can_fill_a_memory_becomes_the_memory(tmp_path):
+    """The whole point of the feature. `Kashmir` holds 510 photographs in the
+    reference library; nothing a model infers beats that."""
+    store, index = _index(tmp_path, _album_library())
+    try:
+        query = prompt.parse("memories of kashmir", index)
+        match = prompt.match_albums(index, query)
+        assert match.led is True
+        assert match.names == ("Kashmir", "Kashmir day 3", "Kashmir, day 1 and 2")
+        assert match.total == 37
+
+        def explode(tag, k):
+            raise AssertionError("an album-led build must not search")
+
+        build = prompt.build_selection(index, query, ["a tag"], explode, album_match=match)
+        assert build.tags == ()
+        assert build.seed_days == ()
+        assert build.pool == 37
+        chosen = {p.file_hash for p in build.selection.photos}
+        assert not any(h.startswith("other") for h in chosen)
+    finally:
+        store.close()
+
+
+def test_a_small_album_is_a_seed_and_the_search_still_runs(tmp_path):
+    """`Puri 25` holds three photographs. Three is a memory nobody wants and
+    the tags are still needed, so a small album is added to the pool rather
+    than becoming it - which is exactly what this module did before."""
+    store, index = _index(tmp_path, _album_library())
+    try:
+        query = prompt.parse("memories of puri", index)
+        match = prompt.match_albums(index, query)
+        assert (match.names, match.led) == (("Puri 25",), False)
+        build = prompt.build_selection(
+            index,
+            query,
+            ["t"],
+            _seed_tags({"t": ["other0", "other1"]}),
+            album_match=match,
+        )
+        assert build.tags == ("t",)
+        assert [s.iso for s in build.seed_days] == ["2019-10-04"]
+        chosen = {p.file_hash for p in build.selection.photos}
+        assert {"puri0", "puri1", "puri2"} <= chosen
+        assert "other0" in chosen
+    finally:
+        store.close()
+
+
+def test_one_trip_under_several_album_names_is_one_cluster(tmp_path):
+    """`Kashmir` / `Kashmir, day 1 and 2` / `Kashmir day 3` are one trip in
+    three albums, and `album_story` can only ever tell one of them. Routing a
+    prompt to that recipe would have to pick one; the union does not."""
+    store, index = _index(tmp_path, _album_library())
+    try:
+        query = prompt.parse("kashmir", index)
+        build = prompt.build_selection(index, query, [], _seed_tags({}))
+        assert build.albums == ("Kashmir", "Kashmir day 3", "Kashmir, day 1 and 2")
+        assert build.pool == 37
+    finally:
+        store.close()
+
+
+def test_two_albums_holding_the_same_photo_count_it_once(tmp_path):
+    """`Leh Ladakh` and `ladakh` are one trip filed twice and share 195 of
+    their photographs on the reference library. Summing the two album sizes
+    says 514 where the memory is built from 319, and the CLI printed both
+    numbers two lines apart until this was fixed."""
+    shared = [
+        _p(f"both{i}", local=datetime(2018, 9, 1, 7, i), albums=["Leh Ladakh", "ladakh"])
+        for i in range(5)
+    ]
+    only = [
+        _p(f"leh{i}", local=datetime(2018, 9, 2, 7, i), albums=["Leh Ladakh"]) for i in range(2)
+    ]
+    store, index = _index(tmp_path, shared + only)
+    try:
+        query = prompt.parse("ladakh", index)
+        match = prompt.match_albums(index, query)
+        assert match.sizes == {"Leh Ladakh": 7, "ladakh": 5}
+        assert sum(match.sizes.values()) == 12
+        assert match.total == 7
+        build = prompt.build_selection(index, query, [], _seed_tags({}), album_match=match)
+        assert build.pool == match.total
+    finally:
+        store.close()
+
+
+def test_a_prompt_that_an_album_answers_keeps_its_own_memory_id(tmp_path):
+    """An album-led memory is still `prompt:<text>`. Building it under
+    `album_story:Kashmir` instead would mean the id changed the day the album
+    crossed the floor, and every dismissal of it silently stopped applying."""
+    store, index = _index(tmp_path, _album_library())
+    try:
+        query = prompt.parse("kashmir", index)
+        assert prompt.match_albums(index, query).led is True
+        assert prompt.memory_key(query) == "prompt:kashmir"
+    finally:
+        store.close()
+
+
+def test_an_album_is_narrowed_by_the_year_the_user_typed(tmp_path):
+    """Before this, a matched album went into the pool whole and
+    `kashmir 2019` still returned the 2015 trip."""
+    photos = _album_library()
+    photos += [
+        _p(f"later{i}", local=datetime(2019, 5, 15, 6, i), albums=["Kashmir"]) for i in range(4)
+    ]
+    store, index = _index(tmp_path, photos)
+    try:
+        query = prompt.parse("kashmir 2019", index)
+        assert query.years == (2019,)
+        match = prompt.match_albums(index, query)
+        assert match.sizes == {"Kashmir": 4}
+        assert match.led is False
+        build = prompt.build_selection(index, query, [], _seed_tags({}), album_match=match)
+        assert build.pool == 4
+        assert {p.file_hash for p in build.selection.photos} == {f"later{i}" for i in range(4)}
+    finally:
+        store.close()
+
+
+def test_a_year_the_album_does_not_have_stops_it_leading(tmp_path):
+    """The decision is made on the photographs that survive the user's own
+    narrowings, not on the album's raw size - otherwise `kashmir 1999` leads
+    with an album that contributes nothing and the memory is empty."""
+    store, index = _index(tmp_path, _album_library())
+    try:
+        query = prompt.parse("kashmir 2025", index)
+        match = prompt.match_albums(index, query)
+        assert match.names == ()
+        assert match.led is False
+        assert match.source == prompt.ALBUM_NONE
+    finally:
+        store.close()
+
+
+def test_the_festival_month_window_never_deletes_an_album_photo(tmp_path):
+    """A corpus month window is rekindle's guess about when a festival falls;
+    an album is the user's own labelling. The guess does not get to delete the
+    label."""
+    photos = [_p("out", local=datetime(2025, 3, 30, 12, 0), albums=["Durga Puja 25"])]
+    photos += [_p(f"in{i}", local=datetime(2025, 10, 4, 12, i)) for i in range(3)]
+    store, index = _index(tmp_path, photos)
+    try:
+        query = prompt.parse("durga puja", index)
+        build = prompt.build_selection(index, query, [], _seed_tags({}), months=(9, 10))
+        assert "out" in {p.file_hash for p in build.selection.photos}
+    finally:
+        store.close()
+
+
+def test_a_shortlisted_album_the_library_does_not_have_is_never_searched(tmp_path):
+    """The one hard rule of the model path: it may point at an album, never
+    invent one."""
+    store, index = _index(tmp_path, _album_library())
+    try:
+        query = prompt.parse("ladhak", index)
+        match = prompt.match_albums(index, query, shortlist=["Leh Ladakh", "Kashmir"])
+        assert match.names == ("Kashmir",)
+        assert match.invented == ("Leh Ladakh",)
+        assert match.source == prompt.ALBUM_MODEL
+    finally:
+        store.close()
+
+
+def test_the_shortlist_cannot_override_what_the_tokens_matched(tmp_path):
+    """Token matching is exact and stays authoritative: a model that answered
+    `Diwali Kali Puja 22` to `durga puja` must not be able to reach the pool.
+    That confusion is the reason this module exists."""
+    photos = [
+        _p("d", local=datetime(2025, 9, 30, 12, 0), albums=["Durga Puja 25"]),
+        _p("k", local=datetime(2022, 10, 24, 12, 0), albums=["Diwali Kali Puja 22"]),
+    ]
+    store, index = _index(tmp_path, photos)
+    try:
+        query = prompt.parse("durga puja", index)
+        match = prompt.match_albums(index, query, shortlist=["Diwali Kali Puja 22"])
+        assert match.names == ("Durga Puja 25",)
+        assert match.source == prompt.ALBUM_TOKENS
+    finally:
+        store.close()
+
+
+def test_an_album_led_build_is_byte_identical_across_runs(tmp_path):
+    store, index = _index(tmp_path, _album_library())
+    try:
+        query = prompt.parse("kashmir", index)
+
+        def hashes():
+            build = prompt.build_selection(index, query, [], _seed_tags({}))
+            return [p.file_hash for p in build.selection.photos]
+
+        assert hashes() == hashes()
     finally:
         store.close()

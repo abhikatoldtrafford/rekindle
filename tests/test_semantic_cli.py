@@ -137,7 +137,7 @@ def test_doctor_lists_an_existing_store(tmp_path):
     result = runner.invoke(app, ["semantic", "doctor", "--data-dir", str(tmp_path)])
     assert result.exit_code == 0
     assert "clip-vit-l14" in result.stdout
-    assert "0 vectors" in result.stdout
+    assert unwrapped("0 vectors") in unwrapped(result.stdout)
 
 
 def test_find_over_a_toy_store_returns_the_right_photo(library, monkeypatch):
@@ -179,7 +179,7 @@ def test_find_over_a_toy_store_returns_the_right_photo(library, monkeypatch):
         env=WIDE,
     )
     assert result.exit_code == 0, result.stdout
-    assert "b.jpg" in result.stdout
+    assert unwrapped("b.jpg") in unwrapped(result.stdout)
     assert "a.jpg" not in result.stdout
 
 
