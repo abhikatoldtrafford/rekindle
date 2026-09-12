@@ -46,7 +46,11 @@ SOURCE_GPT = "gpt"
 #: Cached rows carrying a different version are treated as absent, so an
 #: edited vocabulary regenerates rather than mixing two vocabularies inside
 #: one memory.
-VOCAB_VERSION = 1
+#:
+#: v2 removed three subject terms - a boat, a vehicle, a bird - after grading
+#: the six photographs the library scores highest for each and finding 2, 1
+#: and about 3 of 6. Any caption cached under v1 may name one of them.
+VOCAB_VERSION = 2
 
 
 class VisionSupport(Protocol):

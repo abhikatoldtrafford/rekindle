@@ -236,6 +236,42 @@ the licence of everything rekindle can fetch.
 Without the extra, these commands print what to install and exit — nothing
 else changes, and the default `uv sync` stays small.
 
+### 🏞️ Memories about a place rather than a person (optional)
+
+```bash
+uv run rekindle scenery --list          # what it knows about
+uv run rekindle scenery sea mountains   # build two
+uv run rekindle scenery --all
+```
+
+Every recipe above keys off a person, an album, a date or GPS. **On the
+reference library 6,419 photographs — 33.2% — have none of the first three**:
+no face tag, no album anyone named, no coordinates. The beaches, the hills,
+the flowers, the food, the rain. They can appear inside `year_in_review` and
+`on_this_day`, where the subject is the calendar, and they can never be what a
+memory is *about*.
+
+A scenery memory makes them the subject. It works the same way a prompt memory
+does — a concept becomes visual descriptions, each is searched separately, and
+a photograph ranks by how many of them agree — except that the concepts come
+from a checked-in, editable
+[scenery corpus](src/rekindle/memory/corpus/scenery.toml) rather than from
+whatever you typed.
+
+**Every entry in that file was graded by looking at what it returned**, and
+the count is written next to it: sea 22 of 24, mountains 24 of 24, flowers 24
+of 24, temples 23 of 24, food 22 of 24. The two weak ones are still there,
+with what is wrong with them recorded — `rain` at about 13 of 24, and `night`,
+which retrieves night photographs correctly and mostly finds that this
+library's night photographs did not come out.
+
+The scene clusters `rekindle semantic cluster` already produces are **not**
+used for this, and cannot be:
+[known-limitations.md](docs/known-limitations.md) records cluster #16, 270
+photographs of institutional buildings labelled *"a hospital or a clinic"*,
+containing no hospital. A curated file is something you can read, disagree
+with, and fix.
+
 ### 🖼️ Editing a memory by hand
 
 ```bash
@@ -296,7 +332,10 @@ a folder of photos
         ↓
   engine                 dedup → rank → cap → order
         ↓
-  MemorySpec (JSON)  →  GIF (always)  |  MP4 (when ffmpeg is present)
+  Timeline               when each shot appears, and for how long
+        ↓
+  MemorySpec (JSON)  →  GIF + WebP (always, hard cuts)
+                     →  MP4 (when ffmpeg is present: dissolves, Ken Burns)
                      ↑
   rekindle ui        |  a local page that edits the spec, and hands back
                         `rekindle render <spec>` to rebuild it
@@ -312,20 +351,50 @@ story — and slots are spread across it before quality ranking chooses within
 each period. Without that, selection collapses onto whichever week happened to
 photograph best.
 
-### Optional GPT captions
+### Captions: three layers, each able to veto
 
-`--captions gpt` rewrites the caption strings only. It is **off by default**,
-needs `OPENAI_API_KEY`, and sees **only a fact sheet** — dates, counts, names,
-albums and coordinates already derived from your index. Never the pixels, never
-a path, never your library. Every caption it returns is checked back against
-that fact sheet and rejected if it asserts a year or a name the facts do not
-contain.
+A wrong caption on a photograph of your family is worse than no caption, so
+`--captions` builds up in strict steps and every step can refuse.
 
-**It currently adds little.** Measured across five recipes, the model returned
-the existing deterministic caption verbatim in four of five cases. That is the
-prompt working as intended rather than a fault, but it means enabling this
-costs an API call for a change you will usually not see. Leave it off unless
-you are experimenting.
+```bash
+uv run rekindle memory  --recipe album_story --key Kashmir --captions clip
+uv run rekindle scenery sea --captions gpt
+```
+
+| mode | what it adds | needs |
+|---|---|---|
+| `deterministic` *(default)* | the year, the date, or nothing | nothing |
+| `clip` | what an image model recognised, from a **closed vocabulary** | the semantic extra + embeddings |
+| `gpt` | a language model phrasing those terms and the fact sheet | the above + `OPENAI_API_KEY` |
+
+**1. CLIP grounds it.** Every word that can appear comes from
+[a checked-in vocabulary](src/rekindle/memory/corpus/caption_vocab.toml) with
+five rules about what may never be in it — no proper nouns, no people or
+relationships, no sentiment or occasion, no sensitive context, nothing not
+physically in the frame — and the test suite fails the build if you add one.
+A photograph is scored against each phrase as a **percentile of that phrase's
+own distribution over your whole library**, because comparing "a plate of
+food" with "a sandy beach" on one image compares two different queries on two
+different scales.
+
+Hand-graded on 72 random photographs in two samples of 36: **25% get a
+caption and all of them were right or defensible.** The other 75% are blanks,
+which is the correct answer for an indoor portrait. Naming an object needs a
+much higher bar than naming a place, and that is measured rather than
+assumed — at one threshold for everything, every clear error was an object
+("A vehicle by the water", on an empty lake shore).
+
+**2. GPT phrases it.** Off by default. It receives the CLIP terms and the fact
+sheet — dates, counts, names, albums, coordinates. **Never the pixels, never a
+path, never your library.**
+
+**3. The index vetoes it, per photograph.** A caption may not name a year that
+photo does not have or a person not tagged in *that frame* — not merely
+someone in the memory. Anything else falls back to the deterministic caption.
+
+Each caption is generated **once per photograph** and cached in your index, so
+the same memory rebuilds identically forever and a second run costs nothing.
+The cache is personal data and is gitignored with the index.
 
 ## Guardrails
 

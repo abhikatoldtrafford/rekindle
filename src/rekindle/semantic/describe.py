@@ -15,7 +15,7 @@ number and you take whichever phrase CLIP is warm on in general.
 So each probe is scored against the WHOLE embedded library once, and a
 photograph's percentile within that distribution is what the rules read. Every
 probe is then measured against the same 18,201 photographs and the numbers are
-comparable. The cost is one matrix product per probe - 23 probes over
+comparable. The cost is one matrix product per probe - 19 probes over
 18,201 x 768 float32 is about 0.3 s and 56 MB already resident - paid once per
 process and then answered from memory.
 """

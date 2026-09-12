@@ -23,8 +23,16 @@ class Recipe(Protocol):
 ```
 
 Recipes choose photos and their order. They do **not** own timing — a separate
-`Timeline` stage does, so beat-synced music doesn't break every recipe. Full
-guide: [writing-recipes.md](docs/writing-recipes.md).
+`Timeline` stage does, so beat-synced music doesn't break every recipe. That
+stage now exists (`memory/render/timeline.py`) and nothing above it had to
+change to get crossfades, Ken Burns or beat-snapped cuts. Full guide:
+[writing-recipes.md](docs/writing-recipes.md).
+
+A recipe also cannot reach the semantic layer, which is why **scenery memories
+are not a recipe**: selection needs a retriever, `Recipe.select` has nowhere to
+receive one, and CI has no embeddings at all. They hand the engine a
+`Selection` directly, exactly as prompt memories do, and every guardrail below
+`engine.build` still applies. See `memory/scenery.py`.
 
 Ideas nobody has built yet: *Kids Growing Up*, *Every Sunset*, *This Café Over
 The Years*, *Seasons In One Place*, *Everyone Who Came To Dinner*.
@@ -46,6 +54,24 @@ class Source(Protocol):
 
 `Embedder`, `Captioner` and `Narrator` are swappable. Ollama, llama.cpp,
 Gemini and local VLMs all fit.
+
+### 4. A corpus entry (the smallest useful contribution)
+
+Three checked-in data files decide what rekindle can find and what it may say,
+and none of them needs a line of code:
+
+- `corpus/festivals.toml` — a festival, and what a photograph of it looks like.
+- `corpus/scenery.toml` — a scene that can be the subject of a memory.
+- `corpus/caption_vocab.toml` — a thing a caption is allowed to mention.
+
+**Grade what you add.** Every entry in the first two carries the count someone
+got by looking at a contact sheet of what it returned, and the weak entries
+say what is wrong with them rather than being quietly dropped. A description
+that "seems right" is how nine of twenty-four shots of a Kali Puja memory
+ended up on a Durga Puja day. The caption vocabulary is stricter still: five
+rules about what may never be in it, all enforced by
+`tests/test_caption_vocab.py`, which fails the build rather than trusting a
+comment.
 
 ## Ground rules
 

@@ -72,21 +72,6 @@ facet = "subject"
 probe = "a photograph of a dog or a cat"
 says = "An animal"
 
-[[term]]
-facet = "subject"
-probe = "a photograph of a bird"
-says = "A bird"
-
-[[term]]
-facet = "subject"
-probe = "a photograph of a boat on the water"
-says = "A boat"
-
-[[term]]
-facet = "subject"
-probe = "a photograph of a car, a bus or a truck"
-says = "A vehicle"
-
 # REMOVED, and recorded rather than deleted silently: "a decorated painted
 # statue" / "A statue". Hand-graded on 36 random photographs it fired on a
 # framed printed picture of two deities - which is not a statue - and this
@@ -114,6 +99,30 @@ says = "A crowd"
 facet = "subject"
 probe = "a photograph of a large building seen from outside"
 says = "A building"
+
+# REMOVED, and recorded rather than deleted silently. Each of these was graded
+# the only way that settles it: take the SIX photographs the library scores
+# highest for that phrase and look at them. If the top six are not nearly all
+# right, the top half per cent - which is what the gate admits - certainly is
+# not.
+#
+#   "a boat on the water" / "A boat"          2 of 6. Four were open water
+#                                             with nothing on it. It had also
+#                                             already been caught twice in a
+#                                             rendered memory, on a boatless
+#                                             lake and a boatless beach.
+#   "a car, a bus or a truck" / "A vehicle"   1 of 6. Foliage, a grey lake,
+#                                             two motion-blurred frames.
+#   "a bird" / "A bird"                       about 3 of 6, and the misses
+#                                             were a man with binoculars and
+#                                             a patch of gravel.
+#
+# The pattern is the one the whole subject facet has: a library with few boats
+# has no top half per cent OF BOATS, so the phrase lands on whatever is
+# nearest, which is exactly the failure `known-limitations.md` records for the
+# scene-cluster labels. The terms that survived the same test scored 30 of 30
+# between them - a flower, food, clouds, trees, a building - and they survived
+# because the library genuinely contains hundreds of each.
 
 # ------------------------------------------------------------- where it is
 # Prepositional phrases. These follow the subject.

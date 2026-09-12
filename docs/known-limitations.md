@@ -575,7 +575,38 @@ decode.
 (18,201 vectors). Measured against the preserved sideways store, 2,534 of the
 18,201 vectors changed, the changed ones have a median self-cosine of 0.9352
 against their upright replacement, and two unrelated photos of this library
-sit at 0.549. `--redo` is still the right fix and still is not built.
+sit at 0.549.
+
+**Resolved properly, and the diagnosis in the paragraph above was incomplete.**
+`--redo` is built, but a `--redo` a human has to remember to run would not have
+prevented this: nobody knew the vectors were stale. The store now records a
+**decode key** per vector — `semantic.embed.decode_key`, written in the same
+transaction as the vector — and `rekindle semantic embed` recomputes any photo
+whose current key disagrees.
+
+The subtlety, and the reason a naive fix would have shipped a no-op: **the file
+hash cannot detect this.** These files' bytes never changed. `file_hash` is
+BLAKE2b of the bytes and it did not move; neither did the model or its
+revision. What moved was the *orientation verdict*, and therefore the decode.
+So the key names the decode inputs the hash does not already pin — the
+verdict (`exif` / `raw`), the target size, and a `DECODE_REVISION` for changes
+to `_decode` that no other term captures — and deliberately omits the EXIF tag
+itself, which lives in the bytes the hash already covers.
+
+Measured on the reference library: with every one of the 18,201 live vectors
+stamped as it would have been *before* `rekindle semantic orient` ran, the plan
+reports 212 stale and 17,989 fresh, and the 212 are exactly the set the index
+records as `orient_ignore_exif = 1` (set equality, not a matching count). The
+whole plan costs 2.9 s over 18,201 photos. `tests/test_semantic_staleness_real.py`
+re-runs that against the live library; `tests/test_semantic_embed.py` proves the
+same thing with a real encoder on a fixture whose bytes are asserted unchanged
+across the verdict change.
+
+Vectors written before the column existed record NULL, which reads as
+`unverified` and never as fresh — the honest answer, and the one that stops the
+feature quietly doing nothing on a store somebody already has. They are not
+recomputed by default (five hours on a contributor's CPU); `--redo-unverified`
+does it on request, and `--redo <hash>` forces specific ones.
 
 ### Some of this library's orientation tags are stale, and applying them is what turns the photo sideways
 
@@ -675,8 +706,95 @@ not a fix.
 changes the pixels `open_upright` returns, so `PhotoStore.set_orientations`
 clears that photo's `phash`, `sharpness`, `brightness`, `colour` and
 `phash_error`, which puts it back in `rekindle fingerprint`'s queue (and the
-re-run repairs the stored `width`/`height`, which were swapped). **Embeddings
-are still not invalidated** — they live in a separate store with no delete
-path, which is exactly how 2,503 sideways vectors survived the earlier fix.
-The pass prints the count and says so; `--redo` remains the right fix and
-still is not built.
+re-run repairs the stored `width`/`height`, which were swapped).
+
+**Embeddings are now invalidated too**, by a different mechanism and
+deliberately so. The embedding store is a separate database that
+`set_orientations` must not reach into — the whole reason it is separate is
+that neither writes to the other. Instead the store records what each vector
+was decoded from, and `rekindle semantic embed` notices for itself: no
+cross-database write, no ordering requirement between the two passes, and it
+works even if the verdict arrived from something other than this pass. See
+"Carried: 2,503 stored vectors were computed from sideways pixels" above.
+
+## Carried into M5 (scenery, captions, film)
+
+### The canvas rule makes a mixed-era memory mostly backdrop, and this milestone only worked around it
+
+`scenery:sea` spans 2009 to 2025. Its canvas is the median of the set, 4032 x
+2268, driven by the 2023-2025 phone photographs; its 2009-2014 shots are
+640-1600 px wide and are drawn at native size on a blurred enlargement of
+themselves. Rendered and looked at, those shots occupy about **a fifth of the
+frame** and the rest is blur. That is `composition.canvas_for` working exactly
+as designed and as measured - the alternative, a minimum-size canvas, put 11
+of 45 memories at 640x480 - but nobody had watched what it does to a memory
+whose whole subject is a span of sixteen years.
+
+`render/motion.py` drifts the backdrop behind those shots so they are not
+also motionless, which is a real improvement and is not a fix. The fix is
+probably a per-ERA canvas or a memory-level minimum, and both are changes to
+a decision that was measured, so neither was made here.
+
+### A downscaled shot that does not fill the canvas gets black bars, not a backdrop
+
+`frames.fit_photo` builds a blurred backdrop only for the `FIT_PAD` case, and
+`test_render.py` asserts that deliberately: "the blurred backdrop is only for
+photos that fall below the canvas". A 4:3 photograph on a 16:9 canvas is
+`FIT_DOWNSCALE` and gets a black matte down both sides. Watching a film-style
+render, those shots are the ones that look unfinished next to the padded ones.
+
+Not changed, because it is a documented decision with a test naming it and
+the only evidence against it is one person's reaction to one memory. If it is
+revisited, the measurement to make first is how many shots in a typical
+memory are letterboxed at all.
+
+### The scenery corpus has two entries that do not work well, and they ship
+
+`rain` graded at about 13 of 24 and `night` retrieves night photographs
+faithfully and mostly finds underexposed ones. Both are in
+`corpus/scenery.toml` with what is wrong with them written next to them,
+rather than removed - a corpus that hides its weak entries teaches nobody
+what a weak entry looks like. `rain` is fourth-attempt tags and is not a
+considered final answer.
+
+### Caption coverage is 25% and the vocabulary is 19 phrases
+
+Measured by hand-grading 72 random photographs: 18 got a caption, all right or
+defensible, and 54 got a blank. The blanks are overwhelmingly indoor
+portraits and family groups, which is where a wrong caption is worst, so the
+shape is right - but "a quarter of your photographs get three words" is a
+small feature, and it is small because the vocabulary is small and its floors
+are high. Growing it is the obvious next step and every added phrase needs
+re-grading, because a phrase's percentile floor is only meaningful against
+the phrases beside it. Three phrases were REMOVED for failing that grading -
+a boat, a vehicle, a bird, right 2, 1 and about 3 times out of the six
+photographs the library scores highest for each - and removing them cost
+nothing: the same two samples of 36 caption 11 and 7 either way.
+
+### Beat sync finds note attacks and is not a beat tracker
+
+There is no tempo estimate, no bar and no downbeat. On the CC0 solo piano in
+`music/` there is often no stable tempo to find. Measured across all 40
+tracks: 5,325 onsets over 2,285 seconds, 2.33 a second, mean gap 0.43 s
+against a 0.30 s snapping tolerance - so most cuts land on a note and the
+occasional one does not move at all. A percussive library would want a real
+tempo tracker, and that is the point at which taking a dependency on librosa
+would be the right call rather than the lazy one.
+
+### The film path costs about 90 seconds a memory
+
+Every frame is composed in Python and piped to ffmpeg as raw video - 11 MB a
+frame at a 2560-wide canvas, about 1,600 frames for a 63-second memory. The
+alternative was an `xfade`/`zoompan` filtergraph, which `write_mp4` already
+records as breaking differently on every ffmpeg build and which CI could not
+test at all. `--style cuts` keeps the old path for anyone who wants the
+throughput.
+
+### The GPT caption layer has never been run against the live API in this milestone
+
+`ShotFacts`, the per-photograph veto, the terms in the payload and the cache
+are all exercised by `tests/test_captioning.py` against a fake transport, and
+the fake returns real strings that are really verified - it is not a mock
+asserting it was called. But no key was available while this was built, so
+**the live path is untested since the payload changed.** The first thing to do
+with a key is run one memory with `--captions gpt` and read what comes back.

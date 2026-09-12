@@ -290,13 +290,15 @@ def test_the_subject_floor_is_higher_than_the_setting_floor():
 
     An object claim asserts a particular thing is present; a setting is
     supported by the whole frame. At one floor of 0.97, three of twelve
-    hand-graded captions named a vehicle that was not there.
+    hand-graded captions named a vehicle that was not there - and the vehicle
+    term is gone now, because at 0.995 it was still only right one time in
+    six.
     """
     assert vocab.FACET_PERCENTILE[vocab.SUBJECT] > vocab.FACET_PERCENTILE[vocab.SETTING]
-    at_setting_floor = _scores(a_bus_or=vocab.FACET_PERCENTILE[vocab.SETTING])
+    at_setting_floor = _scores(tall_trees=vocab.FACET_PERCENTILE[vocab.SETTING])
     assert vocab.choose(at_setting_floor).terms == ()
-    at_subject_floor = _scores(a_bus_or=vocab.FACET_PERCENTILE[vocab.SUBJECT])
-    assert [t.says for t in vocab.choose(at_subject_floor).terms] == ["A vehicle"]
+    at_subject_floor = _scores(tall_trees=vocab.FACET_PERCENTILE[vocab.SUBJECT])
+    assert [t.says for t in vocab.choose(at_subject_floor).terms] == ["Trees"]
 
 
 def test_two_settings_too_close_together_say_nothing():
