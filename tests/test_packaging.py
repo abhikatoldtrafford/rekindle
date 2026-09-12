@@ -294,3 +294,14 @@ def test_the_command_a_non_rich_caller_gets_is_runnable(monkeypatch):
     monkeypatch.setattr(extras, "in_source_checkout", lambda: False)
     monkeypatch.setattr(extras, "in_pipx", lambda: False)
     assert "\\" not in extras.install_command("semantic")
+
+
+def test_the_two_version_strings_agree():
+    """`pyproject.toml` and `rekindle.__version__` are written separately, and
+    `release.yml` only checks the tag against the BUILT wheel - so a stale
+    `__version__` ships happily and `rekindle --version` then lies about which
+    release is running. Caught while bumping 0.1.0 -> 0.1.1, where the second
+    string was missed."""
+    import rekindle
+
+    assert rekindle.__version__ == PROJECT["version"]
