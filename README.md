@@ -24,19 +24,15 @@ Point it at a folder. That's the whole setup.
 
 ## 🎬 What comes out
 
-<!--
-  GALLERY SLOTS - drop a GIF in docs/assets/ and swap the line beneath it.
-  Every memory below is real output; see docs/gallery.md.
--->
-
 |  |  |
 |---|---|
-| **Kashmir** · an album becomes a trip<br>_24 photos · May 2015_<br>`--recipe album_story --key "Kashmir"` | **Maa: then and now**<br>_2 photos · Dec 2010 → Sep 2026_<br>`--recipe then_and_now --key "Maa"` |
-| **Avyan over the years**<br>_24 photos · one child, every year_<br>`--recipe person_years --key "Avyan"` | **Every October**<br>_24 photos · 2013 → 2022_<br>`--recipe on_this_month --key "10"` |
+| <img src="docs/assets/2017.webp" width="100%"><br>**2017** · a year in fifteen frames<br>_Himalayas, May → December_<br>`rekindle memory --recipe year_in_review --key 2017` | <img src="docs/assets/gopalpur.webp" width="100%"><br>**Gopalpur** · an album becomes a trip<br>_24 photos · August 2025_<br>`rekindle memory --recipe album_story --key Gopalpur` |
+| <img src="docs/assets/11-june.webp" width="100%"><br>**11 June** · the same date, every year<br>_2023 → 2026_<br>`rekindle memory --recipe on_this_day --key 06-11` | <img src="docs/assets/24-december-kolkata.webp" width="100%"><br>**24 December in Kolkata**<br>_10 photos_<br>`rekindle memory --recipe album_story --key "24dec in Kolkata"` |
 
-> 🚧 **Gallery GIFs land here.** The samples above are generated from a real
-> 19,480-photo library; the images are being selected for publication. Run the
-> commands on your own library and you'll get the equivalent in about a minute.
+*Real output from a 19,318-photo library, rendered by the commands beneath them.
+Each is the WebP preview; the MP4 carries the full resolution, the music and the
+Ken Burns motion. See [docs/gallery.md](docs/gallery.md).*
+
 
 ---
 

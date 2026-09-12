@@ -1,0 +1,10 @@
+# The repo-wide rules ignore every image extension, deliberately: this is a
+# public repository and the library it indexes is somebody's family.
+#
+# Published gallery images are therefore un-ignored ONE FILE AT A TIME, by
+# name. Never widen this to a pattern - a `*.webp` here would silently publish
+# whatever anyone happened to drop in the folder.
+!11-june.webp
+!2017.webp
+!gopalpur.webp
+!24-december-kolkata.webp

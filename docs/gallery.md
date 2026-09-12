@@ -86,8 +86,26 @@ resolution, and raising the resolution grows the file fast. For a README:
 
 ## What is in this repo's gallery
 
-Nothing yet. The samples in the README were generated from a real 19,480-photo
-library and are being selected for publication under the rule above. When they
-land they will live in `docs/assets/`, and this file will say which recipe and
-which command produced each one — so every image in the README can be traced
-back to a command you can run yourself.
+Four memories, published with their owner's explicit approval. Each is the WebP
+preview at 900px; the MP4 the same command produces carries the full resolution,
+the music and the Ken Burns motion.
+
+| Image | Recipe | Command |
+|---|---|---|
+| `2017.webp` | year_in_review | `rekindle memory --recipe year_in_review --key 2017 --public-safe` |
+| `11-june.webp` | on_this_day | `rekindle memory --recipe on_this_day --key 06-11 --public-safe` |
+| `gopalpur.webp` | album_story | `rekindle memory --recipe album_story --key Gopalpur` |
+| `24-december-kolkata.webp` | album_story | `rekindle memory --recipe album_story --key "24dec in Kolkata"` |
+
+The first two were built with `--public-safe` and then filtered frame by frame:
+every shot was re-checked against the index directly, run through the face
+detector, and any frame with more detected faces than tagged people was dropped.
+`11 June` went from 8 shots to 6 that way; `2017` from 24 to 15 — one of the
+discarded frames was tagged with a single person and contained **eighteen**
+detected faces.
+
+The last two were **not** filtered. They are published as ordinary memories of
+the owner's own family and friends, by their decision. That is the normal case
+for this tool: most people building a memory of a holiday are not trying to
+exclude the people they went with. `--public-safe` exists for the narrower case
+of publishing to a public repository, and it is opt-in for that reason.
