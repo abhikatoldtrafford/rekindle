@@ -15,7 +15,7 @@ import contextlib
 import shutil
 import subprocess
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -79,8 +79,15 @@ def write_mp4(
     has_title: bool = True,
     music: Path | None = None,
     ffmpeg: str | None = None,
+    on_still: Callable[[int, int], None] | None = None,
 ) -> Mp4Result:
     """Encode frames to H.264. Never raises; reports instead.
+
+    `on_still(done, total)` is called as each frame is written out as a PNG.
+    It exists because this call is 70% of a web render's wall clock on the
+    reference machine and a caller drawing a progress bar has, without it,
+    nothing to draw between "started" and "finished". It reports the PNG pass
+    only: ffmpeg itself is one subprocess and is not instrumented here.
 
     Uses the concat demuxer with per-image durations rather than an `xfade`
     filter chain. Crossfades across 24 inputs need a 24-deep filtergraph whose
@@ -103,6 +110,8 @@ def write_mp4(
         for i, frame in enumerate(frames):
             still = work / f"{i:04d}.png"
             frame.convert("RGB").resize(canvas, Image.Resampling.LANCZOS).save(still)
+            if on_still is not None:
+                on_still(i + 1, len(frames))
             hold = title_seconds if (has_title and i == 0) else seconds
             # The concat demuxer needs POSIX-style forward slashes even on
             # Windows, and quotes around the path for names containing spaces.

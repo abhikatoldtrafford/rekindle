@@ -45,10 +45,33 @@ function element(tag, className, content) {
 
 function say(node, message, bad) {
   text(node, message);
-  node.style.color = bad ? "var(--bad)" : "";
+  node.classList.toggle("is-bad", Boolean(bad));
+}
+
+/* Set the stagger index a card's animation-delay is computed from. Capped,
+   because a 400-photo cut grid at 24ms a card would take ten seconds to
+   finish arriving, and the point of the stagger is that things feel handled -
+   not that the last row is still landing after you have scrolled to it. */
+const STAGGER_CAP = 26;
+function stagger(node, index) {
+  node.style.setProperty("--i", String(Math.min(index, STAGGER_CAP)));
 }
 
 /* ------------------------------------------------------------------ status */
+
+/* A filename, read back as a title. Ordering prefixes and the extension go,
+ * hyphens become spaces, and "op" and "no" get their stops back. Nothing here
+ * is guessed about the music: it is the same string with the filing removed.
+ */
+function trackName(filename) {
+  return filename
+    .replace(/\.[^.]+$/, "")
+    .replace(/^\d+[-_]/, "")
+    .replace(/[-_]+/g, " ")
+    .replace(/\bop\b/g, "op.")
+    .replace(/\bno\b/g, "no.")
+    .replace(/^./, (c) => c.toUpperCase());
+}
 
 async function loadStatus() {
   let status;
@@ -70,13 +93,25 @@ async function loadStatus() {
   const withheld = Object.entries(status.withheld_by_reason || {})
     .map(([reason, n]) => `${n} ${reason.replace(/_/g, " ")}`).join(", ");
   text($("library"),
-    `${status.photos.toLocaleString()} photos available` +
-    (status.withheld ? ` · ${status.withheld} withheld by the guardrails (${withheld})` : "") +
+    `${status.photos.toLocaleString()} photographs` +
+    (status.withheld ? ` · ${status.withheld} withheld (${withheld})` : "") +
     (status.unfingerprinted ? ` · ${status.unfingerprinted} not fingerprinted` : ""));
+
+  // The subtitle under the wordmark. A count and a span of years is the
+  // shortest true description of somebody's library, and it is the line that
+  // makes the page theirs rather than a product's.
+  const span = status.span || [];
+  text($("library-span"),
+    `${status.photos.toLocaleString()} photographs` +
+    (span.length === 2 ? ` · ${span[0]}–${span[1]}` : ""));
 
   const music = $("music");
   music.replaceChildren(new Option("silence", ""));
-  (status.music || []).forEach((name) => music.add(new Option(name, name)));
+  // The VALUE stays the filename the server resolves; only the label is
+  // rewritten. "18-nocturne-op-9-no-2-in-e-flat-major.mp3" is a filename, and
+  // a page that is asking somebody to pick music for their family
+  // photographs should show them music.
+  (status.music || []).forEach((name) => music.add(new Option(trackName(name), name)));
 
   if (!status.semantic_installed) {
     $("mode-semantic").disabled = true;
@@ -87,6 +122,43 @@ async function loadStatus() {
     say($("prompt-note"), status.semantic_note || "");
   }
   loadOffers();
+  loadSuggestions();
+}
+
+/* The empty state, which is the hardest screen on the page: an input with a
+ * placeholder teaches nothing, and a canned list of examples teaches somebody
+ * else's library. Every row here was counted off THIS index by
+ * `api.suggestions`, and each carries the count it was chosen on - so the
+ * page is not recommending, it is reporting what is in there.
+ *
+ * A failure is silent by design. The suggestions are a teaching aid; an error
+ * where they should be would be a worse first screen than nothing at all, and
+ * the prompt box above them works either way.
+ */
+async function loadSuggestions() {
+  let payload;
+  try {
+    payload = await api("/api/suggestions");
+  } catch {
+    return;
+  }
+  const box = $("suggestions");
+  box.replaceChildren();
+  (payload.suggestions || []).forEach((row, i) => {
+    const button = element("button", "suggestion");
+    button.type = "button";
+    stagger(button, i);
+    button.appendChild(element("span", "text", row.text));
+    button.appendChild(element("span", "why", row.note));
+    button.addEventListener("click", () => {
+      // Fill the box as well as running it. Clicking teaches what a prompt
+      // looks like; leaving the words behind lets it be edited into the next
+      // one, which is how somebody gets from "mountains" to "mountains 2015".
+      $("prompt").value = row.text;
+      build({ prompt: row.text });
+    });
+    box.appendChild(button);
+  });
 }
 
 async function loadOffers() {
@@ -122,31 +194,63 @@ async function loadOffers() {
 
 /* ---------------------------------------------------------------- building */
 
+/* Where each stage of a build sits on the bar.
+ *
+ * A prompt build is four and a half seconds of work with one countable part
+ * in the middle - one CLIP query per visual tag - so the bar advances for
+ * real across the search and steps between fixed marks either side of it. The
+ * marks are not a guess at duration; they are the ORDER of the stages, and
+ * the countable stretch is the wide one because it is the one that takes the
+ * time.
+ */
+const BUILD_MARKS = { parse: 0.04, tags: 0.12, searchFrom: 0.12, searchTo: 0.85, compose: 0.93 };
+
+function setMeter(id, fraction, indeterminate) {
+  const bar = $(id);
+  bar.classList.toggle("indeterminate", Boolean(indeterminate));
+  if (!indeterminate) bar.style.width = `${Math.round(Math.max(0, Math.min(1, fraction)) * 100)}%`;
+}
+
 function build(params) {
   $("workshop").hidden = true;
+  document.body.classList.remove("has-memory");
+  // Building is a MODE. The empty state's teaching aids are for somebody who
+  // has not asked for anything yet, and leaving them up during a 4.5-second
+  // search puts the one thing that is happening below everything that is not.
+  document.body.classList.add("is-building");
   $("progress").hidden = false;
   $("log").replaceChildren();
   text($("stage"), "starting…");
+  setMeter("build-bar", BUILD_MARKS.parse, false);
   $("prompt-go").disabled = true;
+  $("progress").scrollIntoView({ behavior: "smooth", block: "nearest" });
 
   const query = new URLSearchParams(params);
   query.set("t", TOKEN);
   const stream = new EventSource(`/api/build?${query.toString()}`);
-  const note = (line) => $("log").appendChild(element("li", null, line));
+  let logged = 0;
+  const note = (line, loud) => {
+    const item = element("li", loud ? "loud" : null, line);
+    stagger(item, logged++);
+    $("log").appendChild(item);
+  };
 
   stream.addEventListener("stage", (event) => text($("stage"), JSON.parse(event.data).message));
   stream.addEventListener("tags", (event) => {
     const data = JSON.parse(event.data);
+    setMeter("build-bar", BUILD_MARKS.tags, false);
     note(`${data.tags.length} visual descriptions, from ${data.source}: ${data.tags.join(" · ")}`);
     if (data.weak) {
-      note("! Nothing describes this prompt visually, so your words were searched directly. " +
-           "That is the measured-bad path.");
+      note("Nothing describes this prompt visually, so your words were searched directly. " +
+           "That is the measured-bad path.", true);
     }
     if (data.months && data.months.length) note(`narrowed to months ${data.months.join(", ")}`);
   });
   stream.addEventListener("searched", (event) => {
     const data = JSON.parse(event.data);
     text($("stage"), `searched ${data.done} of ${data.of}: ${data.tag}`);
+    const span = BUILD_MARKS.searchTo - BUILD_MARKS.searchFrom;
+    setMeter("build-bar", BUILD_MARKS.searchFrom + span * (data.done / (data.of || 1)), false);
     note(`${data.tag} → ${data.hits} hits`);
   });
   stream.addEventListener("found", (event) => {
@@ -155,20 +259,27 @@ function build(params) {
     data.seed_days.forEach((day) => note(`  ${day.day} — ${day.hits} photos, ${day.tags} descriptions`));
     if (data.albums.length) note(`your own albums added whole: ${data.albums.join(", ")}`);
     if (data.unmatched.length) {
-      note(`! ${data.unmatched.join(", ")} narrowed nothing — searched as a picture only. ` +
-           "rekindle has no gazetteer, so a place name never filtered anything.");
+      note(`${data.unmatched.join(", ")} narrowed nothing — searched as a picture only. ` +
+           "rekindle has no gazetteer, so a place name never filtered anything.", true);
     }
     note(`tag agreement ${(data.agreement * 100).toFixed(0)}% — measured NOT to tell you whether ` +
          "the concept is in your library, so nothing is refused on it.");
   });
-  stream.addEventListener("shot", () => text($("stage"), "composing the memory…"));
+  stream.addEventListener("shot", () => {
+    text($("stage"), "composing the memory…");
+    setMeter("build-bar", BUILD_MARKS.compose, false);
+  });
   stream.addEventListener("ready", (event) => {
     stream.close();
+    setMeter("build-bar", 1, false);
+    document.body.classList.remove("is-building");
     $("prompt-go").disabled = false;
     adopt(JSON.parse(event.data));
   });
   stream.addEventListener("error", (event) => {
     stream.close();
+    setMeter("build-bar", 0, false);
+    document.body.classList.remove("is-building");
     $("prompt-go").disabled = false;
     if (event.data) {
       const data = JSON.parse(event.data);
@@ -185,6 +296,9 @@ function adopt(payload) {
   state = payload;
   $("progress").hidden = true;
   $("workshop").hidden = false;
+  // Collapses the hero and brings the masthead wordmark up in its place, so
+  // the page stops being a title card the moment it has a memory to be about.
+  document.body.classList.add("has-memory");
   draw();
 }
 
@@ -194,7 +308,11 @@ function candidate(hash) {
 
 function draw() {
   text($("chosen-count"), `${state.order.length} of ${state.max_shots}`);
-  text($("memory-sub"), `${state.title} — ${state.subtitle}` + (state.public_safe ? " · public-safe" : ""));
+  // Title and subtitle are set apart rather than joined with a dash: the
+  // subtitle is almost always a span of dates, and dates are a caption under
+  // a title, not a continuation of it.
+  text($("memory-title"), state.title);
+  text($("memory-sub"), state.subtitle + (state.public_safe ? " · public-safe" : ""));
 
   const banner = $("banner");
   banner.hidden = !state.note;
@@ -214,7 +332,7 @@ function drawChosen() {
   state.order.forEach((hash, position) => {
     const info = candidate(hash);
     if (!info) return;
-    const card = photoCard(info, { draggable: true, position });
+    const card = photoCard(info, { draggable: true, position, index: position, quiet: true });
     if (info.reason === "added_by_you") card.classList.add("added");
     const actions = element("div", "actions");
     actions.appendChild(action("Remove", () => edit({ op: "remove", file_hash: hash })));
@@ -260,8 +378,8 @@ function drawCut() {
       "or search for what you are looking for.");
     grid.parentElement.insertBefore(note, grid);
   }
-  shown.slice(0, LIMIT).forEach((info) => {
-       const card = photoCard(info, {});
+  shown.slice(0, LIMIT).forEach((info, index) => {
+       const card = photoCard(info, { index });
        const actions = element("div", "actions");
        actions.appendChild(action("Put it in", () => edit({ op: "add", file_hash: info.file_hash })));
        if (info.instead_of) {
@@ -273,9 +391,13 @@ function drawCut() {
      });
 }
 
-function photoCard(info, { draggable = false, position = null } = {}) {
+//: What `draft.py` calls a photograph the engine picked on its own.
+const DEFAULT_REASON = "chosen_by_the_engine";
+
+function photoCard(info, { draggable = false, position = null, index = 0, quiet = false } = {}) {
   const card = element("div", "card");
   card.dataset.hash = info.file_hash;
+  stagger(card, index);
   if (draggable) card.draggable = true;
 
   const image = document.createElement("img");
@@ -291,7 +413,13 @@ function photoCard(info, { draggable = false, position = null } = {}) {
 
   const body = element("div", "body");
   const when = info.taken_at_local ? info.taken_at_local.slice(0, 10) : "no date";
-  body.appendChild(element("div", "why", info.reason.replace(/_/g, " ")));
+  // In the chosen grid every card but an overruled one says "chosen by the
+  // engine", and twenty-four identical labels carry no information while
+  // costing a line of type each. Suppressed there, so that when one DOES say
+  // something else it is the thing you see.
+  if (!(quiet && info.reason === DEFAULT_REASON)) {
+    body.appendChild(element("div", "why", info.reason.replace(/_/g, " ")));
+  }
   const detail = [when];
   if (info.people.length) detail.push(info.people.slice(0, 2).join(", "));
   if (info.has_gps) detail.push("GPS");
@@ -312,6 +440,15 @@ function action(label, handler) {
 async function edit(payload) {
   try {
     adopt(await post("/api/edit", Object.assign({ session_id: state.session_id }, payload)));
+    // The poster is a picture of a film that was rendered from the memory as
+    // it was. Change the memory and it is a picture of something else, so it
+    // goes - leaving it up would be the page asserting something untrue about
+    // what is on disk.
+    if (!$("poster").hidden) {
+      $("poster").hidden = true;
+      $("render-progress").hidden = true;
+      say($("render-note"), "You have changed the memory since that render. Render it again.");
+    }
   } catch (error) {
     say($("banner"), error.message, true);
     $("banner").hidden = false;
@@ -388,13 +525,13 @@ function drawResults() {
   const grid = $("results");
   grid.replaceChildren();
   const chosen = new Set(state ? state.order : []);
-  results.forEach((hit) => {
+  results.forEach((hit, index) => {
     const info = candidate(hit.file_hash) || {
       file_hash: hit.file_hash, caption: "", taken_at_local: null,
       state: "available", reason: hit.why || "found", name: hit.file_hash.slice(0, 12),
       people: [], albums: [], has_gps: false, favorite: false, burst: [], instead_of: "",
     };
-    const card = photoCard(info, {});
+    const card = photoCard(info, { index });
     const actions = element("div", "actions");
     if (chosen.has(hit.file_hash)) {
       actions.appendChild(element("span", "muted", "already in the memory"));
@@ -411,9 +548,9 @@ function showBurst(info) {
   say($("search-note"), `${info.burst.length} frames were taken as one burst; rekindle kept the sharpest. Pick another and it swaps in place.`);
   const grid = $("results");
   grid.replaceChildren();
-  info.burst.forEach((hash) => {
+  info.burst.forEach((hash, index) => {
     const detail = candidate(hash) || { file_hash: hash, caption: "", taken_at_local: null, state: "available", reason: hash === info.file_hash ? "kept" : "near duplicate", name: hash.slice(0, 12), people: [], albums: [], has_gps: false, favorite: false, burst: [], instead_of: "" };
-    const card = photoCard(detail, {});
+    const card = photoCard(detail, { index });
     const actions = element("div", "actions");
     if (hash === info.file_hash) {
       actions.appendChild(element("span", "muted", "this is the one in the memory"));
@@ -443,22 +580,62 @@ function drawPace() {
 });
 $("music").addEventListener("change", () => edit({ op: "pace", music: $("music").value }));
 
+/* The render is a blocking POST that can run past a minute, so the page
+ * learns nothing from the response it is waiting on. It polls
+ * /api/render/progress on a second connection instead - `ThreadingHTTPServer`
+ * answers both - and the server computes the fraction from phase weights it
+ * MEASURED rather than from a guess.
+ *
+ * One phase is honest about being unknowable: ffmpeg is a single subprocess
+ * and nothing counts inside it, so the bar sweeps there instead of inventing
+ * a position. It is 47% of a render, which is exactly why it must not lie.
+ */
+const RENDER_POLL_MS = 400;
+
+function pollRenderProgress(sessionId) {
+  let live = true;
+  const tick = async () => {
+    if (!live) return;
+    try {
+      const payload = await api(
+        `/api/render/progress?session_id=${encodeURIComponent(sessionId)}&t=${encodeURIComponent(TOKEN)}`
+      );
+      if (!live) return;
+      const counted = payload.total > 0 ? ` ${payload.done} of ${payload.total}` : "";
+      text($("render-phase"), (payload.label || "starting") + counted);
+      setMeter("render-bar", payload.fraction, payload.phase === "mp4");
+    } catch {
+      /* A poll that fails changes nothing: the render itself is the POST. */
+    }
+    if (live) setTimeout(tick, RENDER_POLL_MS);
+  };
+  tick();
+  return () => {
+    live = false;
+  };
+}
+
 $("render").addEventListener("click", async () => {
   $("render").disabled = true;
+  $("render-progress").hidden = false;
+  $("poster").hidden = true;
+  text($("render-phase"), "starting");
+  setMeter("render-bar", 0, false);
   say($("render-note"), $("no-mp4").checked
-    ? "rendering the WebP and GIF…"
-    : "rendering… the MP4 pass decodes every shot at full size and can take a minute. " +
+    ? "Writing the WebP and the GIF."
+    : "The MP4 pass decodes every shot at full size and hands it to ffmpeg. " +
       "Tick “skip the MP4” for a quick look.");
+  const stop = pollRenderProgress(state.session_id);
   try {
     adopt(await post("/api/render", { session_id: state.session_id, no_mp4: $("no-mp4").checked }));
-    const result = state.last_render;
-    say($("render-note"),
-      `${result.shots} shots (${result.preview_rendered} in the preview) · WebP ${Math.round(result.webp_bytes / 1024)} KB` +
-      (result.mp4 ? ` · MP4 ${Math.round(result.mp4_bytes / 1024)} KB` : result.mp4_skipped ? " · no MP4 (ffmpeg not on PATH)" : "") +
-      (result.withheld ? ` · ${result.withheld} shots withheld by the guardrails` : "") +
-      ` → ${result.folder}`);
-    showPreview(result);
+    stop();
+    setMeter("render-bar", 1, false);
+    text($("render-phase"), "done");
+    showRendered(state.last_render);
   } catch (error) {
+    stop();
+    setMeter("render-bar", 0, false);
+    $("render-progress").hidden = true;
     say($("render-note"), error.message, true);
   }
   $("render").disabled = false;
@@ -470,24 +647,86 @@ $("dismiss").addEventListener("click", async () => {
   catch (error) { say($("render-note"), error.message, true); }
 });
 
-function showPreview(result) {
+/* A finished memory presents itself.
+ *
+ * The old ending was a sentence with a file path in it, which is the correct
+ * information and the wrong moment: something that took a minute and is made
+ * of somebody's photographs should arrive as an object, not as a log line. So
+ * the render lands as a poster - the first photograph of the film behind a
+ * scrim, the title set as a title, the dates under it as a subtitle, and one
+ * thing to press.
+ *
+ * The path is still there. It moved to the line under the poster, with the
+ * sizes and the shot count, where it is reference rather than result.
+ */
+function showRendered(result) {
+  if (!result) return;
+  const box = $("poster");
+  box.hidden = false;
+  $("preview").hidden = true;
+  $("preview").replaceChildren();
+  $("poster-play").hidden = !(result.webp || result.mp4);
+
+  // The film's own first photograph, which is what a poster frame is. The
+  // scrim and the desaturation are in the stylesheet, so a bright shot cannot
+  // make the title unreadable.
+  const first = (state.order || [])[0];
+  const still = $("poster-img");
+  if (first) {
+    still.src = thumb(first, 1200);
+    still.alt = "";
+  } else {
+    still.removeAttribute("src");
+  }
+
+  text($("poster-title"), state.title);
+  text($("poster-sub"), state.subtitle);
+
+  const seconds = (state.pace.title_ms + result.shots * state.pace.frame_ms) / 1000;
+  const bits = [
+    `${result.shots} shots`,
+    `${Math.floor(seconds / 60)}:${String(Math.round(seconds % 60)).padStart(2, "0")}`,
+    state.pace.music ? trackName(state.pace.music) : "silent",
+    `WebP ${Math.round(result.webp_bytes / 1024)} KB`,
+  ];
+  if (result.mp4) bits.push(`MP4 ${Math.round(result.mp4_bytes / 1024)} KB`);
+  else if (result.mp4_skipped) bits.push("no MP4 — ffmpeg is not on PATH");
+  if (result.withheld) bits.push(`${result.withheld} shots withheld by the guardrails`);
+  text($("poster-meta"), bits.join("  ·  "));
+  // On its own line and in its own case. The stats line is set uppercase, and
+  // a filesystem path put through `text-transform` is a path you cannot type.
+  text($("poster-path"), result.folder);
+  say($("render-note"), "");
+}
+
+/* Press play and the poster becomes the film. The MP4 is preferred when there
+ * is one: it is the version with the music, and the WebP has no audio at all.
+ */
+function playRendered() {
+  const result = state && state.last_render;
+  if (!result) return;
   const box = $("preview");
   box.replaceChildren();
   const base = `/api/output/${state.session_id}`;
   const stamp = Date.now(); // a re-render writes the same names; defeat the cache
-  if (result.webp) {
-    const image = document.createElement("img");
-    image.src = `${base}/${result.webp}?t=${encodeURIComponent(TOKEN)}&v=${stamp}`;
-    image.alt = "the memory, as an animated WebP";
-    box.appendChild(image);
-  }
+  const source = (name) => `${base}/${name}?t=${encodeURIComponent(TOKEN)}&v=${stamp}`;
   if (result.mp4) {
     const video = document.createElement("video");
     video.controls = true;
-    video.src = `${base}/${result.mp4}?t=${encodeURIComponent(TOKEN)}&v=${stamp}`;
+    video.autoplay = true;
+    video.src = source(result.mp4);
     box.appendChild(video);
+  } else if (result.webp) {
+    const image = document.createElement("img");
+    image.src = source(result.webp);
+    image.alt = "the memory, as an animated WebP";
+    box.appendChild(image);
   }
+  box.hidden = false;
+  $("poster-play").hidden = true;
 }
+
+$("poster-play").addEventListener("click", playRendered);
 
 function drawReproduce() {
   const box = $("reproduce");
@@ -554,7 +793,12 @@ function openSheet(info) {
     ["albums", info.albums.length ? info.albums.join(", ") : "none"],
     ["public-safe", info.public_safe ? "yes" : "no"],
   ];
-  rows.forEach(([label, value]) => body.appendChild(element("div", null, `${label}: ${value}`)));
+  rows.forEach(([label, value]) => {
+    const row = element("div");
+    row.appendChild(element("b", null, label));
+    row.appendChild(element("span", null, String(value)));
+    body.appendChild(row);
+  });
   $("sheet").hidden = false;
 }
 

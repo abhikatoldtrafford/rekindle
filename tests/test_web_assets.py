@@ -55,6 +55,77 @@ def test_the_page_loads_its_own_stylesheet_and_script():
     assert referenced == set(STATIC)
 
 
+def test_no_asset_carries_a_stray_control_character():
+    """A byte you cannot see is a bug you cannot read.
+
+    An editing pass wrote literal 0x08 bytes into two regular expressions in
+    `app.js` - `/no/` became `/<BS>no<BS>/`, which silently matches "no"
+    ANYWHERE, so "nocturne" rendered as "no.cturne". The file looked correct
+    in every diff and every editor.
+    """
+    allowed = {0x09, 0x0A, 0x0D}
+    for name in ASSET_FILES:
+        text = (ASSETS / name).read_text(encoding="utf-8")
+        stray = sorted({ord(c) for c in text if ord(c) < 32 and ord(c) not in allowed})
+        assert not stray, f"{name} contains control bytes {[hex(c) for c in stray]}"
+
+
+#: `display` values that keep an element on the page.
+_SHOWING = re.compile(r"display:\s*(?!none)")
+
+
+def test_a_panel_hidden_with_the_attribute_is_actually_hidden():
+    """`[hidden]` is an author-defeatable UA rule, and every panel on this page
+    is shown and hidden with it.
+
+    `.sheet` sets `display: grid`, which beats the browser's own
+    `[hidden] { display: none }` - so the detail overlay, a full-viewport
+    95%-opaque scrim, was painted over the entire page from load. It went
+    unnoticed because the stylesheet was being answered 403 and no rule
+    applied at all.
+
+    Structural rather than a search for one line: it finds the elements that
+    are hidden by attribute, finds the selectors that would show them, and
+    only then insists on the override.
+    """
+    html = (ASSETS / "index.html").read_text(encoding="utf-8")
+    # Comments out first. This file explains the rule it is about in prose,
+    # and a scan that reads comments finds the explanation instead of the
+    # declaration - which is a test that passes on a stylesheet describing a
+    # fix nobody applied.
+    css = re.sub(r"/\*.*?\*/", "", (ASSETS / "app.css").read_text(encoding="utf-8"), flags=re.S)
+
+    # Names on elements carrying the `hidden` attribute.
+    hidden_names = set()
+    for tag in re.findall(r"<[a-z]+[^>]*\shidden\s*/?>", html):
+        for attr, pattern in (("id", r'id="([^"]+)"'), ("class", r'class="([^"]+)"')):
+            found = re.search(pattern, tag)
+            if found:
+                prefix = "#" if attr == "id" else "."
+                hidden_names.update(prefix + part for part in found.group(1).split())
+    assert hidden_names, "nothing on this page is hidden by attribute; the test is stale"
+
+    # Selectors whose block sets a display that would keep them visible.
+    at_risk = set()
+    for selector, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+        if not _SHOWING.search(body):
+            continue
+        for name in hidden_names:
+            if re.search(re.escape(name) + r"(?![\w-])", selector):
+                at_risk.add(name)
+    if not at_risk:
+        return
+
+    override = re.search(r"\[hidden\][^{}]*\{([^{}]*)\}", css)
+    assert override, (
+        f"{sorted(at_risk)} are hidden with the attribute and given a display "
+        "by an author rule, so they are never actually hidden. The stylesheet "
+        "needs a [hidden] rule that wins."
+    )
+    body = override.group(1).replace(" ", "")
+    assert "display:none!important" in body, override.group(0)
+
+
 def test_the_script_sends_the_token_on_every_call():
     """Without this header the page's own requests are refused, so a call
     written without it is a control that silently does nothing."""

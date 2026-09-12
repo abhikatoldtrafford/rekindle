@@ -16,7 +16,14 @@ import json
 
 import pytest
 
-from rekindle.web.server import build_app, free_port, serve_in_thread
+from rekindle.web.server import (
+    ASSETS,
+    STATIC,
+    TOKEN_PLACEHOLDER,
+    build_app,
+    free_port,
+    serve_in_thread,
+)
 from tests.fixtures.web import ALBUM, exclude_person, make_library
 
 
@@ -208,6 +215,53 @@ def test_the_page_and_its_assets_are_served_locally(running):
         assert marker not in text.replace("http://www.w3.org/2000/svg", "")
     status, _headers, script = client(app).request("GET", "/assets/app.js")
     assert status == 200 and b"rekindle" in script
+
+
+def test_the_page_carries_the_token_on_its_own_asset_urls(running):
+    """A <link> and a <script> cannot send a header, exactly as an <img>
+    cannot - so the shell has to hand the browser URLs that carry the token
+    in the query, the way thumbnails already do.
+
+    Without this the stylesheet and the script are answered 403 and the page
+    renders as unstyled markup with no behaviour at all. Every other test in
+    this file passes in that state, because they all fetch the assets with the
+    header a browser will never send.
+    """
+    app, _ = running
+    _status, _headers, body = client(app).request("GET", "/")
+    html = body.decode()
+    for name in STATIC:
+        assert f"/assets/{name}?t={app.config.token}" in html, name
+    assert TOKEN_PLACEHOLDER not in html
+
+    # And now fetch them the way the browser will: the URL out of the markup,
+    # no header at all.
+    for name in STATIC:
+        status, _headers, payload = client(app).request(
+            "GET", f"/assets/{name}?t={app.config.token}", token=False
+        )
+        assert status == 200, f"{name} is not reachable the way the page asks for it"
+        assert payload
+
+
+def test_the_token_is_never_written_into_the_file_on_disk():
+    """The substitution happens per request. A token in the source tree would
+    be a per-run secret committed to git."""
+    html = (ASSETS / "index.html").read_text(encoding="utf-8")
+    assert TOKEN_PLACEHOLDER in html
+    for name in STATIC:
+        assert f"/assets/{name}?t={TOKEN_PLACEHOLDER}" in html
+
+
+def test_a_shell_asset_url_still_needs_the_right_token(running):
+    """Stamping the token in must not have turned the assets into a public
+    route: the wrong token is still a 403."""
+    app, _ = running
+    for name in STATIC:
+        status, _headers, _body = client(app).request(
+            "GET", f"/assets/{name}?t=not-it", token=False
+        )
+        assert status == 403, name
 
 
 def test_assets_are_an_allow_list_not_a_path_join(running):

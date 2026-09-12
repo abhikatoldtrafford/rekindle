@@ -16,6 +16,7 @@ removes them from every spec already written, without editing any of them.
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -41,6 +42,18 @@ from rekindle.memory.spec import MemorySpec
 #: Same value `memory/cli.py` uses, for the same reason: something has to be
 #: chosen and a 4:3 SD frame is the least surprising.
 FALLBACK_CANVAS = (1280, 960)
+
+#: The phases `render_spec` reports through `progress`, in order. Named
+#: constants because the browser draws a bar from them and a typo in a phase
+#: name is a bar that silently never moves.
+PHASE_SPEC = "spec"
+PHASE_PREVIEW = "preview"
+PHASE_WEBP = "webp"
+PHASE_GIF = "gif"
+PHASE_VIDEO = "video"
+PHASE_STILLS = "stills"
+PHASE_MP4 = "mp4"
+PHASE_DONE = "done"
 
 SPEC_NAME = "memory.json"
 WEBP_NAME = "memory.webp"
@@ -118,11 +131,36 @@ class RenderResult:
         }
 
 
+#: `(phase, done, total)`. `total` is 0 for a phase with nothing to count.
+Progress = Callable[[str, int, int], None]
+
+
+def _counting(resolve, report: Progress, phase: str, total: int):
+    """Wrap `index.get` so the frame loop counts itself.
+
+    `build_frames` calls `resolve` exactly once per shot, at the top of its
+    loop, so wrapping it gives a real count of shots reached without
+    `frames.py` growing a progress parameter it has no other use for. The
+    count therefore runs one shot AHEAD of the decode, which is the right
+    direction to be wrong in: a bar that reaches the end a moment early beats
+    one that sits at 95% through the slowest frame.
+    """
+    done = {"n": 0}
+
+    def wrapped(file_hash: str):
+        done["n"] += 1
+        report(phase, done["n"], total)
+        return resolve(file_hash)
+
+    return wrapped
+
+
 def render_spec(
     spec: MemorySpec,
     index: MemoryIndex,
     folder: Path,
     options: RenderOptions | None = None,
+    progress: Progress | None = None,
 ) -> RenderResult:
     """Write memory.json, memory.webp, memory.gif and (if ffmpeg) memory.mp4.
 
@@ -133,9 +171,11 @@ def render_spec(
     thing it was printed beside.
     """
     options = options or RenderOptions()
+    report: Progress = progress or (lambda phase, done, total: None)
     folder.mkdir(parents=True, exist_ok=True)
     result = RenderResult(folder=folder, shots=len(spec.shots))
 
+    report(PHASE_SPEC, 0, 0)
     if options.write_spec:
         (folder / SPEC_NAME).write_text(spec.dumps(), encoding="utf-8")
 
@@ -145,35 +185,43 @@ def render_spec(
 
     preview_size = preview_canvas(canvas, options.preview_width or PREVIEW_WIDTH)
     result.preview_size = preview_size
-    frames, report = build_frames(
+    previewed = min(len(spec.shots), options.preview_frames or len(spec.shots))
+    frames, frame_report = build_frames(
         spec,
         preview_size,
-        resolve=index.get,
+        resolve=_counting(index.get, report, PHASE_PREVIEW, previewed),
         locate=index.resolve_path,
         limit=options.preview_frames,
     )
-    result.preview_rendered = report.rendered
-    result.dropped = dict(report.dropped)
-    result.examples = dict(report.names)
-    result.padded = report.placement.get(FIT_PAD, 0)
-    if report.rendered == 0:
+    result.preview_rendered = frame_report.rendered
+    result.dropped = dict(frame_report.dropped)
+    result.examples = dict(frame_report.names)
+    result.padded = frame_report.placement.get(FIT_PAD, 0)
+    if frame_report.rendered == 0:
+        report(PHASE_DONE, 0, 0)
         return result
 
+    report(PHASE_WEBP, 0, 0)
     result.webp_bytes = write_webp(
         frames, folder / WEBP_NAME, frame_ms=options.frame_ms, title_ms=options.title_ms
     )
     result.webp = folder / WEBP_NAME
+    report(PHASE_GIF, 0, 0)
     result.gif_bytes = write_gif(
         frames, folder / GIF_NAME, frame_ms=options.frame_ms, title_ms=options.title_ms
     )
     result.gif = folder / GIF_NAME
 
     if options.no_mp4:
+        report(PHASE_DONE, 0, 0)
         return result
 
     video_size = mp4_canvas(canvas, options.mp4_width or MP4_WIDTH)
     mp4_frames, mp4_report = build_frames(
-        spec, video_size, resolve=index.get, locate=index.resolve_path
+        spec,
+        video_size,
+        resolve=_counting(index.get, report, PHASE_VIDEO, len(spec.shots)),
+        locate=index.resolve_path,
     )
     result.video_rendered = mp4_report.rendered
     bed = resolve_music(options.music, memory_id=memory_id(spec.recipe, spec.key))
@@ -187,6 +235,9 @@ def render_spec(
         seconds=options.frame_ms / 1000.0,
         title_seconds=options.title_ms / 1000.0,
         music=bed,
+        on_still=lambda done, total: report(
+            PHASE_STILLS if done < total else PHASE_MP4, done, total
+        ),
     )
     if outcome.ok and outcome.path is not None:
         result.mp4 = outcome.path
@@ -195,7 +246,8 @@ def render_spec(
     result.mp4_error = outcome.error or ""
     # The full-resolution pass sees every shot, not just the preview's first
     # sixteen, so its drop counts are the complete ones when it ran.
-    if mp4_report.total_dropped >= report.total_dropped:
+    if mp4_report.total_dropped >= frame_report.total_dropped:
         result.dropped = dict(mp4_report.dropped)
         result.examples = dict(mp4_report.names)
+    report(PHASE_DONE, 0, 0)
     return result

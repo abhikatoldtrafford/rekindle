@@ -5,53 +5,119 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="no-referrer">
 <title>rekindle</title>
-<link rel="stylesheet" href="/assets/app.css">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ctext y='13' font-size='13'%3E%F0%9F%95%AF%3C/text%3E%3C/svg%3E">
+<!-- The token goes on the stylesheet and the script because a <link> and a
+     <script> cannot send a header, exactly as an <img> cannot. `server.py`
+     substitutes it; the file on disk never holds one. -->
+<link rel="stylesheet" href="/assets/app.css?t=__REKINDLE_TOKEN__">
+<!-- A drawn mark, inline. An icon font or an SVG file from a CDN would be the
+     one thing this page must never do: fetch. -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg viewBox='0 0 32 32' xmlns='http://www.w3.org/2000/svg'%3E%3Crect width='32' height='32' rx='7' fill='%23141416'/%3E%3Cpath fill='%23e0a54c' d='M16 4c1 5.4 4.3 7.7 6.1 11.1A8.3 8.3 0 1 1 8.3 21c0-4.2 3.2-6.4 4.5-10.5.7 3.3 1.8 5.1 3.3 6C15.3 12.5 15.1 8.4 16 4Z'/%3E%3C/svg%3E">
 </head>
 <body>
-<header>
-  <h1>rekindle</h1>
-  <div id="library" class="muted">reading your library&hellip;</div>
+
+<!-- The logotype, drawn once and used twice. A geometric monoline lowercase
+     built on an 18-unit x-height: eight glyphs of arcs and stems, so the
+     wordmark is a drawing this repository owns rather than a font somebody
+     else's server would have to send. -->
+<svg class="sprite" aria-hidden="true" focusable="false">
+  <symbol id="wordmark" viewBox="2 0 123 29">
+    <g fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M6 26V8M6 13.5c0-4 3-5.5 6.6-5.5"/>
+      <path d="M16 17h16M32 17a8 9 0 1 0 -3.4 7.4"/>
+      <path d="M36 3v23M48 11 36.5 20.5M41 16.5 49 26"/>
+      <path d="M54 8v18"/>
+      <path d="M59 26V8M59 15c0-4.6 3-7 7.5-7S74 10.4 74 15v11"/>
+      <ellipse cx="87" cy="17" rx="8" ry="9"/>
+      <path d="M95 3v23"/>
+      <path d="M101 3v23"/>
+      <path d="M106 17h16M122 17a8 9 0 1 0 -3.4 7.4"/>
+    </g>
+    <circle cx="54" cy="3.4" r="1.4" fill="currentColor"/>
+  </symbol>
+  <symbol id="ember" viewBox="0 0 32 32">
+    <path fill="currentColor" d="M16 4c1 5.4 4.3 7.7 6.1 11.1A8.3 8.3 0 1 1 8.3 21c0-4.2 3.2-6.4 4.5-10.5.7 3.3 1.8 5.1 3.3 6C15.3 12.5 15.1 8.4 16 4Z"/>
+  </symbol>
+  <symbol id="play" viewBox="0 0 32 32">
+    <path fill="currentColor" d="M12 8.5v15a1 1 0 0 0 1.53.85l11.5-7.5a1 1 0 0 0 0-1.7l-11.5-7.5A1 1 0 0 0 12 8.5Z"/>
+  </symbol>
+</svg>
+
+<header id="masthead">
+  <div class="masthead-mark">
+    <svg class="wordmark wordmark-sm" role="img" aria-label="rekindle"><use href="#wordmark"/></svg>
+  </div>
+  <div id="library" class="masthead-line">reading your library&hellip;</div>
 </header>
+
+<!-- ================================================================ the ask -->
+
+<section id="ask">
+  <div id="hero">
+    <svg class="wordmark wordmark-lg" role="img" aria-label="rekindle"><use href="#wordmark"/></svg>
+    <p id="library-span" class="hero-sub"></p>
+    <p class="hero-say">
+      Describe a memory and rekindle will find the photographs it is made of,
+      then cut them into a short film.
+    </p>
+  </div>
+
+  <form id="prompt-form" autocomplete="off">
+    <input id="prompt" type="text" placeholder="durga puja over the years" aria-label="Describe a memory">
+    <button type="submit" id="prompt-go">Build</button>
+  </form>
+  <div id="prompt-note" class="prose note"></div>
+
+  <!-- The empty state. Nobody knows what to type; these are counted off this
+       library, so every one of them has photographs behind it. -->
+  <div id="suggestions" class="suggestions"></div>
+
+  <details id="offers-box">
+    <summary>&hellip;or pick one of the memories this library already offers</summary>
+    <div id="offers-filter">
+      <input id="offers-search" type="text" placeholder="filter by title or key" aria-label="Filter offers">
+    </div>
+    <div id="offers" class="offers"></div>
+  </details>
+</section>
 
 <!-- The first-run offer. Hidden until /api/calibrate says to show it, and
      once dismissed or finished it never appears again: `should_offer` on the
      server is the single place that decides. -->
 <aside id="calibrate-offer" class="banner" hidden>
   <div id="calibrate-headline"></div>
-  <div class="controls" style="margin-top:0.6rem">
+  <div class="controls controls-tight">
     <button id="calibrate-start" type="button" class="primary">Calibrate to my photographs</button>
     <button id="calibrate-later" type="button">Not now</button>
     <button id="calibrate-never" type="button">Don&rsquo;t ask again</button>
   </div>
 </aside>
 
-<section id="calibrate" hidden>
+<section id="calibrate" class="sheetish" hidden>
   <div class="cal-head">
-    <h2 id="cal-title">Calibrating</h2>
+    <h2 id="cal-title" class="display">Calibrating</h2>
     <span id="cal-progress" class="pill"></span>
     <button id="cal-quit" type="button">Stop &mdash; my answers are saved</button>
   </div>
-  <p class="muted" id="cal-area"></p>
+  <p class="prose" id="cal-area"></p>
 
   <div id="cal-modes" class="chips"></div>
 
   <!-- blind judgement -->
   <div id="cal-blind" hidden>
     <p id="cal-question" class="cal-question"></p>
-    <p class="muted" id="cal-note"></p>
+    <p class="prose" id="cal-note"></p>
     <div id="cal-photos" class="cal-photos"></div>
-    <p class="muted" id="cal-caption"></p>
+    <p class="prose" id="cal-caption"></p>
     <div class="controls">
       <button id="cal-yes" type="button" class="danger"></button>
       <button id="cal-no" type="button" class="primary"></button>
     </div>
-    <p class="muted" id="cal-confidence"></p>
+    <p class="prose" id="cal-confidence"></p>
   </div>
 
   <!-- slider, with the consequence recomputed as it moves -->
   <div id="cal-slider" hidden>
-    <p class="muted" id="cal-tradeoff"></p>
+    <p class="prose" id="cal-tradeoff"></p>
     <div class="controls">
       <input id="cal-range" type="range" aria-label="Threshold">
       <output id="cal-value" class="pill"></output>
@@ -63,7 +129,7 @@
   <!-- show the default's effect, accept or nudge -->
   <div id="cal-default" hidden>
     <p id="cal-default-value"></p>
-    <p class="muted" id="cal-measured"></p>
+    <p class="prose" id="cal-measured"></p>
     <p id="cal-default-effect"></p>
   </div>
 
@@ -71,7 +137,7 @@
   <div id="cal-refusal" class="cal-refusal" hidden>
     <h3>This widens the publishing gate</h3>
     <p id="cal-refusal-meaning"></p>
-    <p class="muted">Type this sentence exactly to continue. Anything else cancels.</p>
+    <p class="prose">Type this sentence exactly to continue. Anything else cancels.</p>
     <p><code id="cal-refusal-phrase"></code></p>
     <div class="controls">
       <input id="cal-refusal-input" type="text" size="60" aria-label="Confirmation sentence">
@@ -80,7 +146,7 @@
     </div>
   </div>
 
-  <div class="controls" style="margin-top:1rem">
+  <div class="controls controls-loose">
     <button id="cal-apply" type="button" class="primary" hidden>Use this</button>
     <button id="cal-accept" type="button">Keep rekindle&rsquo;s value</button>
     <button id="cal-skip" type="button">Skip this one</button>
@@ -98,76 +164,104 @@
   </div>
 </section>
 
-<section id="ask">
-  <form id="prompt-form" autocomplete="off">
-    <input id="prompt" type="text" placeholder="durga puja over the years" aria-label="Describe a memory">
-    <button type="submit" id="prompt-go">Build</button>
-  </form>
-  <div id="prompt-note" class="muted"></div>
-  <details id="offers-box">
-    <summary>&hellip;or pick one of the memories this library already offers</summary>
-    <div id="offers-filter">
-      <input id="offers-search" type="text" placeholder="filter by title or key" aria-label="Filter offers">
-    </div>
-    <div id="offers" class="offers"></div>
-  </details>
-</section>
+<!-- ============================================================== the build -->
 
 <section id="progress" hidden>
+  <div class="eyebrow">Building</div>
   <div id="stage" class="stage"></div>
+  <div class="meter"><div id="build-bar" class="meter-fill"></div></div>
   <ul id="log" class="log"></ul>
 </section>
+
+<!-- ============================================================ the memory -->
 
 <main id="workshop" hidden>
   <div id="banner" class="banner" hidden></div>
 
+  <!-- The memory, presented as its own title card rather than as a field. -->
+  <section class="titlecard">
+    <div class="eyebrow">The memory</div>
+    <h1 id="memory-title" class="display display-xl"></h1>
+    <p id="memory-sub" class="titlecard-sub"></p>
+  </section>
+
+  <!-- The finished render. Hidden until there is one. -->
+  <section id="poster" class="poster" hidden>
+    <div class="poster-frame">
+      <img id="poster-img" alt="" class="poster-still">
+      <div class="poster-scrim"></div>
+      <div class="poster-caption">
+        <div class="eyebrow">Rendered</div>
+        <div id="poster-title" class="display display-lg"></div>
+        <div id="poster-sub" class="poster-dates"></div>
+      </div>
+      <button id="poster-play" type="button" class="poster-play" aria-label="Play this memory">
+        <svg class="icon" aria-hidden="true"><use href="#play"/></svg>
+        <span>Play</span>
+      </button>
+      <div id="preview" class="poster-media" hidden></div>
+    </div>
+    <div id="poster-meta" class="poster-meta"></div>
+    <div id="poster-path" class="poster-path"></div>
+  </section>
+
   <section class="panel">
-    <h2>In the memory <span id="chosen-count" class="pill"></span></h2>
-    <p class="muted" id="memory-sub"></p>
+    <div class="panel-head">
+      <h2 class="display">In the memory</h2>
+      <span id="chosen-count" class="pill"></span>
+    </div>
     <div id="chosen" class="grid chosen"></div>
-    <p class="muted hint">Drag a photo to reorder it. Click <b>Remove</b> to drop it &mdash; it moves
+    <p class="prose hint">Drag a photograph to reorder it. <b>Remove</b> drops it &mdash; it moves
       to the pile below and stays there until you put it back.</p>
   </section>
 
   <section class="panel">
-    <h2>Not in the memory <span id="cut-count" class="pill"></span></h2>
-    <p class="muted">Every photo the recipe considered and something rejected, with the reason.
-      You can overrule any of them.</p>
+    <div class="panel-head">
+      <h2 class="display">Not in the memory</h2>
+      <span id="cut-count" class="pill"></span>
+    </div>
+    <p class="prose">Every photograph the recipe considered and something rejected, with the
+      reason. You can overrule any of them.</p>
     <div id="cut-filter" class="chips"></div>
     <div id="cut" class="grid"></div>
   </section>
 
   <section class="panel">
-    <h2>Find more</h2>
+    <div class="panel-head"><h2 class="display">Find more</h2></div>
     <form id="search-form" autocomplete="off">
       <input id="search" type="text" placeholder="a name, an album, a date&hellip;" aria-label="Search the library">
       <label class="inline"><input type="radio" name="mode" value="metadata" checked> names &amp; dates</label>
       <label class="inline"><input type="radio" name="mode" value="semantic" id="mode-semantic"> describe it</label>
       <button type="submit">Search</button>
     </form>
-    <div id="search-note" class="muted"></div>
+    <div id="search-note" class="prose note"></div>
     <div id="results" class="grid"></div>
   </section>
 
   <section class="panel">
-    <h2>Pace, music and output</h2>
+    <div class="panel-head"><h2 class="display">Pace, music and output</h2></div>
     <div class="controls">
-      <label>Each photo holds
+      <label>Each photograph holds
         <input id="frame-ms" type="number" min="100" max="20000" step="100"> ms</label>
       <label>Title card holds
         <input id="title-ms" type="number" min="100" max="20000" step="100"> ms</label>
       <label>Music
         <select id="music"></select></label>
       <label class="inline"><input type="checkbox" id="no-mp4"> skip the MP4</label>
+    </div>
+    <div class="controls controls-loose">
       <button id="render" type="button" class="primary">Render</button>
       <button id="dismiss" type="button" class="danger">Never offer this again</button>
     </div>
-    <div id="render-note" class="muted"></div>
-    <div id="preview"></div>
+    <div id="render-progress" class="render-progress" hidden>
+      <div id="render-phase" class="render-phase"></div>
+      <div class="meter"><div id="render-bar" class="meter-fill"></div></div>
+    </div>
+    <div id="render-note" class="prose note"></div>
     <div id="reproduce" hidden>
       <h3>Reproduce this from a shell</h3>
       <pre id="reproduce-cmd"></pre>
-      <p class="muted">This renders the spec you just edited, not the search that started it &mdash;
+      <p class="prose">This renders the spec you just edited, not the search that started it &mdash;
         so it rebuilds exactly what you made, on any machine with this library.</p>
       <h3>Where it came from</h3>
       <pre id="origin-cmd"></pre>
@@ -175,7 +269,7 @@
   </section>
 
   <section class="panel">
-    <h2>What the guardrails did</h2>
+    <div class="panel-head"><h2 class="display">What the guardrails did</h2></div>
     <div id="guardrails" class="report"></div>
   </section>
 </main>
@@ -188,10 +282,11 @@
   </div>
 </div>
 
-<footer class="muted">
+<footer>
+  <svg class="footer-ember icon" aria-hidden="true"><use href="#ember"/></svg>
   Served from 127.0.0.1 only. Nothing on this page is fetched from the network.
 </footer>
 
-<script src="/assets/app.js"></script>
+<script src="/assets/app.js?t=__REKINDLE_TOKEN__"></script>
 </body>
 </html>

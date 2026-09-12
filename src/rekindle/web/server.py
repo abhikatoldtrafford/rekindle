@@ -59,7 +59,7 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, unquote, urlsplit
+from urllib.parse import parse_qs, quote, unquote, urlsplit
 
 from rekindle.web import api
 from rekindle.web import calibrate_api as calibrate
@@ -68,6 +68,11 @@ from rekindle.web.thumbs import GRID, SIZES, ThumbnailCache, ThumbnailError
 
 HOST = "127.0.0.1"
 ASSETS = Path(__file__).parent / "assets"
+
+#: What `index.html` writes where the run's token goes. The file on disk
+#: holds the placeholder; `_shell` substitutes the real token when it serves
+#: the page, so no token is ever written to the source tree.
+TOKEN_PLACEHOLDER = "__REKINDLE_TOKEN__"
 
 #: Files the page may fetch. An allow-list rather than a path join, so no
 #: amount of `..` or URL-encoding reaches a file that is not part of the UI.
@@ -207,7 +212,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if method == "GET":
             if path == "/":
-                return self._file(ASSETS / "index.html", "text/html; charset=utf-8")
+                return self._shell()
             if path.startswith("/assets/"):
                 name = path[len("/assets/") :]
                 if name not in STATIC:
@@ -217,6 +222,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(api.status(workshop))
             if path == "/api/offers":
                 return self._json(api.offers(workshop, recipe=one("recipe") or None))
+            if path == "/api/suggestions":
+                return self._json(api.suggestions(workshop))
             if path == "/api/build":
                 return self._stream(
                     api.build_events(
@@ -259,6 +266,8 @@ class Handler(BaseHTTPRequestHandler):
                 )
             if path == "/api/calibrate/affected":
                 return self._json(calibrate.affected(self.app.calibration))
+            if path == "/api/render/progress":
+                return self._json(api.render_progress(workshop, one("session_id")))
             if path.startswith("/api/session/"):
                 return self._json(
                     api.session_state(workshop, workshop.get(path[len("/api/session/") :]))
@@ -343,11 +352,34 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _shell(self) -> None:
+        """`index.html`, with the run's token stamped into its asset URLs.
+
+        Security rule 2 is "every route needs the token", and `<link>` and
+        `<script>` are in exactly the position `<img>` is: an element the
+        browser fetches for you, which cannot be given a header. Thumbnails
+        already solved this with `?t=`; the stylesheet and the script had not,
+        so both were served a 403 and the page rendered as unstyled markup
+        with no behaviour at all. They carry the token the same way now.
+
+        Substituted here rather than written into the file, because the token
+        changes every run and the file on disk must never hold one.
+        """
+        try:
+            html = (ASSETS / "index.html").read_text(encoding="utf-8")
+        except OSError:
+            return self._json({"error": "missing asset"}, status=404)
+        html = html.replace(TOKEN_PLACEHOLDER, quote(self.app.config.token, safe=""))
+        return self._bytes(html.encode("utf-8"), "text/html; charset=utf-8")
+
     def _file(self, path: Path, content_type: str) -> None:
         try:
             data = path.read_bytes()
         except OSError:
             return self._json({"error": "missing asset"}, status=404)
+        return self._bytes(data, content_type)
+
+    def _bytes(self, data: bytes, content_type: str) -> None:
         self.send_response(200)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))

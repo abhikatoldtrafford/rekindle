@@ -636,6 +636,258 @@ format is the constraint, and the reproduce promise outranks the control.
 
 ---
 
+# The design pass (M5.1)
+
+The verdict that started it was *"so bland lol, even my dog wont type, no
+branding, no nothing."* It was accurate, and the reason turned out to be worse
+than taste.
+
+## The page had never been rendered
+
+`_guard` requires the per-run token on every route, and the section above says
+so as rule 2: *"`<img>` cannot set a header, so thumbnails accept it as `?t=`;
+everything else sends `X-Rekindle-Token`."* A `<link rel="stylesheet">` and a
+`<script src>` cannot set a header either. Both were answered **403**, and
+`index.html` rendered as unstyled markup in Times New Roman with no JavaScript
+running at all — no library count, no offers, no controls.
+
+Every test passed. `test_the_page_and_its_assets_are_served_locally` fetches
+`/assets/app.js` **with the token header**, which is the one thing a browser
+will never do for a subresource. And the *Known limits* section already named
+the reason nobody caught it: "Nobody has looked at this page in a browser."
+
+The fix follows rule 2 rather than weakening it: `_shell` substitutes the
+run's token into the asset URLs as it serves the page, the way thumbnails
+already carry it. The file on disk holds `__REKINDLE_TOKEN__` and never a
+secret.
+
+Two more defects were hiding behind that one, both invisible while no
+stylesheet applied:
+
+* **`.sheet { display: grid }` defeats `[hidden]`.** `[hidden] { display: none }`
+  is a *user-agent* rule, and any author `display` outranks it. The detail
+  overlay — a full-viewport 95%-opaque scrim — was painted over the whole page
+  from load. Every panel here is toggled with the `hidden` attribute, so the
+  stylesheet now carries a `[hidden] { display: none !important }` that wins.
+* **Inline `style=` attributes were dead.** The CSP is `style-src 'self'` with
+  no `unsafe-inline`, so the two `style="margin-top:0.6rem"` attributes in the
+  markup were refused by the browser. They are classes now, and `say()` sets a
+  class instead of `node.style.color` for the same reason.
+
+## The direction, and what it is made of
+
+Cinematic and editorial: a near-black ground so the photographs are the only
+real colour, chrome reduced to hairlines and vertical rhythm, and a
+typographic voice taken from weight, tracking and scale.
+
+**No font is downloaded, and that is not only principle.** A request to a font
+service is a request that says somebody is looking at their photographs right
+now. So the voice is the system stack used three ways:
+
+| role | stack | where |
+| --- | --- | --- |
+| display | system sans | titles, labels, dates, buttons — uppercase, tracked 0.09em to 0.26em |
+| prose | Georgia and friends | sentences rekindle is *saying* to you |
+| ui | system sans | inputs, numbers, tabular figures |
+
+The serif does real work: explanation is set in it and data is not, so the
+difference between a measurement and a caveat is visible before either is
+read. Big type gets *lighter*, not heavier — `display-xl` is weight 200 at up
+to 3.1rem, which is a title card; the same string at 600 is a shout.
+
+**The wordmark is drawn**, not set. A geometric monoline lowercase on an
+18-unit x-height: nine `path` elements and an `ellipse` in an SVG `symbol`,
+used at 104px in the masthead and up to 340px in the hero. The favicon is a
+drawn ember in a rounded square — a flame, because that is what the word
+means, and framed because a bare flame at 16px disappears into a dark tab
+strip. Both are inline. Neither is a fetch.
+
+One caution learned the hard way: an inline `svg` given only a `width` is
+**150px tall**, because the CSS default sizing of a replaced element outranks
+the viewBox's intrinsic ratio, and `preserveAspectRatio` then centres the
+drawing in the leftover space. That put ~70px of nothing above and below both
+marks. `aspect-ratio: 123 / 29` is what makes the box the shape of the
+drawing.
+
+## Motion, and one place it refuses to lie
+
+Results rise and fade in on a 24ms-per-card stagger, capped at 26 cards — a
+400-photo cut grid at 24ms a card would still be arriving ten seconds later,
+and the point of a stagger is that things feel *handled*.
+
+Building is a **mode**, not a panel below the fold. The empty state's teaching
+aids are for somebody who has not asked for anything yet, so `body.is-building`
+takes them away and leaves the prompt, one line of stage text and a filling
+hairline. That is what makes 4.5 seconds feel intentional.
+
+### The render bar is measured, not apportioned
+
+The first guess put ffmpeg at 15% of a render. Two timed runs of the same
+24-shot memory on the reference machine (Windows, ffmpeg on PATH), 82s and
+88s, said otherwise:
+
+| phase | share | counted? |
+| --- | --- | --- |
+| spec | 0.0% | — |
+| preview frames | 1.9% | yes, per shot |
+| WebP | 10.5% | no |
+| GIF | 9.7% | no |
+| full-size decode | 8.8% | yes, per shot |
+| PNG stills | 22.1% | yes, per frame |
+| **ffmpeg** | **47.1%** | **no** |
+
+That is the difference between a bar that crawls and a bar that jumps to 90%
+and stops. The weights live in `api.PHASE_WEIGHTS` with the measurement beside
+them, renormalised over whichever phases will actually run, so *skip the MP4*
+still ends at 1.0.
+
+Two of the counted phases needed a seam. The frame loops report themselves by
+having `index.get` wrapped — `build_frames` calls `resolve` exactly once per
+shot, so counting the wrapper counts the loop without `frames.py` growing a
+parameter it has no other use for. `write_mp4` took a genuine `on_still`
+callback, because writing 25 PNGs at 2,560px is 22% of a render on its own.
+
+**ffmpeg itself is not instrumented, and the bar says so.** It is one
+subprocess; nothing counts inside it. Rather than invent movement across 47%
+of the wall clock, the fill switches to a sweeping indeterminate state and the
+label reads "ffmpeg is encoding the film". Parsing `-progress pipe:1` would
+make it real, and was left alone: it means turning `subprocess.run` into a
+`Popen` with a pipe that must be drained, in a module whose sibling function
+already documents a deadlock in exactly that shape.
+
+Observed end to end on the real library: 0 to 52% with real counters over 31s,
+sweep for 20s, done.
+
+## The empty state is counted, not written
+
+`api.suggestions` derives prompts from **this** library — festivals whose month
+window it has years of, people with enough photographs across enough years,
+the months it keeps returning to, its own albums, and scenery concepts. Each
+row carries the number it was chosen on, which is the difference between
+"rekindle thinks you like mountains" and "there are 4,196 photographs of
+Paramita here, over eighteen years". On the reference library the first rows
+are *durga puja over the years*, *paramita over the years*, *every november*,
+*avyan*, *the sea*.
+
+Every count goes through `MemoryIndex`, which is what makes a name on the
+exclusion list unsuggestable: `index.people_counts()` has never heard of it.
+`test_an_excluded_person_is_never_suggested` carries its own positive control,
+because a test that only asserts an absence passes just as well against a
+function that returns nothing at all.
+
+Three things learned from looking at the real output:
+
+* **Two festivals sharing a window is one fact in two rows.** Kali Puja and
+  Jagaddhatri Puja are both October–November and score identically, and
+  between them they pushed Durga Puja (September–October) off the list. One
+  festival per window now, corpus order breaking the tie, because the month
+  counts genuinely cannot tell those two apart.
+* **`album_counts()` is not the album list.** It offered "photos from 2019" and
+  "photos from 2026" — Takeout's filing, not memories. `album_story` already
+  refuses those through `albums.presentable`; suggestions share the predicate
+  now, so an album this page offers is one the engine would build from.
+* **`names[0]` is a dictionary head-word.** Nobody types "sea", "mountain",
+  "flower". The phrase is the title when the title is itself a name the
+  matcher accepts, then the plural, then the head-word — every branch
+  returning something the corpus owns.
+
+A festival's note names the **window**, never a count: a photograph in October
+is not a photograph of Durga Puja, and this page does not get to imply that it
+is. Scenery appears only when the semantic extra is installed, because
+suggesting "mountains" to somebody whose only possible answer is *install the
+semantic extra* is a worse empty state than one row fewer.
+
+## A finished memory presents itself
+
+The old ending was a sentence with a file path in it: correct information, and
+the wrong moment for it. A render lands as a poster now — the film's own first
+photograph behind a scrim, the title set as a title, the dates under it as a
+subtitle, and one thing to press. Play swaps in the MP4 when there is one,
+because that is the version with the music.
+
+The path did not disappear; it moved under the poster with the shot count,
+duration and sizes, where it is reference rather than result. And it is set in
+sentence case on its own line: the stats above it are `text-transform:
+uppercase`, and a filesystem path put through that is a path you cannot type.
+
+Editing the memory hides the poster. It is a picture of a film rendered from
+the memory as it *was*, and leaving it up would be the page asserting
+something untrue about what is on disk.
+
+## Mutations run in this pass
+
+Sixteen, against the 30 tests added or rewritten here. Fourteen killed their
+target; two did not, and both are worth reading.
+
+| # | mutation | result |
+| --- | --- | --- |
+| 1 | `_shell` stops substituting the token | killed — the original bug, now caught |
+| 2 | `index.html` goes back to plain asset hrefs | killed (two tests) |
+| 3 | `_guard` exempts `/assets/` | killed |
+| 4 | people counted off `PhotoStore`, past the policy | killed (two tests) |
+| 5 | albums stop honouring `albums.presentable` | killed |
+| 6 | festival windows stop being deduplicated | **survived** |
+| 6b | the same, after the test was rewritten | killed |
+| 7 | scene phrase always pluralises the head-word | killed |
+| 7c | scene phrase uses the title even when it is not a name | **survived — correctly** |
+| 8 | the ranking key is left in the payload | killed |
+| 9 | scenes offered without the semantic extra | killed |
+| 10 | kinds concatenated instead of interleaved | killed |
+| 11 | the frame loop stops counting | killed |
+| 12 | no renormalisation when the MP4 is skipped | killed |
+| 13 | the `finally` that clears the running flag | killed |
+| 14 | `PHASE_MP4` loses its weight | killed |
+| 15 | the `[hidden]` override removed, then weakened | killed (both) |
+| 16 | a backspace byte back in `app.js` | killed |
+
+**Mutation 6 is the one that mattered.** Deleting the deduplication left the
+test green, because `_interleave` takes two festivals and the first two in the
+undeduplicated list happened to have different windows. The test was
+asserting about the interleaved output when the property belongs to
+`_suggest_festivals`; it calls that directly now, and dies as it should.
+
+**Mutation 7c is not a defect.** `scenery.match` matches on whole words, so
+"the mountains" still resolves to the mountains concept even though it is not
+one of its names. The test asserts the property that matters — the phrase
+round-trips to the concept it was generated for — and a change that preserves
+that property should not fail it. Mutation 7, which produces "seas" and
+"nights" and resolves to nothing, is killed.
+
+Two of these tests exist because of defects found *while doing this work*
+rather than by design:
+
+* `test_no_asset_carries_a_stray_control_character` — an editing pass wrote
+  literal `0x08` bytes into two regular expressions in `app.js`, turning
+  anchored word boundaries into an unanchored match. "nocturne" rendered as
+  "no.cturne". The file looked correct in every diff and in every editor.
+* `test_a_panel_hidden_with_the_attribute_is_actually_hidden` — structural
+  rather than a search for one line: it collects the elements hidden by
+  attribute, finds the selectors that would give them a `display` anyway, and
+  only then insists on the override. It strips CSS comments first, because
+  this stylesheet explains the rule in prose and a scan that reads comments
+  finds the explanation instead of the declaration.
+
+## What was looked at, and how
+
+A real browser, against the real library — 19,318 photographs, 2000–2026 —
+driven through the Chrome DevTools Protocol by a ~90-line stdlib WebSocket
+client kept in a scratchpad, never in this repository. Screenshotted and
+iterated on: the empty state at 1440px and at 400px; a real build of *durga
+puja over the years* mid-search and finished (24 shots, October 2010 to
+September 2025, the 2010 idol first); the chosen grid; the cut grid with its
+746 rejections and eight reason chips; the detail sheet opening and closing;
+the offers disclosure with 400 rows; a metadata search returning 60 hits; a
+full render with the MP4, watching the bar; the finished poster; and the
+calibration flow at its first blur question.
+
+Things only a browser could have said, all found this way: the 403 on the
+stylesheet, the scrim over the page, the 150px-tall SVG boxes, a `select`
+stretched to 62 characters by the longest track filename, "chosen by the
+engine" printed 24 times under 24 photographs where it says nothing, a
+calibration photograph 1,330px tall that pushed its own Yes/No buttons off the
+screen, and the render path shouting in uppercase.
+---
+
 ## Known limits
 
 * **Sessions die with the process.** The durable artefact is `memory.json`,
@@ -658,21 +910,27 @@ format is the constraint, and the reproduce promise outranks the control.
   keyboard equivalent. That is a real gap, not a deferred nicety.
 * **One user.** There is no locking between two browser tabs editing the same
   session; the last edit wins.
-* **Rendering the MP4 takes a minute and the page only says "rendering…".**
-  56 s for 23 shots at 2,560 px, and `write_mp4` reports nothing until ffmpeg
-  exits, so there is no honest progress to show. Untick *skip the MP4* and
-  the WebP is back in a few seconds.
+* **Rendering the MP4 still takes a minute, and 47% of it is a bar that
+  sweeps rather than fills.** The phases either side of ffmpeg count
+  themselves, so the bar reaches ~52% honestly; ffmpeg is one subprocess and
+  is not instrumented. Untick *skip the MP4* and the WebP is back in a few
+  seconds.
 * **The preview is the first 16 shots, not all of them.** That is
   `--preview-frames`, inherited from `rekindle memory`. The MP4 carries every
   shot and the page now says which is which, but the animation you look at
   while editing is not the whole memory.
-* **What the page shows is not verified by a browser.** There is no headless
+* **The test suite still does not open a browser.** The page has now been
+  looked at in one, at two widths, in every state that matters — see *What was
+  looked at* above — but that was a person driving Chrome, not CI. Nothing in
+  `uv run pytest` renders a pixel, and no headless browser is being added.
+  What is checked without one: There is no headless
   browser in the test suite and none is going to be added for this. What is
   checked without one: the JavaScript parses, every element id it addresses
   exists in the markup, no asset reaches the network, the token is sent, and
   both terminal stream handlers close the EventSource — and every endpoint the
-  page calls is driven end to end over a real socket against the real library.
-  **What is NOT verified is the rendering itself**: layout at any width, the
-  drag-and-drop reorder, whether a thumbnail grid of 500 stays responsive.
-  Nobody has looked at this page in a browser. Say so rather than let the test
-  count imply otherwise.
+  page calls is driven end to end over a real socket against the real library;
+  and, added in the design pass, that no asset holds an invisible control byte
+  and that nothing hidden by attribute is given a `display` that un-hides it.
+  **What no test verifies**: layout at any width, the drag-and-drop reorder,
+  whether a thumbnail grid of 500 stays responsive. Say so rather than let the
+  test count imply otherwise.

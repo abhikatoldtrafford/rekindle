@@ -27,6 +27,7 @@ from rekindle.memory.history import KIND_MEMORY, memory_id
 from rekindle.memory.recipes import Offer, registered
 from rekindle.memory.render.music import available_tracks
 from rekindle.memory.spec import safe_slug
+from rekindle.web import renderer
 from rekindle.web.draft import (
     ORIGIN_PROMPT,
     ORIGIN_RECIPE,
@@ -81,6 +82,7 @@ class Workshop:
         self.music_dir = music_dir
         self.max_shots = max_shots
         self._sessions: dict[str, Session] = {}
+        self._progress: dict[str, dict] = {}
         self._lock = threading.Lock()
 
     def get(self, session_id: str) -> Session:
@@ -95,6 +97,22 @@ class Workshop:
         with self._lock:
             self._sessions[session.session_id] = session
         return session
+
+    # ---- the live state of a render that is happening right now
+    #
+    # A render is a blocking POST that takes over a minute, so the page cannot
+    # learn anything from the response it is waiting on. It polls this instead,
+    # on a second connection, which `ThreadingHTTPServer` serves concurrently.
+    # Hence the lock: the writer is the rendering thread and the readers are
+    # the polls.
+
+    def set_progress(self, session_id: str, payload: dict) -> None:
+        with self._lock:
+            self._progress[session_id] = payload
+
+    def progress_of(self, session_id: str) -> dict | None:
+        with self._lock:
+            return self._progress.get(session_id)
 
 
 # --------------------------------------------------------------------------
@@ -122,6 +140,12 @@ def status(workshop: Workshop) -> dict:
         payload["unfingerprinted"] = sum(
             1 for p in library.index.all() if p.meta.phash is None and not p.meta.phash_error
         )
+        # The oldest and newest year with a photograph in it. The page prints
+        # it under the wordmark, and "19,318 photographs, 2000-2026" is a
+        # shorter and truer description of a library than any label rekindle
+        # could invent for it.
+        years = library.index.years()
+        payload["span"] = [years[0], years[-1]] if years else []
     return payload
 
 
@@ -156,6 +180,242 @@ def offers(workshop: Workshop, *, recipe: str | None = None, limit: int = 200) -
         "recipes": [r.name for r in registered()],
         "album_merges": dict(getattr(index, "album_merges", {})),
     }
+
+
+# --------------------------------------------------------------------------
+# what to type into an empty box
+
+
+#: Enough evidence to put a suggestion in front of someone. A name that
+#: appears in four photographs is a face tag somebody made once, not a person
+#: this library has a memory of, and offering it teaches the wrong thing.
+MIN_SUGGESTION_PHOTOS = 60
+MIN_SUGGESTION_YEARS = 3
+
+#: How many of each kind to keep before interleaving. Small on purpose: the
+#: empty state is a lesson in what a prompt looks like, and eight examples
+#: teach it better than forty.
+PER_KIND = 2
+
+MONTH_NAMES = (
+    "january",
+    "february",
+    "march",
+    "april",
+    "may",
+    "june",
+    "july",
+    "august",
+    "september",
+    "october",
+    "november",
+    "december",
+)
+
+
+def suggestions(workshop: Workshop, *, limit: int = 8) -> dict:
+    """Prompts worth typing, derived from THIS library.
+
+    Nobody knows what to type into an empty box, and a canned list teaches
+    nothing about the library in front of them. Every row here is counted off
+    `MemoryIndex`, so a suggestion can only name people, months, albums and
+    date windows the guardrails already admit - the same chokepoint the
+    thumbnails and the search go through. A name on the exclusion list cannot
+    be suggested, because `index.people_counts()` has never heard of it.
+
+    Each row carries the count it was chosen on. That is not decoration: it is
+    the difference between "rekindle thinks you like mountains" and "there are
+    4,196 photographs of Paramita here, over eighteen years".
+    """
+    index = _index(workshop)
+    rows: list[list[dict]] = [
+        _suggest_festivals(index),
+        _suggest_people(index),
+        _suggest_months(index),
+        _suggest_albums(index),
+        _suggest_scenes(workshop),
+    ]
+    # `weight` is how each list was ranked and is nobody else's business;
+    # a number in the payload is a number the page will eventually render.
+    return {
+        "suggestions": [
+            {k: v for k, v in row.items() if k != "weight"} for row in _interleave(rows, limit)
+        ]
+    }
+
+
+def _interleave(groups: list[list[dict]], limit: int) -> list[dict]:
+    """One from each kind, then a second from each, until full.
+
+    Round-robin rather than concatenation, because the point of the empty
+    state is to show that a prompt can be a festival OR a person OR a month -
+    and eight person rows in a row say the opposite.
+    """
+    out: list[dict] = []
+    for rank in range(PER_KIND):
+        for group in groups:
+            if rank < len(group) and len(out) < limit:
+                out.append(group[rank])
+    return out
+
+
+def _years_and_count(index, photos: list) -> tuple[int, int]:
+    """How many distinct years, and how many photographs.
+
+    `index.years_present` rather than a comprehension here, so a suggestion
+    counts years the same way the recipes that build the memory do - local
+    capture time, not UTC, and skipping the undated.
+    """
+    return len(index.years_present(photos)), len(photos)
+
+
+def _suggest_festivals(index) -> list[dict]:
+    """Festivals from the corpus whose MONTH WINDOW this library has years of.
+
+    A photograph in October is not a photograph of Durga Puja and this never
+    says it is - the note names the window that would be searched, which is
+    exactly what the prompt path does with the festival's visual tags. So the
+    suggestion is honest about being a place to look rather than a finding.
+    """
+    from rekindle.memory import festivals as festivals_mod
+
+    rows = []
+    seen_windows: set[tuple[int, ...]] = set()
+    for festival in festivals_mod.all_festivals():
+        # ONE festival per window. Kali Puja and Jagaddhatri Puja share
+        # October-November, so counting photographs ranks them identically and
+        # the empty state offered both - two rows carrying one fact. Corpus
+        # order breaks the tie, which is the only ranking that exists: the
+        # month counts genuinely cannot tell these two apart.
+        if festival.window in seen_windows:
+            continue
+        photos = [p for month in festival.window for p in index.by_month(month)]
+        years, count = _years_and_count(index, photos)
+        if years < MIN_SUGGESTION_YEARS or count < MIN_SUGGESTION_PHOTOS:
+            continue
+        seen_windows.add(festival.window)
+        window = "–".join(MONTH_NAMES[m - 1][:3] for m in festival.window)
+        rows.append(
+            {
+                "text": f"{festival.names[0]} over the years",
+                "note": f"{years} years · {window}",
+                "kind": "festival",
+                "weight": count,
+            }
+        )
+    rows.sort(key=lambda r: -r["weight"])
+    return rows
+
+
+def _suggest_people(index) -> list[dict]:
+    rows = []
+    for name, count in index.people_counts().most_common(12):
+        years, _ = _years_and_count(index, index.by_person(name))
+        if years < MIN_SUGGESTION_YEARS or count < MIN_SUGGESTION_PHOTOS:
+            continue
+        rows.append(
+            {
+                "text": f"{name.lower()} over the years",
+                "note": f"{years} years · {count:,} photographs",
+                "kind": "person",
+                "weight": count,
+            }
+        )
+    return rows[:6]
+
+
+def _suggest_months(index) -> list[dict]:
+    """The months this library actually returns to, most-recurring first.
+
+    Sorted on YEARS before photographs. A single 900-photo wedding in April
+    makes April the biggest month and the dullest memory; twelve separate
+    Augusts is the thing worth showing.
+    """
+    rows = []
+    for month in index.months():
+        photos = index.by_month(month)
+        years, count = _years_and_count(index, photos)
+        if years < MIN_SUGGESTION_YEARS or count < MIN_SUGGESTION_PHOTOS:
+            continue
+        rows.append(
+            {
+                "text": f"every {MONTH_NAMES[month - 1]}",
+                "note": f"{years} years · {count:,} photographs",
+                "kind": "month",
+                "weight": (years, count),
+            }
+        )
+    rows.sort(key=lambda r: r["weight"], reverse=True)
+    return rows[:6]
+
+
+def _suggest_albums(index) -> list[dict]:
+    """Albums, filtered by the SAME rule `album_story` offers them under.
+
+    `albums.presentable` is what keeps "Photos from 2019" out of the recipe
+    list, and raw `album_counts()` does not apply it - suggesting a Takeout
+    auto-album teaches someone that a prompt is a filing-system name. Sharing
+    the predicate means an album this page suggests is always an album the
+    engine would build a memory from.
+    """
+    from rekindle.memory import albums as albums_mod
+
+    rows = []
+    for name, count in index.album_counts().most_common():
+        if count < MIN_SUGGESTION_PHOTOS or not albums_mod.presentable(name):
+            continue
+        rows.append(
+            {
+                "text": name.lower(),
+                "note": f"your album · {count:,} photographs",
+                "kind": "album",
+                "weight": count,
+            }
+        )
+        if len(rows) >= 6:
+            break
+    return rows
+
+
+def _suggest_scenes(workshop: Workshop) -> list[dict]:
+    """Scenery concepts - and NO count, because there is honestly not one.
+
+    Whether this library has mountains in it is not a question the index can
+    answer; it takes a CLIP search per concept over every embedding, which is
+    seconds of work to draw an empty state. So these say what they are - a
+    description to search for - and appear only when the search that would
+    run them is installed. Suggesting "mountains" to someone who would get
+    "install the semantic extra" is a worse empty state than nine rows.
+    """
+    if not workshop.library.semantic_available():
+        return []
+    from rekindle.memory import scenery as scenery_mod
+
+    return [
+        {
+            "text": _scene_phrase(concept),
+            "note": "a description to search for",
+            "kind": "scene",
+            "weight": 0,
+        }
+        for concept in scenery_mod.all_concepts()[:6]
+    ]
+
+
+def _scene_phrase(concept) -> str:
+    """The name a person would type, not the corpus head-word.
+
+    `names[0]` is the dictionary entry - "mountain", "flower", "sea" - and
+    nobody types those. The title is the phrase ("The sea", "After dark"), so
+    prefer it when it is itself a name the matcher accepts, then the plural,
+    then give up and use the head-word. Every branch returns something in
+    `names`, so a suggestion can never be a prompt `scenery.match` refuses.
+    """
+    names = [n.lower() for n in concept.names]
+    for candidate in (concept.title.lower(), names[0] + "s"):
+        if candidate in names:
+            return candidate
+    return names[0]
 
 
 # --------------------------------------------------------------------------
@@ -574,6 +834,77 @@ def capture_day(workshop: Workshop, *, file_hash: str) -> dict:
 # rendering and dismissing
 
 
+#: What share of a render each phase takes. MEASURED, not apportioned: a
+#: 24-shot memory from this library, rendered twice on the reference machine
+#: (Windows, ffmpeg on PATH), took 82-88s and split
+#:
+#:     preview 1.9%  webp 10.5%  gif 9.7%  video 8.8%  stills 22.1%  mp4 47.1%
+#:
+#: The first guess at these numbers had the MP4 at 15%. It is nearly half the
+#: render, which is the difference between a bar that crawls and a bar that
+#: jumps to 90% and stops - so they are measured and the measurement is
+#: recorded here to be re-run when the renderer changes.
+#:
+#: `stills` and the two frame passes count their own items, so progress within
+#: them is real. `mp4` is one ffmpeg subprocess and is NOT instrumented: the
+#: bar holds at the start of that phase and the page says so rather than
+#: inventing movement. Weights are renormalised over whichever phases will
+#: actually run, so `no_mp4` still ends at 1.0.
+PHASE_WEIGHTS = {
+    renderer.PHASE_SPEC: 0.001,
+    renderer.PHASE_PREVIEW: 0.019,
+    renderer.PHASE_WEBP: 0.105,
+    renderer.PHASE_GIF: 0.097,
+    renderer.PHASE_VIDEO: 0.088,
+    renderer.PHASE_STILLS: 0.221,
+    renderer.PHASE_MP4: 0.471,
+}
+
+#: The phases that do not run when the caller skips the MP4.
+VIDEO_PHASES = (renderer.PHASE_VIDEO, renderer.PHASE_STILLS, renderer.PHASE_MP4)
+
+#: What each phase is called on the page. Here rather than in `app.js` so the
+#: names and the constants they describe cannot drift apart in two files.
+PHASE_LABELS = {
+    renderer.PHASE_SPEC: "writing the spec",
+    renderer.PHASE_PREVIEW: "composing the preview",
+    renderer.PHASE_WEBP: "encoding the animation",
+    renderer.PHASE_GIF: "encoding the GIF",
+    renderer.PHASE_VIDEO: "decoding every shot at full size",
+    renderer.PHASE_STILLS: "writing full-size frames",
+    renderer.PHASE_MP4: "ffmpeg is encoding the film",
+    renderer.PHASE_DONE: "done",
+}
+
+
+def _phase_fraction(phase: str, done: int, total: int, *, no_mp4: bool) -> float:
+    """Where this phase's `done of total` lands on a 0..1 bar."""
+    if phase == renderer.PHASE_DONE:
+        return 1.0
+    order = [p for p in PHASE_WEIGHTS if not (no_mp4 and p in VIDEO_PHASES)]
+    scale = sum(PHASE_WEIGHTS[p] for p in order) or 1.0
+    if phase not in order:
+        return 1.0
+    before = sum(PHASE_WEIGHTS[p] for p in order[: order.index(phase)])
+    within = (done / total) if total else 0.0
+    return min(1.0, (before + PHASE_WEIGHTS[phase] * within) / scale)
+
+
+def render_progress(workshop: Workshop, session_id: str) -> dict:
+    """How far the render for this session has got, right now.
+
+    Polled by the page while the render POST is still open. Returns a
+    not-started shape rather than raising when nothing has been rendered, so a
+    poll that arrives a beat before the render begins is not an error the user
+    has to see.
+    """
+    workshop.get(session_id)  # 404 for a session that is gone, as everywhere else
+    live = workshop.progress_of(session_id)
+    if live is None:
+        return {"running": False, "phase": "", "label": "", "fraction": 0.0, "done": 0, "total": 0}
+    return dict(live)
+
+
 def render(workshop: Workshop, session_id: str, payload: dict | None = None) -> dict:
     payload = payload or {}
     session = workshop.get(session_id)
@@ -591,7 +922,27 @@ def render(workshop: Workshop, session_id: str, payload: dict | None = None) -> 
         music=draft.pace.music,
         no_mp4=bool(payload.get("no_mp4", False)),
     )
-    result = render_spec(spec, _index(workshop), folder, options)
+
+    def report(phase: str, done: int, total: int) -> None:
+        workshop.set_progress(
+            session_id,
+            {
+                "running": phase != renderer.PHASE_DONE,
+                "phase": phase,
+                "label": PHASE_LABELS.get(phase, phase),
+                "fraction": _phase_fraction(phase, done, total, no_mp4=options.no_mp4),
+                "done": done,
+                "total": total,
+            },
+        )
+
+    report(renderer.PHASE_SPEC, 0, 0)
+    try:
+        result = render_spec(spec, _index(workshop), folder, options, progress=report)
+    finally:
+        # Whatever happened, the page must stop being told a render is in
+        # flight - otherwise a failed render leaves a bar spinning forever.
+        report(renderer.PHASE_DONE, 0, 0)
     session.last_render = result
     session.spec_path = folder / "memory.json"
 

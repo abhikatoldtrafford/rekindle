@@ -31,7 +31,8 @@ Point it at a folder. That's the whole setup.
 
 *Real output from a 19,318-photo library, rendered by the commands beneath them.
 Each is the WebP preview; the MP4 carries the full resolution, the music and the
-Ken Burns motion. See [docs/gallery.md](docs/gallery.md).*
+Ken Burns motion. See
+[docs/gallery.md](https://github.com/abhikatoldtrafford/rekindle/blob/main/docs/gallery.md).*
 
 
 ---
