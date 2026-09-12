@@ -781,14 +781,24 @@ occasional one does not move at all. A percussive library would want a real
 tempo tracker, and that is the point at which taking a dependency on librosa
 would be the right call rather than the lazy one.
 
-### The film path costs about 90 seconds a memory
+### The film path costs three times the time and three times the bytes
 
-Every frame is composed in Python and piped to ffmpeg as raw video - 11 MB a
-frame at a 2560-wide canvas, about 1,600 frames for a 63-second memory. The
-alternative was an `xfade`/`zoompan` filtergraph, which `write_mp4` already
-records as breaking differently on every ffmpeg build and which CI could not
-test at all. `--style cuts` keeps the old path for anyone who wants the
-throughput.
+Measured on one memory - `scenery:flowers`, 24 shots, 63.5 s, 2560x1920 -
+end to end from the same command, so both numbers include the CLIP load and
+the retrieval:
+
+    --style cuts    41.5 MB    59 s
+    --style film   119.0 MB   182 s
+
+Every frame is composed in Python and piped to ffmpeg as raw video: 14 MB a
+frame at that canvas, about 1,600 frames. And a film render is genuinely
+harder to compress, because with a pan on 14 of 24 shots almost no two frames
+are the same.
+
+The alternative was an `xfade`/`zoompan` filtergraph, which `write_mp4`
+already records as breaking differently on every ffmpeg build and which CI
+could not test at all. `--style cuts` keeps the old path, on both
+`rekindle memory` and `rekindle scenery`.
 
 ### The GPT caption layer has never been run against the live API in this milestone
 
