@@ -541,6 +541,7 @@ def _render_one(
     preview_width: int = 0,
     mp4_width: int = 0,
     style: str = STYLE_FILM,
+    onsets: bool = True,
 ) -> None:
     from rekindle.memory.composition import canvas_for
 
@@ -579,11 +580,14 @@ def _render_one(
 
     if not no_mp4:
         video_size = mp4_canvas(canvas, mp4_width or MP4_WIDTH)
-        mp4_frames, mp4_report = build_frames(
-            spec, video_size, resolve=index.get, locate=index.resolve_path
-        )
         bed = resolve_music(music, memory_id=memory_id(spec.recipe, spec.key))
-        result = write_mp4(mp4_frames, folder / "memory.mp4", music=bed)
+        if style == STYLE_FILM:
+            result, mp4_report = _render_film(spec, index, folder, video_size, bed, onsets)
+        else:
+            mp4_frames, mp4_report = build_frames(
+                spec, video_size, resolve=index.get, locate=index.resolve_path
+            )
+            result = write_mp4(mp4_frames, folder / "memory.mp4", music=bed)
         if result.ok:
             line += f", MP4 {video_size[0]}x{video_size[1]} {result.size // 1024} KB"
         elif result.skipped:
@@ -621,6 +625,61 @@ def _render_one(
             f"{canvas[0]}x{canvas[1]} canvas and are shown at native size.[/dim]"
         )
     _render_frame_drops(frame_report)
+
+
+def _render_film(spec, index, folder: Path, video_size, bed: Path | None, onsets: bool):
+    """The `film` style: dissolves, Ken Burns, and cards that arrive.
+
+    **The previews are not touched.** GIF and WebP stay hard cuts and static
+    frames, because they exist to be small enough to embed and motion at 1280
+    wide costs several megabytes for something nobody asked a preview to do.
+    Motion belongs in the MP4.
+    """
+    from rekindle.memory.render import motion as motion_mod
+    from rekindle.memory.render import onsets as onsets_mod
+    from rekindle.memory.render import timeline as tl
+    from rekindle.memory.render.mp4 import write_film
+
+    plan = tl.plan(len(spec.shots) + 1, has_title=True)
+    if onsets and bed is not None:
+        found, note = onsets_mod.detect(bed)
+        if found:
+            snapped = tl.snap_to(plan, found)
+            moved = sum(
+                1
+                for a, b in zip(plan.beats, snapped.beats, strict=True)
+                if abs(a.start - b.start) > 0.01
+            )
+            plan = snapped
+            console.print(
+                f"  [dim]Beat sync: {len(found)} onsets in {bed.name}; "
+                f"{moved} of {len(plan.beats) - 1} cuts moved onto one.[/dim]"
+            )
+        elif note:
+            console.print(f"  [dim]Beat sync off: {note}[/dim]")
+
+    plates, report, moves = motion_mod.build_plates(
+        spec, video_size, plan, resolve=index.get, locate=index.resolve_path
+    )
+    if report.rendered == 0:
+        from rekindle.memory.render.mp4 import Mp4Result
+
+        return Mp4Result(path=None, error="no frames to encode"), report
+    # The timeline was planned for every shot; some were dropped, so it is
+    # re-planned for what actually decoded. Rendering the original would leave
+    # the last shots on screen for no time at all - or, with beat snapping,
+    # leave a hole.
+    if len(plates) != len(plan.beats):
+        plan = tl.plan(len(plates), has_title=True)
+    console.print(f"  [dim]{tl.describe(plan)}. {motion_mod.describe_motion(moves)}.[/dim]")
+    result = write_film(
+        motion_mod.frames_for(plates, plan),
+        folder / "memory.mp4",
+        video_size,
+        fps=plan.fps,
+        music=bed,
+    )
+    return result, report
 
 
 def _render_frame_drops(report) -> None:

@@ -78,6 +78,18 @@ _BACKDROP_ZOOM = 1.08
 _BLUR_DIVISOR = 22
 
 
+def backdrop_at(photo: Image.Image, size: tuple[int, int]) -> Image.Image:
+    """The blurred backdrop rendered at an ARBITRARY size, not just the canvas.
+
+    `render.motion` drifts the backdrop behind a sub-canvas photograph, which
+    needs it rendered larger than the canvas so there is something to drift
+    through. Exposed rather than duplicated: the blur radius and the
+    enlargement are the reason a small old photograph reads as a small old
+    photograph and not as a broken one, and two copies of that would drift.
+    """
+    return _backdrop(photo, size)
+
+
 def _backdrop(photo: Image.Image, canvas: tuple[int, int]) -> Image.Image:
     """A blurred, cover-cropped enlargement of the photo, filling the canvas.
 

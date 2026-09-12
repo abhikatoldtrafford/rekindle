@@ -158,20 +158,21 @@ def plan(
 ) -> Timeline:
     """`count` shots into an even timeline.
 
-    The dissolve OVERLAPS: shot n+1 starts `crossfade` seconds before shot n
-    ends, so the total length is the sum of the holds minus one crossfade per
-    transition, and switching from `cuts` to `film` shortens a memory slightly
-    rather than lengthening it. A 24-shot memory at 2.5s goes from 60.0s of
-    hard cuts to 46.2s with 0.6s dissolves.
+    **The dissolve is taken OUT of each shot's hold, not added to the memory.**
+    Shot n+1 starts `crossfade` seconds before shot n's hold ends, so a
+    25-beat memory is 63.5 seconds whether it is cut or dissolved, and
+    `--style film` against `--style cuts` is a comparison of the same length
+    of video. What changes is how much of each shot is ALONE on screen: at a
+    2.5-second hold and a 0.6-second dissolve, 1.9 seconds.
 
-    `crossfade` is clamped so that every shot still has `MIN_CLEAR` seconds
-    with nothing dissolving over it. A caller asking for a 2-second dissolve
-    on a 2.5-second shot gets the longest one that leaves the photograph
-    visible, not a memory of transitions.
+    `crossfade` is clamped so that every shot keeps `MIN_CLEAR` seconds alone.
+    A caller asking for a 2-second dissolve on a 2.5-second shot gets the
+    longest one that leaves the photograph visible, not a memory of
+    transitions.
     """
     if count <= 0:
         return Timeline(beats=(), fps=fps)
-    fade = max(0.0, min(crossfade, (min(seconds, title_seconds) - MIN_CLEAR) / 2.0))
+    fade = max(0.0, min(crossfade, min(seconds, title_seconds) - MIN_CLEAR))
     beats: list[Beat] = []
     cursor = 0.0
     for i in range(count):
@@ -200,11 +201,16 @@ def snap_to(
     * **A boundary with no onset within `tolerance` stays put.** Music with a
       sparse or rubato opening would otherwise drag one cut a long way and
       make that shot conspicuously longer than every other.
-    * **Each boundary is snapped relative to the ALREADY SNAPPED previous
-      one**, so errors do not accumulate into a memory that finishes half a
-      shot early.
+    * **Each boundary is snapped from its OWN ORIGINAL position**, never from
+      the previous snapped one. This is the opposite of what the first version
+      of this comment claimed, and the claim was the wrong way round: chaining
+      each cut off the last one lets a run of same-direction nudges walk the
+      whole timeline, so a memory whose music sits 0.1 s late everywhere would
+      finish a shot and a half late. Snapping from the original keeps every
+      error bounded by `tolerance`.
     * **No shot may fall below `min_duration`.** Two onsets 0.2s apart are a
-      grace note, not a shot change.
+      grace note, not a shot change. This is the only thing the previous beat
+      is consulted for.
     * **The dissolve length is preserved** and re-clamped, so a shot shortened
       by snapping does not end up dissolving for most of its life.
 

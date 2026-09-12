@@ -11,9 +11,11 @@ the whole feature unavailable to anyone who has not installed a video encoder.
 
 from __future__ import annotations
 
+import contextlib
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -158,6 +160,109 @@ def write_mp4(
         # The GIF is already written by the time this runs, so the memory is
         # not lost - the caller reports the failure and keeps going.
         return Mp4Result(path=None, error=(done.stderr or "")[-STDERR_TAIL:].strip())
+    if not path.is_file():
+        return Mp4Result(path=None, error="ffmpeg reported success but wrote no file")
+    return Mp4Result(path=path, size=path.stat().st_size)
+
+
+def write_film(
+    frames: Iterable[Image.Image],
+    path: Path,
+    canvas: tuple[int, int],
+    *,
+    fps: int = 25,
+    music: Path | None = None,
+    ffmpeg: str | None = None,
+    crf: int = 20,
+) -> Mp4Result:
+    """Encode a stream of already-composed frames. Never raises; reports.
+
+    **Every frame is composed in Python and piped in as raw video**, rather
+    than handing ffmpeg a list of stills and a filtergraph. `write_mp4`'s
+    docstring records why crossfades were not attempted that way: a 24-deep
+    `xfade` chain needs offsets computed by hand and breaks differently on
+    every ffmpeg build. That reasoning still holds, so the transitions, the
+    pans and the cards are all done before ffmpeg sees anything, and ffmpeg
+    does the one job it is unambiguously good at.
+
+    The cost is bandwidth: 2560x1440x3 is 11 MB a frame, and a 46-second
+    memory is 1,150 of them. Measured on the reference machine that is about
+    35 seconds of pipe writing inside a 90-second render, which is acceptable
+    for a batch tool and is why `--style cuts` still exists.
+
+    stdin is written frame by frame and stderr is drained at the end. stdout
+    is sent to DEVNULL rather than a pipe: with `capture_output` and a large
+    write, ffmpeg's own output can fill the OS pipe buffer while this process
+    is blocked writing, and both sides wait forever. That deadlock is the
+    reason this does not use `subprocess.run`.
+    """
+    binary = ffmpeg or ffmpeg_path()
+    if binary is None:
+        return Mp4Result(path=None, skipped=FFMPEG_MISSING)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    width, height = canvas
+
+    cmd = [binary, "-y", "-hide_banner", "-loglevel", "error"]
+    cmd += ["-f", "rawvideo", "-pix_fmt", "rgb24", "-s", f"{width}x{height}"]
+    cmd += ["-r", str(fps), "-i", "-"]
+    if music is not None:
+        # Same reasoning as `write_mp4`: loop the bed so a 40-second track
+        # does not leave a 90-second memory half silent, and let -shortest end
+        # it. -stream_loop must precede its own -i.
+        cmd += ["-stream_loop", "-1", "-i", str(music)]
+        cmd += ["-c:a", "aac", "-b:a", "160k", "-shortest"]
+    cmd += [
+        "-vf",
+        "format=yuv420p",
+        "-c:v",
+        "libx264",
+        "-preset",
+        "medium",
+        "-crf",
+        str(crf),
+        "-movflags",
+        "+faststart",
+        str(path),
+    ]
+
+    try:
+        process = subprocess.Popen(
+            cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+    except FileNotFoundError:
+        return Mp4Result(path=None, skipped=FFMPEG_MISSING)
+
+    written = 0
+    try:
+        assert process.stdin is not None
+        for frame in frames:
+            if frame.size != canvas:
+                frame = frame.resize(canvas, Image.Resampling.LANCZOS)
+            process.stdin.write(frame.convert("RGB").tobytes())
+            written += 1
+    except BrokenPipeError:
+        # ffmpeg died mid-stream. Its stderr says why, and that is far more
+        # useful than this exception.
+        pass
+    finally:
+        with contextlib.suppress(BrokenPipeError, OSError):
+            if process.stdin is not None:
+                process.stdin.close()
+
+    try:
+        stderr = (process.communicate(timeout=600)[1] or b"").decode("utf-8", "replace")
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.communicate()
+        return Mp4Result(path=None, error="ffmpeg timed out after 600s")
+
+    if not written:
+        return Mp4Result(path=None, error="no frames to encode")
+    if process.returncode != 0:
+        return Mp4Result(path=None, error=stderr[-STDERR_TAIL:].strip())
     if not path.is_file():
         return Mp4Result(path=None, error="ffmpeg reported success but wrote no file")
     return Mp4Result(path=path, size=path.stat().st_size)
