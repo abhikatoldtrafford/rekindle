@@ -756,6 +756,43 @@ def _dense_years():
     out += _across_years("c", month=12, day=25, per_year=12, people=["Amy", "Bob"])
     out += _across_years("d", month=6, day=11, per_year=12, people=["Bob"])
     out += _across_years("e", month=9, day=3, per_year=12, people=["Amy", "Bob"])
+    out += _drifting_festival()
+    return out
+
+
+def _drifting_festival():
+    """Four Julys that drift, over a quiet baseline, for `recurring_event`.
+
+    Two things the anniversary shape above cannot give it. A burst is a day
+    holding four times the median ACTIVE day of its own year, so a fixture
+    made only of dense days has no dense day in it at all - every one of the
+    dates above sits at the median. And an event must repeat in MIN_YEARS
+    distinct years, which is four; `_across_years` spans three.
+
+    The album is on the burst days only, in every year, so the evidence
+    `naming_evidence` reads is really there - a fixture that offered a
+    recurring event but named nothing would let the album route break
+    silently.
+    """
+    out = []
+    n = 0
+    for year, day in ((2018, 12), (2019, 4), (2020, 8), (2021, 15)):
+        for week in range(52):
+            when = datetime(year, 1, 1) + timedelta(weeks=week)
+            for _ in range(2):
+                n += 1
+                out.append(_p(f"quiet{n:05d}", local=when + timedelta(hours=n % 12)))
+        for offset in range(3):
+            when = datetime(year, 7, day) + timedelta(days=offset)
+            for i in range(14):
+                n += 1
+                out.append(
+                    _p(
+                        f"burst{n:05d}",
+                        local=when + timedelta(minutes=i * 7),
+                        albums=["Rathayatra"],
+                    )
+                )
     return out
 
 
@@ -767,7 +804,12 @@ def _dense_years():
 #: library. Measured on the reference index, 0.33s of a 2.60s offers phase,
 #: now 0.004s.
 #:
-#: Three are deliberately absent and are expected to stay that way until the
+#: `recurring_event` joined them when the album evidence for its title moved
+#: onto the spine: it needed a local date and an album list per photograph and
+#: hydrated every photograph of every burst to read them - 11,422 on the
+#: reference index, 0.54s of a 1.18s offers phase, now 0.02s of 0.38s.
+#:
+#: Two are deliberately absent and are expected to stay that way until the
 #: data they need is on the spine too. See `STILL_HYDRATES`.
 SPINE_ONLY_OFFERS = (
     "album_story",
@@ -775,6 +817,7 @@ SPINE_ONLY_OFFERS = (
     "on_this_month",
     "person_years",
     "pair_years",
+    "recurring_event",
     "year_in_review",
 )
 
@@ -783,9 +826,8 @@ SPINE_ONLY_OFFERS = (
 #: `then_and_now` picks exactly TWO photographs, so it has to know which would
 #: survive the composition guardrails - width, height, sharpness, brightness
 #: and media type per photograph - or it advertises a memory `select()` cannot
-#: build. `recurring_event` derives its TITLE from the photographs in the
-#: event. `place_cluster` splits a cell into visits by timestamp gap. None of
-#: those is a count or a year, which is all the spine carries.
+#: build. `place_cluster` splits a cell into visits by timestamp gap. Neither
+#: is a count, a year or an album, which is all the spine carries.
 STILL_HYDRATES = "then_and_now"
 
 

@@ -286,13 +286,20 @@ def photos_in(event: RecurringEvent, photos: Iterable[Photo]) -> list[Photo]:
 
 
 def naming_evidence(
-    event: RecurringEvent,
-    photos: Iterable[Photo],
+    album_years: Mapping[str, set[int]],
     *,
     min_years: int = 2,
     reserved: frozenset[str] = frozenset(),
 ) -> str | None:
     """The album name this event is called, or None if nothing names it.
+
+    `album_years` is album name AS WRITTEN -> the years of the event it
+    appears in, which is the whole of what this rule ever read from a
+    photograph. `MemoryIndex.image_album_years` produces it off the spine;
+    walking the event's photographs produces the same mapping and is what this
+    used to do inline, at 11,422 hydrations on the reference library. The rule
+    below is unchanged, and it must stay here rather than migrate into the
+    index: the index reports evidence, this decides what it names.
 
     **Never guesses.** Inferring "Diwali" from a date in late October is
     exactly the kind of confident wrongness this project exists not to commit:
@@ -316,19 +323,14 @@ def naming_evidence(
     this library, and they are the only two that were named at all.
     """
     years_by_family: dict[str, set[int]] = {}
-    for photo in photos:
-        day = _local_day(photo)
-        if day is None:
-            continue
-        burst = next((b for b in event.bursts if b.covers(day)), None)
-        if burst is None:
-            continue
-        for album in photo.albums:
-            # `presentable` is not cosmetic here. Google's per-year folders
-            # are on EVERY photo, so without this filter the winning name for
-            # every event on this library was "Photos from".
-            if albums.presentable(album):
-                years_by_family.setdefault(albums.family(album), set()).add(burst.year)
+    for album, years in album_years.items():
+        # `presentable` is not cosmetic here. Google's per-year folders
+        # are on EVERY photo, so without this filter the winning name for
+        # every event on this library was "Photos from". It is applied to the
+        # name as written and BEFORE `family`, because `Photos from 2019` is
+        # not presentable while its family `Photos from` is.
+        if albums.presentable(album):
+            years_by_family.setdefault(albums.family(album), set()).update(years)
 
     candidates = [
         (len(years), family)

@@ -42,6 +42,23 @@ def _facts(photos: list[Photo], *, title: str, recipe: str, albums=()) -> object
     return build_fact_sheet(photos, title=title, recipe=recipe, albums=tuple(albums))
 
 
+def _burst_days(event) -> list[tuple[int, int, int]]:
+    """Every local calendar day a `recurring` event's bursts cover.
+
+    The slice both halves of `recurring_event` are about: `select()` hydrates
+    it, `offers()` reads album years off the spine for it, and they must
+    describe the same days or the title on the offer is not the title on the
+    memory.
+    """
+    out: list[tuple[int, int, int]] = []
+    for burst in event.bursts:
+        day = burst.start
+        while day <= burst.end:
+            out.append((day.year, day.month, day.day))
+            day += timedelta(days=1)
+    return out
+
+
 # --------------------------------------------------------------------------
 
 
@@ -575,18 +592,33 @@ class RecurringEvent:
         only photographs hydrated are the ones the memory could contain. The
         equivalent used to be `recurring.photos_in(event, index.images())`,
         which filters the same set out of the whole library.
+
+        `select()` only. `offers()` needs a title and not photographs, and
+        gets it from `_names_of`.
         """
         out: list[Photo] = []
-        for burst in event.bursts:
-            day = burst.start
-            while day <= burst.end:
-                out.extend(
-                    p
-                    for p in index.by_date(day.year, day.month, day.day)
-                    if p.media_type is MediaType.IMAGE
-                )
-                day += timedelta(days=1)
+        for day in _burst_days(event):
+            out.extend(p for p in index.by_date(*day) if p.media_type is MediaType.IMAGE)
         return out
+
+    @staticmethod
+    def _names_of(index: MemoryIndex, event) -> dict[str, set[int]]:
+        """The album evidence `recurring.naming_evidence` weighs.
+
+        This is what `offers()` used to hydrate for: every image of every
+        burst - 11,422 of them on the reference library - read for a local
+        date and an album list apiece, both of which the index already holds
+        inverted. Measured cold there: 0.54 s hydrating against 0.02 s off the
+        spine, and the whole offers phase 1.18 s -> 0.38 s.
+
+        `naming_evidence` recorded the year of the BURST a photograph falls
+        in, and the spine records the photograph's own. They cannot differ:
+        `bursts_from` groups the day histogram by `day.year` before it looks
+        for runs, so no burst spans a year boundary and every photograph
+        inside one shares its year. Checked on the reference library too - 0
+        of its 86 bursts cross a year.
+        """
+        return index.image_album_years(_burst_days(event))
 
     def offers(self, index: MemoryIndex) -> list[Offer]:
         days = self._days(index)
@@ -606,7 +638,7 @@ class RecurringEvent:
                 Offer(
                     recipe=self.name,
                     key=event.key,
-                    title=self._title(event, self._images_of(index, event), days, reserved),
+                    title=self._title(event, self._names_of(index, event), days, reserved),
                     subtitle=f"{len(event.years)} years, {event.count} photos",
                     size=event.count,
                 )
@@ -623,7 +655,10 @@ class RecurringEvent:
         chosen = chronological(photos)
         if len(chosen) < MIN_SHOTS:
             return None
-        title = self._title(event, photos, days, reserved)
+        # From the index and not from `photos`, so the title on the memory is
+        # the title on the offer by construction rather than by two routes
+        # happening to agree.
+        title = self._title(event, self._names_of(index, event), days, reserved)
         return Selection(
             photos=chosen,
             facts=_facts(chosen, title=title, recipe=self.name),
@@ -642,7 +677,7 @@ class RecurringEvent:
         )
 
     @staticmethod
-    def _title(event, photos: list[Photo], days, reserved: frozenset[str]) -> str:
+    def _title(event, album_years: dict[str, set[int]], days, reserved: frozenset[str]) -> str:
         """From evidence only. NEVER a guessed festival name.
 
         Inferring "Diwali" from a date in late October is exactly the
@@ -653,16 +688,15 @@ class RecurringEvent:
         used because the user wrote it; otherwise the title says only what is
         known, which is when it happens and how often.
         """
-        named = recurring.naming_evidence(event, photos, reserved=reserved)
+        named = recurring.naming_evidence(album_years, reserved=reserved)
         if named:
             return named
         span = range(event.years[0], event.years[-1] + 1)
-        # From the day histogram, not from `photos`: `photos` is now only the
-        # event's OWN images, and every one of them is inside the span by
-        # construction, so counting years there would always return
-        # `len(event.years)` and "every year" would become a tautology rather
-        # than a claim. `days` covers the whole library, which is what the
-        # question - how many years of this span hold any photograph at all -
-        # has always meant.
+        # From the day histogram, not from the event: every year the event has
+        # is inside the span by construction, so counting there would always
+        # return `len(event.years)` and "every year" would become a tautology
+        # rather than a claim. `days` covers the whole library, which is what
+        # the question - how many years of this span hold any photograph at
+        # all - has always meant.
         available = len({day.year for day in days if day.year in span})
         return recurring.describe(event, years_available=available)

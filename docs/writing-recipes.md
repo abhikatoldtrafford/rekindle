@@ -130,11 +130,17 @@ produce 24 integers** that `year_counts()` already had. Use `year_counts()`,
 `person_years()`, `pair_years()`, `album_years()` for the years. Keep
 `by_*()` for `select()`, where you genuinely need the photographs.
 
+A title can come off the spine too. `image_album_years(days)` answers "which
+albums do the images on these days belong to, and in which years" — the
+evidence `recurring_event` names its memories from, and the reason that recipe
+no longer hydrates 11,422 photographs to read one album list apiece.
+
 **Ask the narrowest question you can.** `recurring_event` used to call
 `index.images()` and filter it down to the fortnight it cared about, which
 materialised every photograph in the library once per offer; it now reads
-`image_day_counts()` and then asks `by_date` for the days its bursts actually
-cover. Same memories out, and the peak is the memory rather than the library.
+`image_day_counts()`, and `by_date` is left to `select()`, for the days its
+bursts actually cover. Same memories out, and the peak is the memory rather
+than the library.
 
 **Do not re-derive the same list.** A recipe that calls `by_album(x)` in
 `offers` and again in `select` is fine — the cache serves the second call on

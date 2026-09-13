@@ -46,8 +46,10 @@ answers both off the spine - `year_counts`, `month_day_years`, `person_years`
 and their siblings, and `image_day_counts` for `recurring_event` - and six of
 the nine recipes stopped loading photographs to build an offer. That took the
 phase from 185.9 s to 46.5 s on a synthetic 300,000-photo library, against
-4.1 s materialised. What is left is `then_and_now`, which must know which
-photographs would survive `compose()`, plus `album_story`'s subtitle and
+4.1 s materialised. Two more followed that measurement, by the same route:
+`album_span` for `album_story`'s subtitle, `image_album_years` for the album
+evidence `recurring_event` titles itself from. What is left is `then_and_now`,
+which must know which photographs would survive `compose()`, and
 `place_cluster`'s visit split.
 
 Net at 300k: `open` 39% faster, the whole `--all-recipes` pass 1.64x slower,
@@ -429,14 +431,34 @@ class MemoryIndex:
             for name, target in aliases.items()
             if name not in self._policy.album_aliases
         }
-        merged: dict[str, list[int]] = {}
-        for name, row_ids in raw_albums.items():
-            merged.setdefault(aliases.get(name, name), []).extend(row_ids)
-        # Sorted back into rowid order, which IS scan order because
-        # `_StoreSource.scan` says ORDER BY rowid. Without this a merged family would list one
-        # spelling's photos before the other's, and `album_story` would emit a
-        # different memory than the materialised index did.
-        self._by_album = {name: array(_ROWID, sorted(rows)) for name, rows in merged.items()}
+        # Album membership under the name the PHOTOGRAPH carries, before the
+        # merge and before `album_aliases`. `recurring.naming_evidence` reads
+        # `photo.albums` and applies `albums.presentable` to the name as
+        # written, so `image_album_years` has to answer with the same names or
+        # it is not the same rule: the family of `Photos from 2019` is
+        # `Photos from`, which IS presentable, and a family-keyed or merged
+        # answer would title every event on this library "Photos from".
+        #
+        # It costs almost nothing, because the arrays are SHARED with
+        # `_by_album` for every name the merge left alone - on the reference
+        # library the only rowids held twice are the 19 in the two `Christmas`
+        # spellings.
+        self._by_album_raw = raw_albums
+        spellings: dict[str, list[str]] = {}
+        for name in raw_albums:
+            spellings.setdefault(aliases.get(name, name), []).append(name)
+        self._by_album: dict[str, array] = {}
+        for target, names in spellings.items():
+            if names == [target]:
+                self._by_album[target] = raw_albums[target]
+                continue
+            # Sorted back into rowid order, which IS scan order because
+            # `_StoreSource.scan` says ORDER BY rowid. Without this a merged
+            # family would list one spelling's photos before the other's, and
+            # `album_story` would emit a different memory than the
+            # materialised index did.
+            rows = sorted(row for name in names for row in raw_albums[name])
+            self._by_album[target] = array(_ROWID, rows)
 
     @staticmethod
     def _merged_year_suffixes(raw_albums: Iterable[str]) -> dict[str, str]:
@@ -501,6 +523,18 @@ class MemoryIndex:
         packed = [months[bisect_left(ids, row_id)] for row_id in row_ids]
         low, high = min(packed), max(packed)
         return (low // 12, low % 12 + 1), (high // 12, high % 12 + 1)
+
+    def _is_image(self, row_id: int) -> bool:
+        """Is this rowid a still image? A bisect, not a set.
+
+        `_image_ids` is ascending for the same reason `_ids` is. Holding the
+        same rowids in a `set` as well would cost 16.8 MB at 300,000
+        photographs - measured: 8.4 MB of hash table and 8.4 MB of the `int`
+        objects an `array("q")` does not need - for a question
+        `image_album_years` asks a few thousand times a pass.
+        """
+        position = bisect_left(self._image_ids, row_id)
+        return position < len(self._image_ids) and self._image_ids[position] == row_id
 
     # ---- hydration. The ONLY route from a rowid to a Photo.
 
@@ -705,6 +739,45 @@ class MemoryIndex:
 
     def album_years(self, album: str) -> set[int]:
         return self._years_in(self._by_album.get(album, ()))
+
+    def image_album_years(self, days: Iterable[tuple[int, int, int]]) -> dict[str, set[int]]:
+        """Album name -> the local capture years its IMAGES have on `days`.
+
+        The evidence `recurring.naming_evidence` weighs, without loading a
+        photograph. That recipe used to get it by hydrating every image inside
+        every event's bursts - 11,422 of them on the reference library - to
+        read one date and one album list off each. Both are already in the
+        index, inverted, so the answer is a set intersection per album and a
+        bisect per hit. Measured cold over the eleven events of the reference
+        index: 0.54 s hydrating, 0.02 s here, and the recipe's whole offers
+        phase 1.18 s -> 0.38 s.
+
+        **Names as written, not families.** `presentable` has to see the name
+        the user wrote: the family of `Photos from 2019` is `Photos from`,
+        which passes `presentable`, so a family-keyed answer would name every
+        event on this library "Photos from" - the defect `albums.py` exists to
+        prevent. Grouping into families, `min_years` and the tie-break all
+        stay in `recurring`, which owns the rule; this returns the evidence
+        and judges nothing. It is also why the merged `_by_album` is not the
+        index read here - see `_by_album_raw`.
+
+        **Images only**, because the memory is images only and the title must
+        not rest on a shot the memory cannot contain. 428 of the photographs
+        inside this library's bursts are videos carrying an album.
+        """
+        rows: set[int] = set()
+        for ymd in days:
+            rows.update(row for row in self._by_ymd.get(ymd, ()) if self._is_image(row))
+        if not rows:
+            return {}
+        out: dict[str, set[int]] = {}
+        for name, members in self._by_album_raw.items():
+            # A list comprehension over the album rather than over `rows`,
+            # because it comes out in rowid order for `_years_in` to bisect.
+            inside = [row for row in members if row in rows]
+            if inside:
+                out[name] = self._years_in(inside)
+        return out
 
     # ---- public-safe
 

@@ -109,6 +109,10 @@ def test_no_query_method_can_return_a_blocked_photo(tmp_path):
             # in, and returning a span derived from that photo would leak the
             # fact that it exists.
             "album_span": ("Kashmir",),
+            # The day the blocked photo was taken, so the slice it names is
+            # one the blocked photo is inside: a leak here would be its album
+            # name and the year it was taken.
+            "image_album_years": ([(2020, 5, 1)],),
             "get": (BLOCKED,),
             "resolve_many": ([BLOCKED, OK],),
             "by_date": (2020, 5, 1),
@@ -165,6 +169,12 @@ def _touch(result, checked, name):
     if isinstance(result, Iterator):
         result = list(result)
         assert result, f"MemoryIndex.{name} yielded nothing, so nothing was checked"
+    if isinstance(result, dict):
+        # Both halves. A mapping keyed on album names is one hash away from
+        # naming a blocked photograph, and a mapping VALUED with photos would
+        # otherwise be one opaque object to the loop below - the same vacuous
+        # shape the iterator branch above exists to prevent.
+        result = [*result.keys(), *result.values()]
     items = result if isinstance(result, (list, tuple, set)) else [result]
     for item in items:
         if isinstance(item, Photo):
@@ -1100,5 +1110,124 @@ def test_a_blocked_photo_cannot_move_an_album_span(tmp_path):
     try:
         index = MemoryIndex.open(store)
         assert index.album_span("Kashmir") == ((2024, 10), (2024, 10))
+    finally:
+        store.close()
+
+
+def test_image_album_years_reads_the_albums_off_the_spine(tmp_path):
+    """`recurring_event.offers()` needs the album names inside an event and
+    the years they appear in, and used to hydrate every photograph of every
+    burst to read them - 11,422 on the reference library. Measured cold
+    there: 0.54s hydrating against 0.02s off the spine, and the recipe's whole
+    offers phase 1.18s -> 0.38s.
+
+    Names as written and not families: `presentable` runs on the name the user
+    wrote, and the family of `Photos from 2019` is `Photos from`, which IS
+    presentable.
+    """
+    store = _store(
+        tmp_path,
+        [
+            _p("a", local=datetime(2024, 10, 1, 9, 0), albums=["Puja 2024", "Photos from 2024"]),
+            _p("b", local=datetime(2025, 10, 3, 9, 0), albums=["Puja 25"]),
+            _p("c", local=datetime(2025, 10, 4, 9, 0), albums=["Puja 25"]),
+            _p("d", local=datetime(2023, 5, 5, 9, 0), albums=["Puri"]),
+        ],
+    )
+    try:
+        index = MemoryIndex.open(store)
+        days = [(2024, 10, 1), (2025, 10, 3), (2025, 10, 4)]
+        assert index.image_album_years(days) == {
+            "Puja 2024": {2024},
+            "Photos from 2024": {2024},
+            "Puja 25": {2025},
+        }
+        assert index.image_album_years([(2023, 5, 5)]) == {"Puri": {2023}}
+        assert index.image_album_years([]) == {}
+        assert index.image_album_years([(1999, 1, 1)]) == {}
+
+        # And it agrees with the route that walks the photographs.
+        for slice_days in (days, [(2023, 5, 5)], [(2024, 10, 1)]):
+            walked: dict[str, set[int]] = {}
+            for year, month, day in slice_days:
+                for photo in index.by_date(year, month, day):
+                    for album in photo.albums:
+                        walked.setdefault(album, set()).add(photo.meta.taken_at_local.year)
+            assert index.image_album_years(slice_days) == walked, slice_days
+    finally:
+        store.close()
+
+
+def test_image_album_years_is_not_told_by_a_video(tmp_path):
+    """A `recurring_event` memory is images only - `composition` refuses a
+    video with no cached still frame - so a video's album is evidence for a
+    title the memory can never show. 428 of the photographs inside the
+    reference library's bursts are videos carrying an album.
+    """
+    photos = [
+        _p("still", local=datetime(2024, 10, 1, 9, 0), albums=["Puja 2024"]),
+        _p("movie", local=datetime(2024, 10, 1, 10, 0), albums=["Someone's wedding"]),
+    ]
+    photos[1].media_type = MediaType.VIDEO
+    store = _store(tmp_path, photos)
+    try:
+        index = MemoryIndex.open(store)
+        # The premise: the video really is on the day, so a query that forgot
+        # to filter would return its album.
+        assert {p.file_hash for p in index.by_date(2024, 10, 1)} == {"still", "movie"}
+        assert index.image_album_years([(2024, 10, 1)]) == {"Puja 2024": {2024}}
+    finally:
+        store.close()
+
+
+def test_a_blocked_photo_cannot_name_an_event(tmp_path):
+    """The assertion `album_span` has, for the same reason: the sweep cannot
+    see a leak through a mapping of names to integers, and an album name IS a
+    fact about the excluded photograph - it is the string that would be shown
+    as the title of the memory.
+    """
+    store = _store(
+        tmp_path,
+        [
+            _p("keep", local=datetime(2024, 10, 1, 9, 0), albums=["Puja 2024"]),
+            _p(
+                "hidden",
+                local=datetime(2024, 10, 1, 10, 0),
+                albums=["Someone's wedding"],
+                archived=True,
+            ),
+        ],
+    )
+    try:
+        index = MemoryIndex.open(store)
+        assert index.image_album_years([(2024, 10, 1)]) == {"Puja 2024": {2024}}
+    finally:
+        store.close()
+
+
+def test_the_album_index_still_knows_the_names_as_written(tmp_path):
+    """`_by_album` merges `Christmas 15` and `Christmas 2025` into one family;
+    `naming_evidence` counts names as the photographs carry them. Both views
+    exist, and the unmerged one SHARES its arrays with the merged one wherever
+    the merge moved nothing - so this pins that the sharing lost no spelling.
+    """
+    store = _store(
+        tmp_path,
+        [
+            _p("a", local=datetime(2015, 12, 25, 9, 0), albums=["Christmas 15"]),
+            _p("b", local=datetime(2025, 12, 25, 9, 0), albums=["Christmas 2025"]),
+            _p("c", local=datetime(2023, 5, 5, 9, 0), albums=["Puri"]),
+        ],
+    )
+    try:
+        index = MemoryIndex.open(store)
+        assert set(index.album_counts()) == {"Christmas", "Puri"}
+        assert index.image_album_years([(2015, 12, 25), (2025, 12, 25), (2023, 5, 5)]) == {
+            "Christmas 15": {2015},
+            "Christmas 2025": {2025},
+            "Puri": {2023},
+        }
+        # Shared, not copied: the merge left `Puri` alone.
+        assert index._by_album["Puri"] is index._by_album_raw["Puri"]
     finally:
         store.close()

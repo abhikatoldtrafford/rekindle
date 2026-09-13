@@ -70,6 +70,28 @@ def _library(events, *, per_day=20, days=3, baseline_per_week=2, albums_of=None)
     return out
 
 
+def _album_years(event, photos) -> dict[str, set[int]]:
+    """The evidence mapping `naming_evidence` takes, walked out of the photos.
+
+    The route `recurring_event.offers()` used to take, kept here as the
+    reference that `MemoryIndex.image_album_years` is pinned against below. It
+    records the year of the BURST a photograph falls in, which is what the
+    loop inside `naming_evidence` used to do, and it counts images only,
+    because the recipe only ever handed it images.
+    """
+    out: dict[str, set[int]] = {}
+    for photo in photos:
+        if photo.media_type is not MediaType.IMAGE:
+            continue
+        moment = photo.meta.taken_at_local
+        burst = next((b for b in event.bursts if moment and b.covers(moment.date())), None)
+        if burst is None:
+            continue
+        for album in photo.albums:
+            out.setdefault(album, set()).add(burst.year)
+    return out
+
+
 # --------------------------------------------------------------------------
 # bursts
 
@@ -274,7 +296,7 @@ def test_an_event_nothing_names_is_described_not_named():
     photos = _library(DURGA)
     event = recurring.events(photos)[0]
 
-    assert recurring.naming_evidence(event, photos) is None
+    assert recurring.naming_evidence(_album_years(event, photos)) is None
     title = recurring.describe(event, years_available=len(DURGA) + 4)
     assert "Diwali" not in title and "Puja" not in title
     assert "October" in title
@@ -291,7 +313,7 @@ def test_a_name_that_recurs_across_years_is_used():
         },
     )
     event = recurring.events(photos)[0]
-    assert recurring.naming_evidence(event, photos) == "Christmas"
+    assert recurring.naming_evidence(_album_years(event, photos)) == "Christmas"
 
 
 def test_a_name_appearing_in_only_one_year_is_not_used():
@@ -301,7 +323,7 @@ def test_a_name_appearing_in_only_one_year_is_not_used():
     are different families and each appears once."""
     photos = _library(DURGA, albums_of={2013: ["Mahasaptami, 2013"], 2025: ["Durga Puja 25"]})
     event = recurring.events(photos)[0]
-    assert recurring.naming_evidence(event, photos) is None
+    assert recurring.naming_evidence(_album_years(event, photos)) is None
 
 
 def test_googles_year_folders_can_never_name_an_event():
@@ -310,7 +332,7 @@ def test_googles_year_folders_can_never_name_an_event():
     which is what this caught."""
     photos = _library(DURGA, albums_of={y: [f"Photos from {y}"] for y in DURGA})
     event = recurring.events(photos)[0]
-    assert recurring.naming_evidence(event, photos) is None
+    assert recurring.naming_evidence(_album_years(event, photos)) is None
 
 
 def test_a_name_another_recipe_owns_is_not_used():
@@ -323,8 +345,11 @@ def test_a_name_another_recipe_owns_is_not_used():
     )
     event = recurring.events(photos)[0]
 
-    assert recurring.naming_evidence(event, photos) == "Avyan"
-    assert recurring.naming_evidence(event, photos, reserved=frozenset({"avyan"})) is None
+    assert recurring.naming_evidence(_album_years(event, photos)) == "Avyan"
+    assert (
+        recurring.naming_evidence(_album_years(event, photos), reserved=frozenset({"avyan"}))
+        is None
+    )
 
 
 def test_the_description_only_claims_every_year_when_it_is_every_year():
@@ -595,5 +620,121 @@ def test_every_year_is_a_claim_about_the_library_not_about_the_event(tmp_path):
         titles = [o.title for o in recipe.offers(index)]
         assert titles, "no offers, so the title was never rendered"
         assert all(t.endswith("most years") for t in titles), titles
+    finally:
+        store.close()
+
+
+def test_the_naming_evidence_off_the_spine_is_the_evidence_in_the_photos(tmp_path):
+    """`offers()` reads `index.image_album_years` instead of hydrating the
+    burst - 11,422 photographs on the reference library, 0.54s of a 1.18s
+    offers phase, for one date and one album list apiece.
+
+    A comparison in which both routes answer None proves nothing: on the real
+    library `reserved` holds every person's name and the answer is None for
+    all eleven events, so the assertions below force real names by emptying
+    `reserved` and by dropping `min_years` to 1.
+    """
+    from rekindle.memory.recipes.builtin import _burst_days
+    from rekindle.memory.recipes.registry import get
+
+    photos = _library(
+        {2020: (12, 24), 2021: (12, 24), 2022: (12, 24), 2023: (12, 24)},
+        albums_of={
+            2020: ["Christmas 2020", "Photos from 2020"],
+            2021: ["Christmas 21", "Avyan"],
+            2022: ["Christmas 2022", "Photos from 2022"],
+            2023: ["Diwali 23"],
+        },
+    )
+    store, index = _index(tmp_path, photos)
+    try:
+        recipe = get("recurring_event")
+        events = recurring.events_from(recipe._days(index))
+        assert events, "no events, so nothing below is compared"
+        named = 0
+        for event in events:
+            walked = _album_years(event, photos)
+            assert recipe._names_of(index, event) == walked, event.centre
+            for reserved in (frozenset({"avyan"}), frozenset()):
+                for min_years in (1, 2):
+                    spine = recurring.naming_evidence(
+                        recipe._names_of(index, event),
+                        min_years=min_years,
+                        reserved=reserved,
+                    )
+                    assert spine == recurring.naming_evidence(
+                        walked, min_years=min_years, reserved=reserved
+                    )
+                    named += spine is not None
+        assert named, "every comparison returned None, so the positive case never ran"
+        # The days are the same days, which is what makes the two comparable.
+        assert _burst_days(events[0]) == sorted(
+            {
+                (p.meta.taken_at_local.year, p.meta.taken_at_local.month, p.meta.taken_at_local.day)
+                for p in recurring.photos_in(events[0], photos)
+            }
+        )
+    finally:
+        store.close()
+
+
+def test_the_reserved_name_is_what_keeps_a_person_out_of_a_title(tmp_path):
+    """The positive case the test above forces, at the recipe's own boundary:
+    with `Avyan` in every year of the event and no person of that name in the
+    library, the recipe DOES title the memory `Avyan`. On the reference
+    library `reserved` suppresses exactly this, twice, and both were the only
+    events that were named at all - so a route that quietly stopped finding
+    names would look identical to the shipping configuration.
+    """
+    from rekindle.memory.recipes.registry import get
+
+    photos = _library(
+        {2020: (8, 20), 2021: (8, 22), 2022: (8, 19), 2023: (8, 21)},
+        albums_of={y: ["Avyan"] for y in (2020, 2021, 2022, 2023)},
+    )
+    store, index = _index(tmp_path, photos)
+    try:
+        assert [o.title for o in get("recurring_event").offers(index)] == ["Avyan"]
+        # And it found the name without opening a single photograph, which is
+        # the whole point of the change - asserted here rather than only in
+        # `test_recipes.py`, where the fixture's offer could be unnamed.
+        assert len(index._cache) == 0
+    finally:
+        store.close()
+
+
+def test_a_video_in_an_album_cannot_name_the_event(tmp_path):
+    """The images-only rule reaches the TITLE as well as the shots. A video is
+    refused by `composition`, so naming the memory after the album a video
+    carries titles it with a photograph it can never show.
+    """
+    from rekindle.memory.recipes.registry import get
+
+    photos = _library({2020: (8, 20), 2021: (8, 22), 2022: (8, 19), 2023: (8, 21)})
+    for year in (2020, 2021, 2022, 2023):
+        video = _photo(f"v{year}", datetime(year, 8, 20, 12, 0), ["Avyan"])
+        video.media_type = MediaType.VIDEO
+        photos.append(video)
+
+    store, index = _index(tmp_path, photos)
+    try:
+        recipe = get("recurring_event")
+        # The premise: the videos really are inside bursts, in enough years to
+        # satisfy `min_years`, so a route that forgot to filter would name the
+        # event after them.
+        bursts = [b for e in recurring.events_from(recipe._days(index)) for b in e.bursts]
+        unfiltered: dict[str, set[int]] = {}
+        for photo in photos:
+            moment = photo.meta.taken_at_local
+            burst = next((b for b in bursts if moment and b.covers(moment.date())), None)
+            if burst is None:
+                continue
+            for album in photo.albums:
+                unfiltered.setdefault(album, set()).add(burst.year)
+        assert recurring.naming_evidence(unfiltered) == "Avyan"
+
+        titles = [o.title for o in recipe.offers(index)]
+        assert titles, "no offers, so the title was never rendered"
+        assert "Avyan" not in titles, titles
     finally:
         store.close()

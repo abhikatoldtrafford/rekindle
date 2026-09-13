@@ -1111,7 +1111,7 @@ short-circuits a tag-blocked photograph without decoding it and its empty
 nobody about a photograph it never opened. `Detection.examined` exists for
 that distinction and `counted_faces` returns None when it is False.
 
-### One of the three hydrating recipes is off the library
+### Two of the three hydrating recipes are off the library
 
 `album_story.offers()` needed a count and two dates and got the dates by
 loading every photograph of every album. The month is on the spine now
@@ -1123,15 +1123,33 @@ compared instants rather than wall clocks and called `Photos from 2018`
 "August 2018 – December 2018" when its last photographs read 1 January 2019 on
 the clock the photographer was looking at.
 
-**The other three still read the library, and what each needs is now recorded
-in `tests/test_recipes.py` beside the test:** `then_and_now` needs the
+`recurring_event.offers()` followed it. It derived its title from the
+photographs — hydrating every image of every burst, 11,422 on the reference
+library, to read one local date and one album list apiece — and both are in
+the index already, inverted. `MemoryIndex.image_album_years` intersects the
+burst days against each album and reads the years off the year spine, and
+`recurring.naming_evidence` now takes that mapping instead of photographs.
+Measured cold on the reference index: 0.54s hydrating against 0.02s, and the
+recipe's whole offers phase 1.18s → 0.38s, with the eleven offers byte for
+byte what they were.
+
+The rule did not move, and two things about the mapping are why. It is keyed
+on the album name AS WRITTEN, not on `albums.family`, because the family of
+`Photos from 2019` is `Photos from` — which passes `presentable`, so a
+family-keyed answer would title every event "Photos from", the exact defect
+`albums.py` exists to prevent. And it counts images only: 428 of the
+photographs inside this library's bursts are videos carrying an album, and
+`composition` refuses a video, so naming a memory after one names it after a
+shot it can never show.
+
+**The other two still read the library, and what each needs is recorded in
+`tests/test_recipes.py` beside the test:** `then_and_now` needs the
 composition scalars per photograph or it advertises a memory `select()` cannot
-build; `recurring_event` derives its title from the photographs; `place_cluster`
-splits a cell into visits by timestamp gap. Putting the composition scalars on
-the spine means either a second implementation of the guardrail predicate — the
-thing this codebase has been bitten by repeatedly — or extracting the predicate
-so both routes call one function. That is the design decision, and it has not
-been made.
+build; `place_cluster` splits a cell into visits by timestamp gap. Putting the
+composition scalars on the spine means either a second implementation of the
+guardrail predicate — the thing this codebase has been bitten by repeatedly —
+or extracting the predicate so both routes call one function. That is the
+design decision, and it has not been made.
 
 ### Cluster labels are inert by construction, not by convention
 
