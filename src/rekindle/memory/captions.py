@@ -15,6 +15,7 @@ lat/lon we cannot resolve is exactly the failure this rule exists to prevent.
 from __future__ import annotations
 
 import unicodedata
+from collections.abc import Callable
 from datetime import datetime
 
 from rekindle.models import Photo
@@ -229,7 +230,44 @@ _FOLD = {
 }
 
 
-def renderable(text: str) -> str:
+#: Unicode blocks whose text is WRONG unless the renderer reorders glyphs.
+#:
+#: Bengali, Devanagari, Tamil, Telugu, Kannada, Malayalam, Gujarati, Odia,
+#: Gurmukhi, Sinhala, Thai, Lao, Khmer, Myanmar, Arabic, Hebrew. In these a
+#: vowel sign can be stored after its consonant and must be DRAWN before it,
+#: consonants join into conjuncts, and letters change shape by position.
+#:
+#: Pillow does that only with libraqm, and the PyPI wheels do not carry it -
+#: measured on this machine, `PIL.features.check("raqm")` is False and
+#: rendering the Bengali `কি` puts the vowel sign on the wrong side of the
+#: consonant. That is worse than a box: a box is visibly broken, and
+#: misordered Bengali looks like someone's language spelled wrong.
+#:
+#: Han, Hiragana, Katakana, Hangul, Greek and Cyrillic are deliberately NOT
+#: here. They need a font and no shaping, so `--font` fixes them completely.
+_SHAPED_RANGES = (
+    (0x0590, 0x05FF),  # Hebrew
+    (0x0600, 0x06FF),  # Arabic
+    (0x0700, 0x074F),  # Syriac
+    (0x0900, 0x0DFF),  # Devanagari through Sinhala
+    (0x0E00, 0x0EFF),  # Thai, Lao
+    (0x1000, 0x109F),  # Myanmar
+    (0x1780, 0x17FF),  # Khmer
+    (0xFB1D, 0xFDFF),  # Hebrew and Arabic presentation forms
+)
+
+
+def needs_shaping(text: str) -> bool:
+    """Does drawing this text correctly require glyph reordering?
+
+    Used to REPORT rather than to repair: rekindle cannot shape, so the
+    honest thing is to say a title will be wrong, not to draw it wrongly and
+    hope. See `_SHAPED_RANGES`.
+    """
+    return any(low <= ord(ch) <= high for ch in text for low, high in _SHAPED_RANGES)
+
+
+def renderable(text: str, drawable: Callable[[str], bool] | None = None) -> str:
     """`text` with characters the bundled font cannot draw folded into ones it
     can, where an exact equivalent exists.
 
@@ -243,16 +281,27 @@ def renderable(text: str) -> str:
     draws as boxes, and that is the honest outcome: this function folds
     characters, it cannot invent glyphs. Transliterating a script would be
     inventing a name, which is the one thing captions may never do.
+
+    `drawable` is what stops the fold DISCARDING typography the renderer could
+    have shown. rekindle now ships Noto Sans, which draws an en dash and an
+    accented Latin letter perfectly well, so folding `José` to `Jose` there
+    loses something for nothing. `render.frames.drawable` answers for the
+    active font and the fold skips whatever it says yes to.
+
+    Called with no `drawable` it is the ASCII FLOOR - what any font can show -
+    and that is the right behaviour for `memory.llm`, which folds on the way
+    into a cache that is shared by renders using different fonts on different
+    machines.
     """
     if text.isascii():
         return text
-    folded = "".join(_FOLD.get(ch, ch) for ch in text)
-    if folded.isascii():
-        return folded
     out = []
-    for ch in folded:
-        if ch.isascii():
+    for ch in text:
+        if ch.isascii() or (drawable is not None and drawable(ch)):
             out.append(ch)
+            continue
+        if ch in _FOLD:
+            out.append(_FOLD[ch])
             continue
         decomposed = unicodedata.normalize("NFD", ch)
         stripped = "".join(c for c in decomposed if not unicodedata.combining(c))

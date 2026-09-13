@@ -27,7 +27,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from rekindle.memory import llm
 from rekindle.memory.captions import _FOLD, renderable
-from rekindle.memory.render.frames import caption_frame, title_card
+from rekindle.memory.render.frames import caption_frame
 from rekindle.memory.spec import FactSheet, MemorySpec, Shot
 
 #: A private-use codepoint. No font assigns one, so whatever it draws IS the
@@ -212,20 +212,115 @@ def test_a_cached_row_written_before_the_fold_existed_is_folded_on_the_way_out()
 # the renderer, which is the net and not the fix
 
 
-def test_caption_frame_draws_no_box_for_a_dash():
-    """A frame captioned with an en dash is pixel-identical to one captioned
-    with a hyphen. Before the fold it differed by a filled rectangle.
+def test_the_bundled_font_draws_the_dash_rather_than_folding_it():
+    """rekindle ships Noto Sans, so an en dash is DRAWN as an en dash.
+
+    This test used to assert the opposite - that a dash-captioned frame was
+    pixel-identical to a hyphen-captioned one, because the fold turned one
+    into the other. That was right when the only face available drew a box.
+    Folding it now would discard typography the renderer can show.
     """
+    from rekindle.memory.render.frames import drawable
+
+    assert drawable("–"), "the bundled font should have an en dash"
     with_dash = caption_frame(Image.new("RGB", (400, 300), (0, 0, 0)), "2025 – Paramita")
     with_hyphen = caption_frame(Image.new("RGB", (400, 300), (0, 0, 0)), "2025 - Paramita")
-    assert with_dash.tobytes() == with_hyphen.tobytes()
+    assert with_dash.tobytes() != with_hyphen.tobytes(), "the dash was folded away"
 
 
-def test_the_title_card_folds_before_it_measures():
-    """Not merely before it draws. The fold changes the string's WIDTH, and a
-    card laid out for characters that never appear on it wraps in the wrong
-    place.
+def test_a_font_that_cannot_draw_the_dash_still_gets_the_fold(monkeypatch, tmp_path):
+    """The fold is not gone, it is conditional. Point the renderer at a face
+    with no en dash - Pillow's own bundled Aileron, reached by hiding the
+    shipped font - and the caption falls back to a hyphen rather than a box.
     """
-    dashed = title_card("A trip — 2025", "10 photos", (640, 360))
-    hyphened = title_card("A trip - 2025", "10 photos", (640, 360))
-    assert dashed.tobytes() == hyphened.tobytes()
+    from rekindle.memory.render import frames
+
+    monkeypatch.setattr(frames, "BUNDLED_FONT", tmp_path / "absent.ttf")
+    frames._draws.cache_clear()
+    try:
+        assert not frames.drawable("–")
+        with_dash = frames.caption_frame(Image.new("RGB", (400, 300), (0, 0, 0)), "2025 – Paramita")
+        with_hyphen = frames.caption_frame(
+            Image.new("RGB", (400, 300), (0, 0, 0)), "2025 - Paramita"
+        )
+        assert with_dash.tobytes() == with_hyphen.tobytes(), "the fold did not fire"
+    finally:
+        frames._draws.cache_clear()
+
+
+def test_the_ascii_floor_is_unchanged_for_the_caption_cache():
+    """`memory.llm` folds on the way into a cache shared by renders using
+    different fonts on different machines, so it asks for the floor and must
+    keep getting it."""
+    assert renderable("9 August 2025 – Paramita") == "9 August 2025 - Paramita"
+    assert renderable("José in Puri") == "Jose in Puri"
+
+
+def test_the_title_card_still_folds_what_the_font_cannot_draw(monkeypatch, tmp_path):
+    from rekindle.memory.render import frames
+
+    monkeypatch.setattr(frames, "BUNDLED_FONT", tmp_path / "absent.ttf")
+    frames._draws.cache_clear()
+    try:
+        dashed = frames.title_card("A trip — 2025", "10 photos", (640, 360))
+        hyphened = frames.title_card("A trip - 2025", "10 photos", (640, 360))
+        assert dashed.tobytes() == hyphened.tobytes()
+    finally:
+        frames._draws.cache_clear()
+
+
+def _a_font_with_bengali():
+    """Any font on this machine that draws Bengali. None if there is none.
+
+    Needed because the bundled Aileron has no Bengali glyph at all, so both
+    orderings below render as two identical boxes and the comparison would
+    pass for the wrong reason.
+    """
+    import sys
+    from pathlib import Path
+
+    roots = {
+        "win32": [Path("C:/Windows/Fonts")],
+        "darwin": [Path("/System/Library/Fonts"), Path("/Library/Fonts")],
+    }.get(sys.platform, [Path("/usr/share/fonts")])
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*.ttf")):
+            try:
+                font = ImageFont.truetype(str(path), 24)
+            except OSError:
+                continue
+            image = Image.new("L", (60, 46), 0)
+            ImageDraw.Draw(image).text((2, 2), "অ", font=font, fill=255)
+            probe = Image.new("L", (60, 46), 0)
+            ImageDraw.Draw(probe).text((2, 2), NOTDEF_PROBE, font=font, fill=255)
+            if image.tobytes() != probe.tobytes():
+                return font
+    return None
+
+
+def test_the_shaping_claim_is_measured_not_assumed():
+    """Pins the finding the warning rests on.
+
+    If a future Pillow ships libraqm this skips, and the warning it justifies
+    should be revisited rather than left in place saying something that
+    stopped being true.
+    """
+    from PIL import features
+
+    if features.check("raqm"):
+        pytest.skip("this Pillow HAS libraqm; the warning should be re-examined")
+    font = _a_font_with_bengali()
+    if font is None:
+        pytest.skip("no font with Bengali coverage on this machine")
+
+    def drawn(s):
+        image = Image.new("L", (140, 56), 0)
+        ImageDraw.Draw(image).text((6, 6), s, font=font, fill=255)
+        return image.tobytes()
+
+    # KA + vowel-sign-I. Correct Bengali draws the vowel FIRST, so a renderer
+    # that shapes would produce the same pixels as the manually reordered
+    # string. Without libraqm it does not: it draws them as stored.
+    assert drawn("কি") != drawn("ি" + "ক"), "this Pillow appears to be reordering glyphs after all"

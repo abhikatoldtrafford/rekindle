@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 from rekindle.memory import composition as comp
 from rekindle.memory.render import frames as fr
@@ -1180,3 +1180,70 @@ def test_an_empty_title_still_reserves_its_line():
     canvas = (1280, 960)
     blank = fr.title_card("", "10 photos", canvas)
     assert blank.size == canvas
+
+
+# --------------------------------------------------------------------------
+# --font: the glyphs the bundled face does not have
+
+
+def test_a_named_font_is_used_instead_of_the_bundled_one(tmp_path):
+    """The bundled Aileron is a SUBSET face - no accented Latin letter, no
+    non-Latin script at all. `--font` is how a library that is not in English
+    gets readable text, and it is an explicit INPUT: the same font gives the
+    same bytes on any machine, which a system-font search would have quietly
+    destroyed.
+    """
+    other = _a_font_with_more_glyphs()
+    if other is None:
+        pytest.skip("no font with wider coverage on this machine")
+    plain = fr.title_card("Jose", "10 photos", (640, 360)).tobytes()
+    try:
+        fr.use_font(other)
+        with_font = fr.title_card("Jose", "10 photos", (640, 360)).tobytes()
+    finally:
+        fr.use_font(None)
+    assert plain != with_font, "the named font was not used"
+
+
+def test_use_font_refuses_a_file_that_is_not_a_font(tmp_path):
+    """At the moment the user names it. A render that fell back silently
+    would take an hour to produce text in the wrong typeface."""
+    junk = tmp_path / "not-a-font.ttf"
+    junk.write_bytes(b"this is not a font")
+    with pytest.raises(OSError):
+        fr.use_font(junk)
+    assert fr._FONT_FILE is None, "a refused font must not become the active one"
+
+
+def test_clearing_the_font_restores_the_bundled_face():
+    other = _a_font_with_more_glyphs()
+    if other is None:
+        pytest.skip("no font with wider coverage on this machine")
+    before = fr.title_card("Kashmir", "", (400, 300)).tobytes()
+    fr.use_font(other)
+    fr.use_font(None)
+    assert fr.title_card("Kashmir", "", (400, 300)).tobytes() == before
+
+
+def _a_font_with_more_glyphs():
+    """Any font on this machine that draws a character Aileron cannot.
+
+    Returns None rather than skipping here, so the caller decides - a CI
+    runner may have no fonts at all, and that is not a failure of this code.
+    """
+    import sys
+
+    roots = {
+        "win32": [Path("C:/Windows/Fonts")],
+        "darwin": [Path("/System/Library/Fonts"), Path("/Library/Fonts")],
+    }.get(sys.platform, [Path("/usr/share/fonts")])
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for path in sorted(root.rglob("*.ttf"))[:60]:
+            try:
+                ImageFont.truetype(str(path), 12)
+            except OSError:
+                continue
+            return path
+    return None

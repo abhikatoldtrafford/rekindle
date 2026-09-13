@@ -422,6 +422,18 @@ def memory(
             ),
         ),
     ] = "film",
+    font: Annotated[
+        Path | None,
+        typer.Option(
+            "--font",
+            help=(
+                "A .ttf/.otf to draw titles and captions with. The bundled "
+                "face covers ASCII only, so this is how a library that is not "
+                "in English gets readable text. It is an explicit input, so "
+                "the same font gives the same bytes on any machine."
+            ),
+        ),
+    ] = None,
     data_dir: DataDir = Path("./data"),
 ) -> None:
     """Build memories into a folder. Renders a GIF, and an MP4 if ffmpeg is on PATH.
@@ -436,6 +448,9 @@ def memory(
     from rekindle.memory.cli import memory_cmd, prompt_cmd
     from rekindle.memory.render.timeline import STYLES
 
+    _apply_font(font)
+    if text:
+        _warn_unshapable(text)
     if captions not in MODES:
         console.print(f"[red]--captions must be one of {', '.join(MODES)}, not {captions!r}[/red]")
         raise typer.Exit(code=2)
@@ -557,6 +572,18 @@ def scenery(
         str,
         typer.Option("--style", help="Motion style: 'film' (default) or 'cuts'."),
     ] = "film",
+    font: Annotated[
+        Path | None,
+        typer.Option(
+            "--font",
+            help=(
+                "A .ttf/.otf to draw titles and captions with. The bundled "
+                "face covers ASCII only, so this is how a library that is not "
+                "in English gets readable text. It is an explicit input, so "
+                "the same font gives the same bytes on any machine."
+            ),
+        ),
+    ] = None,
     data_dir: DataDir = Path("./data"),
 ) -> None:
     """Build a memory whose subject is a SCENE - the sea, the hills, the food.
@@ -571,6 +598,7 @@ def scenery(
     from rekindle.memory.cli import scenery_cmd, scenery_list_cmd
     from rekindle.memory.render.timeline import STYLES
 
+    _apply_font(font)
     if captions not in MODES:
         console.print(f"[red]--captions must be one of {', '.join(MODES)}, not {captions!r}[/red]")
         raise typer.Exit(code=2)
@@ -650,6 +678,49 @@ def dismissals(data_dir: DataDir = Path("./data")) -> None:
     from rekindle.memory.cli import dismissals_cmd
 
     dismissals_cmd(_resolved(data_dir))
+
+
+def _apply_font(font: Path | None) -> None:
+    """Install `--font`, and say what it cannot fix.
+
+    A font gives Pillow the GLYPHS. It does not give it SHAPING, and Pillow's
+    PyPI wheels carry no libraqm - measured, `PIL.features.check("raqm")` is
+    False - so Bengali, Devanagari, Arabic, Thai and their neighbours are
+    drawn in stored order with vowel signs on the wrong side of the
+    consonant. That is worse than a box: a box is visibly broken, and
+    misordered Bengali looks like someone's language spelled wrong.
+
+    So a font is offered for the scripts it genuinely fixes - accented Latin,
+    Greek, Cyrillic, Han, Kana, Hangul - and the rest are reported.
+    """
+    from rekindle.memory.render.frames import use_font
+
+    if font is None:
+        return
+    try:
+        use_font(_resolved(font))
+    except OSError as exc:
+        console.print(f"[red]--font {font} could not be loaded:[/red] {exc}")
+        raise typer.Exit(code=2) from exc
+
+
+def _warn_unshapable(*texts: str) -> None:
+    """Say so when a title needs shaping this renderer cannot do."""
+    from PIL import features
+
+    from rekindle.memory.captions import needs_shaping
+
+    if features.check("raqm"):
+        return
+    if not any(needs_shaping(t) for t in texts if t):
+        return
+    console.print(
+        "[yellow]![/yellow] This text is in a script that needs glyph reordering "
+        "(Bengali, Devanagari, Arabic, Thai and similar). Pillow here was built "
+        "without libraqm, so it will be drawn in stored order - readable-looking "
+        "and WRONG. Nothing rekindle can do about it from Python; the memory is "
+        "still built and every photograph in it is correct."
+    )
 
 
 @app.command("publish-review")

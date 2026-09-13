@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import lru_cache
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
@@ -22,6 +23,11 @@ from rekindle.memory.composition import FIT_PAD, plan_placement
 from rekindle.memory.spec import MemorySpec
 from rekindle.meta.exif import open_upright
 from rekindle.models import Photo
+
+#: A private-use codepoint. No font assigns one, so whatever it draws IS
+#: that font's `.notdef` glyph.
+NOTDEF_PROBE = ""
+PROBE_SIZE = 24
 
 BACKGROUND = (0, 0, 0)
 TEXT = (245, 245, 245)
@@ -57,18 +63,95 @@ class FrameReport:
         return self.requested == self.rendered + self.total_dropped
 
 
-def _font(size: int) -> ImageFont.FreeTypeFont:
-    """A scalable font with no font FILE and no system font assumed.
+#: The face rekindle ships, and the reason a title in Russian or Greek works
+#: out of the box.
+#:
+#: Noto Sans (SIL Open Font License 1.1, licence beside it). 620 KB, which is
+#: the whole of what rekindle adds to a default install beyond four Python
+#: packages, and it buys every dash, every accented Latin letter, Greek and
+#: Cyrillic - all of which Pillow's bundled Aileron draws as a filled
+#: rectangle.
+#:
+#: It does NOT buy Bengali, Devanagari, Arabic or Thai, and no font would: in
+#: those scripts a vowel sign is stored after its consonant and must be drawn
+#: before it, and Pillow reorders glyphs only with libraqm, which the PyPI
+#: wheels do not carry. See `captions.needs_shaping`. Nor CJK, which is
+#: another 10 MB and belongs behind `--font`.
+BUNDLED_FONT = Path(__file__).resolve().parents[2] / "assets" / "fonts" / "NotoSans-Regular.ttf"
 
-    Pillow >= 10.1 lets `load_default` scale its bundled Aileron face, which
-    is the only way to get readable text in a wheel that ships no assets. The
-    fallback is Pillow's 11px bitmap font - ugly, but a caption is better than
-    a crash on an old Pillow.
+#: A font file the user chose, or None for the bundled face.
+#:
+#: Module-level rather than a parameter on six call sites, and set once by the
+#: CLI, exactly as `config.activate_from` installs the thresholds. It is an
+#: explicit INPUT: two people rendering the same library with the same
+#: `--font` get the same bytes, which is the property a system-font search
+#: would have quietly destroyed.
+_FONT_FILE: Path | None = None
+
+
+def use_font(path: Path | None) -> None:
+    """Draw with `path` from now on. `None` restores the bundled face.
+
+    Raises `OSError` if the file is not a font, at the moment the user names
+    it - a render that falls back silently would take an hour to produce text
+    in the wrong typeface.
     """
+    global _FONT_FILE
+    if path is not None:
+        ImageFont.truetype(str(path), 12)
+    _FONT_FILE = path
+
+
+def _font(size: int) -> ImageFont.FreeTypeFont:
+    """A scalable font: the one the user named, or Pillow's bundled Aileron.
+
+    Aileron is what makes a wheel that ships no assets produce readable text,
+    and it is a SUBSET face - no dash but the ASCII hyphen, no accented Latin
+    letter, no non-Latin script at all. `captions.renderable` folds what it
+    can into that subset; `--font` is how someone whose library is not in
+    English gets the rest.
+
+    The final fallback is Pillow's 11px bitmap font - ugly, but a caption is
+    better than a crash on an old Pillow.
+    """
+    for candidate in (_FONT_FILE, BUNDLED_FONT):
+        if candidate is None:
+            continue
+        try:
+            return ImageFont.truetype(str(candidate), size)
+        except OSError:
+            # The user's font was validated by `use_font`, and the bundled one
+            # ships with the wheel - but an installed copy can be damaged, and
+            # falling back is better than failing a render over a typeface.
+            continue
     try:
         return ImageFont.load_default(size=size)
     except (TypeError, AttributeError):  # pragma: no cover - very old Pillow
         return ImageFont.load_default()
+
+
+@lru_cache(maxsize=4096)
+def _draws(font_key: str, ch: str) -> bool:
+    """Can this font draw `ch`, or would it show a `.notdef` box?
+
+    Rendered and compared against a private-use codepoint no font assigns, so
+    it needs no font library beyond Pillow. Cached on the font PATH and the
+    character: glyph coverage does not vary with size, and a title is a few
+    dozen characters drawn many times.
+    """
+    probe_font = _font(PROBE_SIZE) if font_key == "" else ImageFont.truetype(font_key, PROBE_SIZE)
+
+    def pixels(text: str) -> bytes:
+        image = Image.new("L", (PROBE_SIZE * 3, PROBE_SIZE * 2), 0)
+        ImageDraw.Draw(image).text((2, 2), text, font=probe_font, fill=255)
+        return image.tobytes()
+
+    return pixels(ch) != pixels(NOTDEF_PROBE)
+
+
+def drawable(ch: str) -> bool:
+    """Whether the ACTIVE font can draw `ch`. See `_draws`."""
+    return _draws(str(_FONT_FILE) if _FONT_FILE is not None else "", ch)
 
 
 # How much of the canvas a blurred backdrop is enlarged by before blurring,
@@ -154,7 +237,7 @@ def caption_frame(frame: Image.Image, text: str) -> Image.Image:
     # that reached the renderer by some other road - an older cache row, a
     # hand-edited spec - because the failure is silent: FreeType draws a
     # filled rectangle for a missing glyph rather than raising.
-    text = renderable(text)
+    text = renderable(text, drawable)
     size = max(14, frame.height // 22)
     draw = ImageDraw.Draw(frame)
     font = _font(size)
@@ -202,8 +285,8 @@ def title_card(title: str, subtitle: str, canvas: tuple[int, int]) -> Image.Imag
     # Folded before anything is MEASURED, not just before it is drawn: the
     # fold changes the width of the string, and wrapping the unfolded one
     # would lay the card out for characters that never appear on it.
-    title = renderable(title)
-    subtitle = renderable(subtitle)
+    title = renderable(title, drawable)
+    subtitle = renderable(subtitle, drawable)
     frame = Image.new("RGB", canvas, BACKGROUND)
     draw = ImageDraw.Draw(frame)
     max_width = canvas[0] - canvas[0] // 8
