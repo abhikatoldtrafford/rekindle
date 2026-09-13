@@ -234,7 +234,7 @@ def test_v1_database_migrates_without_losing_rows(tmp_path):
         # reject it as unmigratable - turning every M0 database into "delete
         # and re-index". Each new rung makes that failure mode wider, and this
         # test cheaper.
-        assert store.schema_version() == SCHEMA_VERSION == 6
+        assert store.schema_version() == SCHEMA_VERSION == 7
         assert store.count() == 2
         photo = store.get("abc")
         assert photo is not None

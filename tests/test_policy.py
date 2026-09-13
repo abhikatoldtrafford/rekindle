@@ -34,6 +34,8 @@ def _p(**kw) -> Photo:
             people=kw.pop("people", []),
             archived=kw.pop("archived", False),
             trashed=kw.pop("trashed", False),
+            face_count=kw.pop("face_count", None),
+            face_verdict=kw.pop("face_verdict", None),
         ),
         first_seen=datetime(2020, 1, 1, tzinfo=UTC),
         last_seen=datetime(2020, 1, 1, tzinfo=UTC),
@@ -363,3 +365,69 @@ def test_a_path_on_another_drive_is_simply_not_inside_the_excluded_one():
     """
     policy = ExclusionPolicy(paths=(Path("C:/private"),))
     assert policy.deny_reason(_p(paths=[Path("D:/photos/a.jpg")])) is None
+
+
+# --------------------------------------------------------------------------
+# the second public-safe test: the detector's count against the tags
+
+
+ALLOW = frozenset({"Abhik Maiti"})
+
+
+def test_a_tagged_photo_with_an_unnamed_face_is_refused():
+    """Tags say who was RECOGNISED, not who was present.
+
+    Google tags people the owner has named, so "tagged: Abhik" is entirely
+    consistent with a stranger standing beside him - and the tag test alone
+    publishes that. Measured on 60 photographs of this library tagged only
+    "Abhik Maiti" and actually decoded, the detector found more faces than
+    tags in 29 of them; one had thirty-six.
+    """
+    assert is_public_safe(_p(people=["Abhik Maiti"], face_count=1), ALLOW)
+    assert not is_public_safe(_p(people=["Abhik Maiti"], face_count=2), ALLOW)
+    assert not is_public_safe(_p(people=["Abhik Maiti"], face_count=36), ALLOW)
+
+
+def test_fewer_faces_than_tags_is_ordinary_and_not_evidence():
+    """A person facing away, a tag on a photograph of a photograph. The
+    comparison is `>` and not `!=` for that reason."""
+    assert is_public_safe(_p(people=["Abhik Maiti"], face_count=0), ALLOW)
+
+
+def test_an_unexamined_photo_abstains_rather_than_being_trusted_or_refused():
+    """`face_count is None` means the detector has never looked.
+
+    Refusing would make `--public-safe` return nothing until
+    `rekindle semantic facegate` has run, breaking every existing user;
+    trusting would be a claim nobody made. It abstains, the tag test still
+    applies, and `unverified_count` exists so the gap can be printed.
+    """
+    assert is_public_safe(_p(people=["Abhik Maiti"]), ALLOW)
+    assert not pol.has_untagged_face(_p(people=["Abhik Maiti"]))
+
+
+def test_a_zero_count_is_evidence_and_None_is_not():
+    """The distinction the whole column turns on. A decoded photograph of an
+    empty beach and a photograph nobody decoded both have "no faces found",
+    and only one of them is a measurement."""
+    assert pol.unverified_count([_p(people=["Abhik Maiti"], face_count=0)]) == 0
+    assert pol.unverified_count([_p(people=["Abhik Maiti"])]) == 1
+
+
+def test_the_count_cannot_rescue_a_photo_the_tags_refuse():
+    """The two tests are an AND, and the tag test is still the first one. A
+    photograph of someone not on the allow-list is refused however few faces
+    the detector counts, and an untagged one stays default-deny."""
+    assert not is_public_safe(_p(people=["Paramita"], face_count=1), ALLOW)
+    assert not is_public_safe(_p(people=[], face_count=0), ALLOW)
+
+
+def test_the_two_refusals_are_reported_apart():
+    """`not_public_safe` is mostly "nobody is tagged here", a property of
+    Google's coverage. `more_faces_than_tags` is the detector contradicting
+    the tags. Merging the counts would hide how much work the detector does.
+    """
+    policy = ExclusionPolicy(public_safe_allow=ALLOW, public_safe_only=True)
+    assert policy.deny_reason(_p(people=[])) == pol.DENY_NOT_PUBLIC_SAFE
+    assert policy.deny_reason(_p(people=["Abhik Maiti"], face_count=4)) == pol.DENY_UNTAGGED_FACE
+    assert policy.deny_reason(_p(people=["Abhik Maiti"], face_count=1)) is None

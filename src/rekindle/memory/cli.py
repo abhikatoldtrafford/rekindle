@@ -212,6 +212,16 @@ def _render_exclusions(index: MemoryIndex) -> None:
         return
     parts = ", ".join(f"{n} {reason}" for reason, n in sorted(report.by_reason.items()))
     console.print(f"[dim]{report.excluded} photos withheld by the guardrails: {parts}[/dim]")
+    if report.unverified:
+        # Said whenever `--public-safe` admitted something the detector has
+        # never seen. The gate abstains on those rather than refusing them, so
+        # without this line its measured false-pass rate does not describe
+        # what it just approved and nothing on screen says so.
+        console.print(
+            f"[yellow]![/yellow] {report.unverified} of the admitted photos have never been "
+            "through the face detector, so only their tags vouch for them. Run "
+            '`rekindle semantic facegate --allow "<your name>"`, and look at them anyway.'
+        )
 
 
 def _render_album_merges(index: MemoryIndex) -> None:
@@ -759,15 +769,36 @@ def _render_one(
             console.print(f"  [dim]{NO_MUSIC_HINT}[/dim]")
 
     if spec.public_safe:
+        # Counted over THIS memory's photographs, so the marker describes what
+        # it sits next to rather than the library in general.
+        present = [p for p in photos if p is not None]
+        unchecked = sum(1 for p in present if p.meta.face_count is None)
         (folder / PUBLIC_SAFE_MARKER).write_text(
-            "Every photo in this memory has face tags that are a subset of the "
-            "configured public-safe allow-list.\n"
-            "Untagged photos are NEVER treated as public-safe: face tags cover "
-            "only part of a Google Takeout library, so an untagged photo may "
-            "still contain other people.\n",
+            "TWO AUTOMATED CHECKS PASSED. NEITHER IS A GUARANTEE.\n"
+            "\n"
+            "1. Tags. Every photo here carries face tags and every name is on "
+            "the configured allow-list. An untagged photo is NEVER treated as "
+            "public-safe: tags cover only part of a Google Takeout library, so "
+            "an untagged photo may contain anyone.\n"
+            "\n"
+            "2. Count. Where the face detector has looked, it found no more "
+            "faces than the tags account for. Tags say who was RECOGNISED, not "
+            "who was present - Google labels only people you have named - so "
+            "this is the check that catches a stranger standing beside you.\n"
+            f"   Checked by the detector: {len(present) - unchecked} of "
+            f"{len(present)}. Not checked: {unchecked}.\n"
+            "\n"
+            "LOOK AT THEM BEFORE YOU PUBLISH. On a hand-checked sample of this "
+            "library the tag test alone approved a photo containing someone "
+            "else about 77% of the time. The detector removed roughly half of "
+            "those; a person removed 41 more that no detector can catch - a "
+            "child being held, a body in frame with the head above it, faces "
+            "turned away.\n",
             encoding="utf-8",
         )
         line += " [cyan]PUBLIC-SAFE[/cyan]"
+        if unchecked:
+            line += f" [yellow]({unchecked} unverified)[/yellow]"
 
     console.print(line)
     console.print(f"  [dim]{folder}[/dim]")

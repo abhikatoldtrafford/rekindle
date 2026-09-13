@@ -125,6 +125,14 @@ class ExclusionReport:
     total: int = 0
     allowed: int = 0
     by_reason: dict[str, int] = field(default_factory=dict)
+    #: Of the ALLOWED photos, how many the face detector has never looked at.
+    #:
+    #: Only meaningful under `--public-safe`, and only there because that gate
+    #: ABSTAINS on an unexamined photograph rather than refusing it. A gate
+    #: that quietly abstains on most of what it approves has a measured
+    #: false-pass rate that does not describe what it just approved, and the
+    #: user cannot tell from the output. So it is counted and printed.
+    unverified: int = 0
 
     @property
     def excluded(self) -> int:
@@ -236,11 +244,16 @@ class _StoreSource:
         """Every allowed row, once, as `(rowid, photo)`, counting the rest.
 
         The rowid is what lets the index hold a 300,000-photo library as
-        eight-byte integers. It is NOT stable across writes - `_insert` is
-        INSERT OR REPLACE, which deletes the row and allocates a new rowid -
-        which is fine and is why the connection is read-only: an index is a
-        snapshot of the library as it was when it was opened, and rebuilding
-        it is how you see a changed one.
+        eight-byte integers. It is not something to rely on across writes: a
+        row can be deleted and a new one allocated the same id, so an index is
+        a snapshot of the library as it was when it was opened, the connection
+        is read-only, and rebuilding it is how you see a changed one.
+
+        (This used to say a rowid changes on every upsert, because `_insert`
+        was INSERT OR REPLACE - which deletes the conflicting row and inserts
+        a new one. It is ON CONFLICT DO UPDATE now, so an updated row KEEPS
+        its rowid. The conclusion is unchanged and the reason for it was not,
+        which is worth the two lines.)
 
         ORDER BY rowid is not decoration. A bare `SELECT * FROM photos` walks
         the table in rowid order *in practice*, and the engine's byte-for-byte
@@ -253,6 +266,8 @@ class _StoreSource:
             report.total += 1
             reason = self._policy.deny_reason(photo)
             if reason is None:
+                if self._policy.public_safe_only and photo.meta.face_count is None:
+                    report.unverified += 1
                 yield row["_rowid"], photo
             else:
                 report.by_reason[reason] = report.by_reason.get(reason, 0) + 1

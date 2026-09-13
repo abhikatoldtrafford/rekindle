@@ -148,10 +148,33 @@ class Detection:
     verdict: Verdict
     image_size: tuple[int, int] = (0, 0)
     error: str = ""
+    #: Did the detector actually look at the pixels?
+    #:
+    #: False for the two paths that reach a verdict WITHOUT decoding: a photo
+    #: blocked on its tags alone, and a file that could not be opened. Both
+    #: have `boxes == ()`, so `face_count` reads 0 for them - which is the
+    #: same number a decoded photograph of an empty beach produces, and means
+    #: the opposite thing.
+    #:
+    #: Nothing depended on the difference while this lived only in a printed
+    #: report. It matters the moment a count is STORED and a publishing gate
+    #: compares it against the tags: "the detector looked and saw nobody" is
+    #: evidence, and "the detector never looked" recorded as 0 is a lie the
+    #: gate would act on. See `counted_faces`.
+    examined: bool = True
 
     @property
     def face_count(self) -> int:
         return len(self.boxes)
+
+    @property
+    def counted_faces(self) -> int | None:
+        """`face_count` when the detector actually ran, else None.
+
+        This is what may be written to the index. None means "not measured",
+        which the gate treats as "abstain" rather than as zero.
+        """
+        return self.face_count if self.examined else None
 
     @property
     def top_score(self) -> float:
@@ -522,10 +545,15 @@ def _examine(
         # Blocked on the tag alone, WITHOUT being decoded. The tag is already
         # proof of a face, and letting the detector overrule a person Google
         # has already named is how a stranger gets published.
-        return Detection(photo.file_hash, photo.path, (), Verdict.HAS_FACE)
+        #
+        # `examined=False`: no count was taken here. The empty `boxes` is the
+        # absence of a measurement, not a measurement of zero.
+        return Detection(photo.file_hash, photo.path, (), Verdict.HAS_FACE, examined=False)
     path = photo.existing_path()
     if path is None:
-        return Detection(photo.file_hash, photo.path, (), Verdict.ERROR, error="file not found")
+        return Detection(
+            photo.file_hash, photo.path, (), Verdict.ERROR, error="file not found", examined=False
+        )
     try:
         # UPRIGHT, or the detector is looking at a photo lying on its side.
         # A face detector is not rotation invariant and this is not a cosmetic
@@ -549,6 +577,7 @@ def _examine(
             (),
             Verdict.ERROR,
             error=f"{type(exc).__name__}: {exc}",
+            examined=False,
         )
     verdict = classify(boxes, detect_threshold=detect_threshold, gate_threshold=gate_threshold)
     return Detection(photo.file_hash, path, boxes, verdict, image_size=size)

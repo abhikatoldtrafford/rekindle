@@ -581,7 +581,7 @@ def test_a_v5_database_migrates_and_keeps_its_fingerprints(tmp_path):
     db = tmp_path / "rekindle.sqlite"
     _write_v5(db)
     with PhotoStore(db) as store:
-        assert store.schema_version() == SCHEMA_VERSION == 6
+        assert store.schema_version() == SCHEMA_VERSION == 7
         row = store._conn.execute("SELECT * FROM photos WHERE file_hash='a'").fetchone()
         assert row["phash"] == 99 and row["colour"] == "ff"
         # NULL, not 0: "never examined" is not "examined and fine".

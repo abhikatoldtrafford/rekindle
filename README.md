@@ -562,11 +562,27 @@ We'd rather tell you than let you find out:
   (names only, no regions). Without either, rekindle doesn't know who is in a
   photo, so person-based memories and person exclusions are unavailable.
   **Date-range and folder exclusions always work** — prefer them.
-- **Face tags are incomplete, and that limits what can be published.** On a
-  Google Takeout export they cover only part of the library. A photo with *no*
-  tags is therefore never treated as safe to publish: it may still contain
-  people nobody labelled. `--public-safe` admits a photo only when its tags are
-  non-empty *and* every name is on your allow-list.
+- **`--public-safe` is two automated checks and neither is sufficient.** Tags
+  say who was *recognised*, not who was present: Google labels only people you
+  have named, so "tagged: you" is entirely consistent with a stranger beside
+  you. The flag admits a photo only when its tags are non-empty *and* every
+  name is on your allow-list *and* — once `rekindle semantic facegate` has
+  looked — the detector found no more faces than the tags account for.
+
+  Measured on the reference library: of 60 photographs tagged only with the
+  owner and actually decoded, **29 contained more faces than the tags named**,
+  one of them thirty-six. Those 29 all passed the tag test alone. A separate
+  hand-checked sample ran 189 tag-approved → 105 surviving the detector → 64
+  surviving human eyes, so **the tag test alone approves a photo containing
+  someone else about 77% of the time** and the detector removes roughly half
+  of those.
+
+  Run `rekindle semantic facegate --allow "Your Name"` before publishing
+  anything, and **still look at the photographs**. The remaining 41 in that
+  sample were rejected by a person, not a model: a child being held, a woman
+  with her body in frame and her head above it, a wedding frame with three
+  faces turned away. None is a face a detector can count. Photos the detector
+  has never seen are reported as unverified rather than assumed safe.
 - **GPS is sparse** in most libraries — around 12% on the reference export —
   so place memories are thin and never name the place. There is no offline
   gazetteer, so rekindle reports coordinates rather than inventing a city.

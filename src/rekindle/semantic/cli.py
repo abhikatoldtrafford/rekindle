@@ -635,11 +635,39 @@ def semantic_facegate(
     ] = DEFAULT_GATE_WORKERS,
     untagged_only: Annotated[
         bool,
-        typer.Option("--untagged-only/--all", help="Only photos with no face tag at all."),
+        typer.Option(
+            "--untagged-only/--all",
+            help="Only photos with no face tag at all. Default is --all, because "
+            "the TAGGED ones are where the publishing gate is weakest.",
+        ),
+    ] = False,
+    save: Annotated[
+        bool,
+        typer.Option("--save/--no-save", help="Write the verdicts to the index."),
     ] = True,
     data_dir: DataDir = Path("./data"),
 ) -> None:
-    """Propose photos that contain no face. NEVER publishes anything."""
+    """Count the faces in each photo and record what was found.
+
+    Two uses, and the second is why the default is `--all`.
+
+    It PROPOSES photographs that contain no face, so an untagged landscape can
+    be a publishing candidate instead of being default-denied along with every
+    other untagged row.
+
+    And it CHECKS the tagged ones, which is where `--public-safe` is weakest.
+    Google tags people the owner has NAMED, so "tagged: Abhik" is entirely
+    consistent with a stranger standing beside him. Measured on this library,
+    the tag test alone approves a photograph containing someone else about 77%
+    of the time; comparing the detector's count against the tag count removes
+    44% of those. `--untagged-only` skips exactly the photographs that check is
+    for, which is why it is no longer the default.
+
+    NEVER PUBLISHES ANYTHING. It writes a count and a verdict to the index.
+    What may be published is decided by `policy.is_public_safe`, and by a
+    human afterwards.
+    """
+    from rekindle.db import PhotoStore
     from rekindle.semantic.faces import gate_photos, load_detector
     from rekindle.semantic.photos import ReadFilter
     from rekindle.semantic.setup import cache_dir_for
@@ -674,6 +702,22 @@ def semantic_facegate(
             )
     finally:
         reader.close()
+
+    if save:
+        # Through `PhotoStore`, the same way `rekindle semantic orient` writes
+        # its verdicts back. `PhotoIndexReader` is read-only by design and
+        # must stay that way; a pass with something to record opens the writer
+        # itself, for as long as the write takes.
+        with PhotoStore(_db_path(data_dir)) as store:
+            written = store.set_face_gate(
+                (d.file_hash, str(d.verdict), d.counted_faces) for d in report.detections
+            )
+        counted = sum(1 for d in report.detections if d.examined)
+        console.print(
+            f"[dim]{written} verdicts written to the index, {counted} of them with a "
+            "face count. The rest were blocked on their tags or would not open, so no "
+            "count was taken - which the gate reads as 'unknown', never as zero.[/dim]"
+        )
 
     console.print(
         f"\n[bold]{report.eligible}[/bold] proposed as face-free, "

@@ -11,6 +11,7 @@ owns the chokepoint that applies it.
 from __future__ import annotations
 
 import tomllib
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from pathlib import Path
@@ -131,6 +132,14 @@ class ExclusionPolicy:
             return DENY_PATH
 
         if self.public_safe_only and not is_public_safe(photo, self.public_safe_allow):
+            # Counted apart, because they say different things about the
+            # library. `not_public_safe` is mostly "nobody is tagged here", a
+            # property of Google's coverage; `more_faces_than_tags` is the
+            # detector contradicting the tags, which is a photograph with a
+            # person in it that nobody named. A report that merged the two
+            # would hide how much work the detector is actually doing.
+            if has_untagged_face(photo):
+                return DENY_UNTAGGED_FACE
             return DENY_NOT_PUBLIC_SAFE
 
         return None
@@ -154,12 +163,18 @@ def _under(path: Path, roots: tuple[Path, ...]) -> bool:
     return any(path == root or path.is_relative_to(root) for root in roots)
 
 
+#: A photograph the detector found more faces in than the tags account for.
+DENY_UNTAGGED_FACE = "more_faces_than_tags"
+
+
 def is_public_safe(photo: Photo, allow: frozenset[str]) -> bool:
     """May this photo be published to a public repo?
 
     The rule the user specified: only photos with NO OTHER PERSON in them.
-    Implemented as "the face-tag set is non-empty AND a subset of the
-    allow-list". Both halves matter, and default deny is the point.
+    TWO tests, and a photograph has to pass both.
+
+    **1. The tags.** The face-tag set is non-empty AND a subset of the
+    allow-list. Both halves matter, and default deny is the point.
 
     THE NON-EMPTY HALF IS THE IMPORTANT ONE. Face tags come from Google and
     cover 55.9% of this library: 8,433 live photos (43.7%) carry no tag at
@@ -171,9 +186,68 @@ def is_public_safe(photo: Photo, allow: frozenset[str]) -> bool:
 
     A subset, never an intersection: a photo of Abhik AND Paramita is not
     publishable under an allow-list of {"Abhik Maiti"}.
+
+    **2. The count.** If the detector has looked at this photograph, it must
+    not have found MORE faces than the tags account for.
+
+    Tags say who was recognised, not who was present, and Google only tags
+    people the owner has named. So "tagged: Abhik" is entirely consistent with
+    a stranger standing beside him, and test 1 alone passes it. Measured on
+    this library, the funnel from a hand-checked sample was 189 approved by
+    tags -> 105 surviving the detector -> 64 surviving human eyes: **the tag
+    test alone approves a photograph containing someone else about 77% of the
+    time**, and the detector removes 44% of those for free.
+
+    `face_count is None` means the detector has never looked, and then this
+    test abstains and the behaviour is exactly what it was before v7. That is
+    a deliberate choice not to default-deny: making `--public-safe` return
+    nothing until `rekindle semantic faces` has run would break every existing
+    user, and the flag reports how many of its approvals are unverified so the
+    gap is visible rather than assumed away. See `unverified_count`.
+
+    Neither test identifies anybody. The detector localises faces and
+    recognises nobody; who is in a photograph still comes from the owner's own
+    tags or from nowhere.
+
+    **Neither test is sufficient, and the docs say so.** Two automated layers
+    plus a human pass is the real gate; a hand pass over this library's 105
+    detector-approved photographs still removed 41 more - a child being held,
+    a woman with her body in frame and her head above it, a wedding frame with
+    three faces turned away. None of those is a face the detector can count.
     """
     people = {p for p in photo.meta.people if p}
-    return bool(people) and people <= allow
+    if not people or not people <= allow:
+        return False
+    return not has_untagged_face(photo)
+
+
+def has_untagged_face(photo: Photo) -> bool:
+    """Did the detector find more faces than the tags account for?
+
+    False when it has never looked, which is the abstain case and not a
+    positive claim of safety - `is_public_safe` documents why that is the
+    right default here and `unverified_count` makes it visible.
+
+    A photograph of one tagged person in which the detector sees two faces has
+    somebody in it that nobody named. The comparison is `>` and not `!=`:
+    fewer faces than tags is ordinary - a person facing away, a tag on a photo
+    of a photo - and is not evidence of an extra person.
+    """
+    count = photo.meta.face_count
+    if count is None:
+        return False
+    return count > len({p for p in photo.meta.people if p})
+
+
+def unverified_count(photos: Iterable[Photo]) -> int:
+    """How many of these the face detector has never looked at.
+
+    Exists so the number can be PRINTED. A gate that silently abstains on most
+    of a library is a gate whose measured false-pass rate does not apply to
+    what it just approved, and the user has no way to know that from the
+    output.
+    """
+    return sum(1 for p in photos if p.meta.face_count is None)
 
 
 def load_policy(path: Path) -> ExclusionPolicy:

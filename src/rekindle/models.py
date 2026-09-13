@@ -100,6 +100,22 @@ class PhotoMeta:
     brightness: float | None = None
     # Hex-encoded 4x4x4 RGB histogram; see memory.diversity.ColourSignal.
     colour: str | None = None
+    # --- schema v7: what the face detector saw, for the publishing gate ---
+    #
+    # `None` means the detector has never looked at this photograph, which is
+    # NOT the same as "it looked and found nobody" (`face_count == 0`). The
+    # publishing gate has to tell those apart: the first is an unchecked
+    # photograph and the second is evidence.
+    #
+    # This is a COUNT and a verdict, never an identity. The detector localises
+    # faces; it does not recognise anyone, and nothing in rekindle asks it to.
+    # Who is in a photograph still comes from the owner's own Takeout tags or
+    # from nowhere.
+    face_count: int | None = None
+    # "eligible" | "has_face" | "uncertain" | "error", from
+    # `semantic.faces.Verdict`. Stored as text rather than the enum so
+    # `rekindle.models` stays importable with no optional extra installed.
+    face_verdict: str | None = None
 
     @classmethod
     def empty(cls) -> PhotoMeta:

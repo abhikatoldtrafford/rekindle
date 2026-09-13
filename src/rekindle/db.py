@@ -24,7 +24,7 @@ from rekindle.models import (
     merge_meta,
 )
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -68,7 +68,9 @@ CREATE TABLE IF NOT EXISTS photos (
     brightness    REAL,
     colour        TEXT,
     orient_ignore_exif INTEGER,
-    orient_evidence    TEXT
+    orient_evidence    TEXT,
+    face_count         INTEGER,
+    face_verdict       TEXT
 );
 
 -- `paths` is a JSON blob and therefore unqueryable, so this table exists to
@@ -213,6 +215,18 @@ _V6_COLUMNS = (
     ("orient_evidence", "TEXT"),
 )
 
+# v7: what the face detector saw. `face_count` NULL means it has never looked,
+# which the publishing gate must distinguish from "looked and found nobody"
+# (0) - the first is an unchecked photograph and the second is evidence.
+#
+# A count and a verdict, never an identity. The detector localises faces and
+# recognises nobody; who is in a photograph still comes from the owner's own
+# Takeout tags or from nowhere.
+_V7_COLUMNS = (
+    ("face_count", "INTEGER"),
+    ("face_verdict", "TEXT"),
+)
+
 
 # ---------------------------------------------------------------------------
 # What `_insert` writes, and what it must NOT touch
@@ -289,6 +303,16 @@ _INSERTED_COLUMNS = (
 _NOT_INSERTED = (
     "orient_ignore_exif",
     "orient_evidence",
+    # Same argument, same pass shape: `rekindle semantic faces` decodes every
+    # photograph through a detector to write these, and `set_face_gate` owns
+    # them. A re-index must not spend that, and - because these gate what may
+    # be PUBLISHED - must not silently reset them to "never examined" either.
+    #
+    # This entry exists because the accounting test in `test_db_v3.py` refused
+    # to pass without it, on the first schema version added after that test
+    # was written. That is the whole point of it.
+    "face_count",
+    "face_verdict",
 )
 
 
@@ -378,6 +402,11 @@ def _undt(value: str | None) -> datetime | None:
 def row_to_photo(row: sqlite3.Row) -> Photo:
     """One `photos` row to a `Photo`. Extra columns in the row are ignored,
     so `SELECT rowid AS _rowid, *` works as well as `SELECT *`."""
+    # A SET of the column names, not `x in row`. `sqlite3.Row` iterates its
+    # VALUES, so the membership test that reads correctly is silently asking a
+    # different question. Needed because this function is public and
+    # `memory.index` hands it rows from its own SELECT.
+    columns = set(row.keys())
     gps = None
     if row["gps_lat"] is not None and row["gps_lon"] is not None:
         gps = Gps(lat=row["gps_lat"], lon=row["gps_lon"], alt=row["gps_alt"])
@@ -404,6 +433,10 @@ def row_to_photo(row: sqlite3.Row) -> Photo:
         phash_error=row["phash_error"],
         brightness=row["brightness"],
         colour=row["colour"],
+        # Guarded, because a caller's SELECT may predate these columns. A
+        # missing one means "never examined", which is what None already says.
+        face_count=row["face_count"] if "face_count" in columns else None,
+        face_verdict=row["face_verdict"] if "face_verdict" in columns else None,
     )
     return Photo(
         file_hash=row["file_hash"],
@@ -510,6 +543,7 @@ class PhotoStore:
             3: self._to_v4,
             4: self._to_v5,
             5: self._to_v6,
+            6: self._to_v7,
         }
         while (version := self.schema_version()) != SCHEMA_VERSION:
             step = steps.get(version)
@@ -615,6 +649,52 @@ class PhotoStore:
         """
         self._add_columns(_V6_COLUMNS)
         self._bump(6)
+
+    def _to_v7(self) -> None:
+        """What the face detector saw. Additive, and nothing is backfilled.
+
+        NULL means "never examined", and until `rekindle semantic faces` runs
+        the publishing gate behaves exactly as it did at v6 - see
+        `policy.is_public_safe`. A migration that guessed a count here would
+        be inventing evidence for the one gate in the project whose failure
+        puts a stranger's face on the internet.
+        """
+        self._add_columns(_V7_COLUMNS)
+        self._bump(7)
+
+    # -------------------------------------------------------------- face gate
+
+    def set_face_gate(self, rows: Iterable[tuple[str, str, int | None]]) -> int:
+        """Record `(file_hash, verdict, face_count)` from the detector.
+
+        **A count of None is not zero.** It means no count was taken - the
+        photograph was blocked on its tags before being decoded, or the file
+        would not open. Zero means the detector looked and saw nobody, which
+        is evidence the publishing gate acts on. Writing None where the
+        detector never ran is the whole reason this parameter is optional.
+
+        Deliberately shaped like `set_orientations`: a pass over the library
+        writes its findings back through `PhotoStore`, and every other reader
+        picks them up from the index rather than re-running a model.
+
+        NOTHING IS INVALIDATED HERE, unlike an orientation verdict. A face
+        count is a statement about the pixels and changes no measurement OF
+        them - the fingerprint, the embedding and the histogram all stand.
+
+        A count is not an identity. The detector localises faces and
+        recognises nobody, so this can widen or narrow what is publishable and
+        can never say who is in a photograph.
+        """
+        cur = self._conn.cursor()
+        written = 0
+        for file_hash, verdict, count in rows:
+            cur.execute(
+                "UPDATE photos SET face_verdict = ?, face_count = ? WHERE file_hash = ?",
+                (verdict, None if count is None else int(count), file_hash),
+            )
+            written += cur.rowcount
+        self._conn.commit()
+        return written
 
     # ------------------------------------------------------------- orientation
 

@@ -88,7 +88,7 @@ def test_v2_database_migrates_to_v5_keeping_every_prior_value(tmp_path):
     _write_v2_database(db)
 
     with PhotoStore(db) as store:
-        assert store.schema_version() == SCHEMA_VERSION == 6
+        assert store.schema_version() == SCHEMA_VERSION == 7
         photo = store.get("v2row")
 
     assert photo is not None
@@ -135,7 +135,7 @@ def _fingerprinted_v4(db):
     """A v4 database holding one measured row and one row that failed."""
     _write_v2_database(db)
     with PhotoStore(db) as store:
-        assert store.schema_version() == 6  # v2 -> v6 on open
+        assert store.schema_version() == 7  # v2 -> v7 on open
         store.set_fingerprints(
             [
                 FingerprintRow(
@@ -167,7 +167,7 @@ def test_v5_clears_every_measurement_taken_on_the_old_scale(tmp_path):
     _fingerprinted_v4(db)
 
     with PhotoStore(db) as store:
-        assert store.schema_version() == 6
+        assert store.schema_version() == 7
         meta = store.get("v2row").meta
 
     assert meta.sharpness is None
@@ -458,3 +458,53 @@ def test_an_upsert_still_updates_everything_it_owns(tmp_path):
         store.upsert_many([_photo(meta=PhotoMeta(taken_at_utc=T0, description="first"))])
         store.upsert_many([_photo(meta=PhotoMeta(taken_at_utc=T0, description="second"))])
         assert store.get("abc").meta.description == "second"
+
+
+# --------------------------------------------------------------------------
+# v7: the face gate's evidence
+
+
+def test_reindexing_preserves_a_face_verdict(tmp_path):
+    """v7's preservation test, written WITH the columns rather than after the
+    data was lost.
+
+    Same argument as the orientation pass: `rekindle semantic facegate`
+    decodes every photograph through a detector to produce these, and they
+    gate what may be PUBLISHED. A re-index must not spend that work again, and
+    must not quietly reset a photograph to "never examined" - which is the
+    state that makes the gate abstain.
+    """
+    db = tmp_path / "db.sqlite"
+    with PhotoStore(db) as store:
+        store.upsert_many([_photo()])
+        store.set_face_gate([("abc", "has_face", 3)])
+
+        store.upsert_many([_photo()])
+
+        got = store.get("abc").meta
+    assert (got.face_count, got.face_verdict) == (3, "has_face")
+
+
+def test_a_measured_zero_survives_a_reindex_as_zero_and_not_as_unknown(tmp_path):
+    """The distinction the gate turns on. "Decoded, no faces" is evidence a
+    photograph may be published; "never decoded" is not. A re-index that
+    turned the first into the second would silently stop the gate working."""
+    db = tmp_path / "db.sqlite"
+    with PhotoStore(db) as store:
+        store.upsert_many([_photo()])
+        store.set_face_gate([("abc", "eligible", 0)])
+        store.upsert_many([_photo()])
+        assert store.get("abc").meta.face_count == 0
+
+
+def test_a_verdict_can_be_stored_with_no_count(tmp_path):
+    """A photograph blocked on its tags is never decoded, and a file that will
+    not open cannot be. Both have a verdict and NO measurement, and writing 0
+    for them would tell the gate the detector looked and saw nobody."""
+    db = tmp_path / "db.sqlite"
+    with PhotoStore(db) as store:
+        store.upsert_many([_photo()])
+        store.set_face_gate([("abc", "error", None)])
+        got = store.get("abc").meta
+    assert got.face_verdict == "error"
+    assert got.face_count is None

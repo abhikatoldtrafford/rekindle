@@ -195,3 +195,49 @@ def test_precision_recall_counts_a_false_alarm():
 def test_precision_recall_rejects_mismatched_lengths():
     with pytest.raises(ValueError):
         precision_recall([True], [True, False])
+
+
+# --------------------------------------------------------------------------
+# a count that was never taken is not a count of zero
+
+
+def test_a_decoded_photo_with_no_faces_reports_a_count_of_zero():
+    """Evidence. The detector ran and saw nobody, which is what lets an
+    untagged landscape become a publishing candidate."""
+    detection = Detection("h", Path("/a.jpg"), (), Verdict.ELIGIBLE)
+    assert detection.examined
+    assert detection.counted_faces == 0
+
+
+def test_a_photo_blocked_on_its_tags_reports_NO_count():
+    """The trap this property exists for.
+
+    `_examine` returns HAS_FACE with empty boxes for a photograph whose tags
+    already block it, WITHOUT decoding - the tag is proof enough and the
+    decode would be wasted. `face_count` therefore reads 0, the same number a
+    decoded photograph of an empty beach produces.
+
+    That cost nothing while the value only reached a printed report. Stored,
+    and compared against the tag count by `policy.is_public_safe`, a 0 says
+    "the detector looked and saw nobody" about a photograph it never opened -
+    which is the gate being told the opposite of the truth, in the direction
+    that publishes a stranger.
+
+    Measured when this was first run over 400 real photographs: every one of
+    the 223 tagged rows came back `has_face` with `face_count == 0`.
+    """
+    detection = Detection("h", Path("/a.jpg"), (), Verdict.HAS_FACE, examined=False)
+    assert detection.face_count == 0, "the raw property is still the length of boxes"
+    assert detection.counted_faces is None, "but nothing may store that as a measurement"
+
+
+def test_a_file_that_would_not_open_reports_no_count_either():
+    detection = Detection("h", Path("/a.jpg"), (), Verdict.ERROR, error="boom", examined=False)
+    assert detection.counted_faces is None
+
+
+def test_examined_defaults_to_true_so_a_real_detection_is_never_discarded():
+    """The default has to be the common case: a detection built by the
+    ordinary path carries a real count."""
+    detection = Detection("h", Path("/a.jpg"), (box(0.9),), Verdict.HAS_FACE)
+    assert detection.counted_faces == 1
