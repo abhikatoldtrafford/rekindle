@@ -532,7 +532,10 @@ def test_an_uppercase_metadata_json_is_album_metadata_not_an_orphan(tmp_path):
     _photos, report = _scan(root)
     assert report.json_sidecars == 2
     assert report.orphan_sidecars == 0
-    assert not any("INCOMPLETE EXPORT" in w for w in diagnose(report).warnings)
+    orphan_warnings = [
+        w for w in diagnose(report).warnings if "name a photo that is not in this folder" in w
+    ]
+    assert not orphan_warnings
 
     # And the two passes agree about the same file.
     from rekindle.enrich.takeout import EnrichReport, build_index

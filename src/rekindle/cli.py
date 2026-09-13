@@ -652,6 +652,86 @@ def dismissals(data_dir: DataDir = Path("./data")) -> None:
     dismissals_cmd(_resolved(data_dir))
 
 
+@app.command("publish-review")
+def publish_review(
+    out: Annotated[Path, typer.Option("--out", help="Where to write the contact sheets.")] = Path(
+        "memories/public-safe-review"
+    ),
+    cell: Annotated[int, typer.Option("--cell", help="Thumbnail edge, in pixels.")] = 220,
+    data_dir: DataDir = Path("./data"),
+) -> None:
+    """Contact sheets of every photo `--public-safe` would publish, worst first.
+
+    The publishing gate ends with a human, and the marker file beside each
+    memory says so. Saying so does not make it possible: on this library the
+    survivors are hundreds of photographs scattered across the export, and
+    nobody opens hundreds of files. This is those photographs as a handful of
+    images you can actually look at.
+
+    Ordered so the ones most likely to be wrong come first - never examined by
+    the detector, then tagged photographs the detector found no face in (it is
+    demonstrably missing faces there, so it would miss a stranger too), then
+    most faces first.
+
+    Writes images and nothing else. It never publishes and never excludes.
+    """
+    from rekindle import review
+    from rekindle.memory.cli import open_index
+
+    data_dir = _resolved(data_dir)
+    store, index = open_index(data_dir, public_safe=True)
+    try:
+        admitted = index.all()
+        if not admitted:
+            console.print(
+                "[yellow]Nothing is public-safe in this library.[/yellow] "
+                "Set `public_safe_allow` in exclusions.toml to the names that "
+                "may appear, and check `rekindle doctor --from-index` for how "
+                "many photos carry face tags at all."
+            )
+            return
+        report = review.write_sheets(
+            admitted, _resolved(out), resolve_path=index.resolve_path, cell=cell
+        )
+    finally:
+        store.close()
+
+    console.print(
+        f"[bold]{report.admitted}[/bold] photos would be published; "
+        f"{len(report.sheets)} sheets written to {_resolved(out)}"
+    )
+    if report.never_examined:
+        console.print(
+            f"  [red]{report.never_examined}[/red] photographs have never been through the "
+            "face detector - only their tags vouch for them. Run "
+            '`rekindle semantic facegate --allow "<your name>"`.'
+        )
+    if report.videos:
+        console.print(
+            f"  [dim]{report.videos} of these are videos. The detector reads a cached "
+            "still and these have none, so it cannot examine them - and `compose` "
+            "drops every video from a memory, so they would not be published anyway. "
+            "`rekindle fingerprint` caches a still per video.[/dim]"
+        )
+    if report.detector_saw_nothing:
+        console.print(
+            f"  [yellow]{report.detector_saw_nothing}[/yellow] are tagged but the detector "
+            "found no face at all, so it is missing faces in those images."
+        )
+    if report.unreadable:
+        console.print(
+            f"  [dim]{report.unreadable} would not decode and are marked on the sheet.[/dim]"
+        )
+    console.print(
+        "\nLook at every sheet. On a hand-checked sample of this library a person "
+        "still removed 41 photographs the detector had passed - a child being held, "
+        "a body in frame with the head above it, faces turned away."
+    )
+    console.print(
+        "Reject one with: [bold]rekindle exclude --person NAME[/bold] (or --album, --dates)."
+    )
+
+
 @app.command()
 def watch(
     root: Annotated[Path, typer.Argument(help="Folder to watch.")],

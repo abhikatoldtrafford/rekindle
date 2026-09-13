@@ -61,11 +61,14 @@ def diagnose(report: SourceReport) -> Diagnosis:
         denom = matched + report.orphan_sidecars
         rate = round(100.0 * report.orphan_sidecars / denom, 1) if denom else 0.0
         warnings.append(
-            f"INCOMPLETE EXPORT: {report.orphan_sidecars} metadata sidecars "
-            f"({rate}%) have no matching photo. Those photos are almost certainly "
-            "in Takeout archive parts you have not extracted yet. Extract every "
-            "part into the SAME folder before indexing, or your library will be "
-            "silently missing photos."
+            f"{report.orphan_sidecars} metadata sidecars ({rate}%) name a photo that "
+            "is not in this folder, so those photos are not in your library. Two "
+            "common causes, and this tool cannot tell them apart: Takeout archive "
+            "parts you have not extracted yet (extract every part into the SAME "
+            "folder and re-run), or photos Google exported the metadata for but not "
+            "the file - which it does for some shared-album content you do not own. "
+            "Check one album that is heavily affected in Google Photos before "
+            "assuming a download went wrong."
         )
     if report.json_sidecars and total and report.json_sidecars >= total * 0.25:
         warnings.append(

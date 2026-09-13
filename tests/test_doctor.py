@@ -87,7 +87,7 @@ def test_orphan_sidecars_produce_an_incomplete_export_warning():
             orphan_sidecars=2211,
         )
     )
-    hits = [w for w in d.warnings if "INCOMPLETE EXPORT" in w]
+    hits = [w for w in d.warnings if "name a photo that is not in this folder" in w]
     assert len(hits) == 1
     assert "2211" in hits[0]
     assert "44.1%" in hits[0]
@@ -99,7 +99,7 @@ def test_no_orphan_warning_when_export_is_complete():
             media_indexed=100, with_date=100, with_people=5, json_sidecars=100, orphan_sidecars=0
         )
     )
-    assert not any("INCOMPLETE EXPORT" in w for w in d.warnings)
+    assert not any("name a photo that is not in this folder" in w for w in d.warnings)
 
 
 def test_excluded_trash_is_mentioned():
