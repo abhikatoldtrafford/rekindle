@@ -383,8 +383,13 @@ experiment is `pytest tests/test_memory_cli.py` on a clean checkout.
 
 * **The index is a snapshot.** It always was, but the failure mode changed: a
   stale materialised index showed old data, while a stale rowid could in
-  principle address a *different* row, because `_insert` is INSERT OR REPLACE
-  and REPLACE allocates a new rowid (verified, not assumed). Nothing in
+  principle address a *different* row. (**Superseded 2026-09-13:** the reason
+  given here was that `_insert` is INSERT OR REPLACE and REPLACE allocates a
+  new rowid — true when this was written, and it is `ON CONFLICT DO UPDATE`
+  now, which keeps the rowid. An upsert therefore no longer moves a row; a
+  DELETE plus a later INSERT still can, so the constraint stands and only its
+  cause has narrowed. See the independent-audit log for why that statement
+  changed.) Nothing in
   rekindle writes the `photos` table while an index is open — the fingerprint
   and orientation passes use targeted UPDATEs, which keep the rowid, and the
   web UI writes only to other tables — so this is a documented constraint

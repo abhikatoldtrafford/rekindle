@@ -351,6 +351,30 @@ photographs of institutional buildings labelled *"a hospital or a clinic"*,
 containing no hospital. A curated file is something you can read, disagree
 with, and fix.
 
+### 🔤 Libraries that are not in English
+
+rekindle ships Noto Sans, so titles and captions in accented Latin, Greek or
+Cyrillic render properly — `José — Café`, `Кашмир`, `Ελλάδα`. Pillow's own
+bundled face draws all of those as rectangles, which is what this replaces.
+
+For anything else — Chinese, Japanese, Korean — point it at a font you have:
+
+```bash
+rekindle memory --recipe album_story --key "東京" --font ~/NotoSansCJK-Regular.otf
+```
+
+The font is an explicit input, so two people using the same one get the same
+bytes. rekindle deliberately does not go looking for a system font: that would
+work out of the box and quietly break the byte-for-byte promise.
+
+**Bengali, Devanagari, Arabic, Thai and their neighbours will still be wrong,
+and no font fixes it.** In those scripts a vowel sign is stored after its
+consonant and has to be drawn before it. Pillow reorders glyphs only when it
+is built with libraqm, and the wheels on PyPI are not — so the letters appear
+in stored order, which looks like the language and is misspelled. rekindle
+detects those scripts and says so rather than drawing them wrongly. The
+photographs are unaffected; it is the title card only.
+
 ### 🖼️ Editing a memory by hand
 
 ```bash
@@ -493,6 +517,20 @@ where it can't guarantee that:
   a reason. Nothing is dropped silently.
 - **No memory renders itself.** `rekindle watch` prints the command; you run
   it. Unprompted memories are where the real risk lives.
+- **Publishing has three gates, and the third is you.** `--public-safe`
+  checks the face tags and then the face-detector count (see
+  [Known limits](#known-limits)). Neither is sufficient, so
+  `rekindle publish-review` renders every photo the flag would publish as
+  contact sheets — worst first, labelled with face count and tags — because
+  "look at them before you publish" is only advice until it is something you
+  can do in one sitting:
+
+  ```bash
+  rekindle semantic facegate --allow "Your Name"   # count faces, once
+  rekindle publish-review                          # then look at all of them
+  ```
+
+  It writes images and nothing else. It never publishes and never excludes.
 
 ## 🎚️ Tuning it to your photographs
 

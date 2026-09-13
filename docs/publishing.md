@@ -1,21 +1,45 @@
 # Publishing to PyPI
 
-**Nothing in this repository has been published, and no agent will publish it.**
-This page is here so that the owner can, in one command, when they decide to.
+**`rekindle` is on PyPI. 0.1.0 and 0.1.1 are released and cannot be undone.**
+This page describes how the next one goes out.
 
 Publishing is effectively permanent. A release can be *yanked* — hidden from
-resolvers — but it can never be deleted, the version number can never be
-reused, and the project name is claimed by whoever uploads first. It also needs
-the owner's own PyPI account and an API token that no automation here has or
-should have.
+resolvers — but it can never be deleted and the version number can never be
+reused.
+
+**There is no API token anywhere in this repository, and there does not need
+to be.** Releases go out through PyPI Trusted Publishing (OIDC): the workflow
+proves to PyPI that it is this repository running this workflow, and PyPI
+issues a short-lived credential for that upload alone. Nothing to store,
+nothing to rotate, nothing to leak. The account-scoped token used for the
+first manual release should be revoked if it has not been already.
 
 ---
 
 ## The command
 
 ```bash
+git tag v0.1.2 && git push origin v0.1.2
+```
+
+That is the whole of it. `.github/workflows/release.yml` fires on a `v*` tag
+and will not publish unless, in this order: the suite passes on two operating
+systems and on a minimal install, the tag matches `version` in
+`pyproject.toml`, and a grep over the built sdist finds no personal data. Only
+then does it upload, with `id-token: write` and no secret.
+
+A tag that disagrees with `pyproject.toml` fails the job rather than
+publishing something misnamed — which is the mistake this ordering exists to
+prevent.
+
+## Doing it by hand, if the workflow is broken
+
+```bash
 uv build && uv publish
 ```
+
+This needs an API token, which is why it is the fallback and not the route.
+Prefer fixing the workflow.
 
 **Exactly what that does, in order:**
 
@@ -48,11 +72,18 @@ file whole, and re-running is safe for a file that did not land.
       **with the freshly built wheel in `dist/`** — the wheel-content
       assertions skip when `dist/` is empty, so an empty `dist/` looks like a
       pass.
-- [ ] `version` in `pyproject.toml` is the one you mean. It cannot be reused.
+- [ ] `version` in `pyproject.toml` is the one you mean, and the tag matches
+      it exactly. It cannot be reused, and the release workflow refuses a
+      mismatch.
+- [ ] `uv.lock` has been synced to the new version and committed. A stale lock
+      is not caught by the tests and has shipped before.
 - [ ] `pipx install .` from a clean shell, then `rekindle --help` and
       `rekindle doctor <a folder of photos>`.
 - [ ] The README renders. `python -m twine check dist/*` catches the common
       Markdown failures without uploading anything.
+- [ ] Every image in the README is an ABSOLUTE URL. A relative path renders on
+      GitHub and is a broken image on the PyPI page; `tests/test_packaging.py`
+      asserts it, including inside `<img src=...>`.
 
 ## Rehearsing it without consequences
 
@@ -73,11 +104,10 @@ ship — `0.1.0.dev1`, say.
 
 ## The name
 
-`rekindle` was free on PyPI when last checked: HTTP 404 from
-`https://pypi.org/pypi/rekindle/json`, re-verified 2026-09-12. That is a fact
-with a shelf life. Check it again immediately before uploading; if somebody
-has taken it, the upload fails with a 403 and the fix is a different `name` in
-`pyproject.toml`, not a retry.
+Taken, by us — `https://pypi.org/project/rekindle/`. This section used to say
+it was free and to check again before uploading, which was right until
+2026-09-12 and is now just wrong. Left here as the shape of a claim with a
+shelf life: it needed a date on it, and it had one.
 
 ## One thing packaging cannot carry
 

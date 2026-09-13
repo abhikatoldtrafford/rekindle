@@ -60,9 +60,19 @@ filter rather than trusting yourself to check afterwards:
 uv run rekindle memory --recipe album_story --key "Kashmir" --public-safe
 ```
 
-A photo qualifies only when its face-tag set is **non-empty and a subset of the
-allow-list**. Everything else is refused, including photos with no face tags at
-all — because an untagged photo may still contain someone. Default deny.
+A photo qualifies only when **both** checks pass. First, its face-tag set is
+non-empty and a subset of the allow-list — everything else is refused,
+including photos with no face tags at all, because an untagged photo may still
+contain someone. Default deny.
+
+Second, where `rekindle semantic facegate` has looked, the detector must not
+have found **more faces than the tags account for**. Tags say who was
+*recognised*, not who was *present*: measured on this library, 440 of the 960
+photographs the tag check approved contain an unnamed face.
+
+Then look at them. `rekindle publish-review` renders every survivor as contact
+sheets, worst first — on a hand-checked sample a person still removed 41 the
+detector had passed.
 
 Two things to understand before relying on it:
 
