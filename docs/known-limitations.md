@@ -1079,3 +1079,65 @@ What is worth carrying forward from it, rather than the list itself:
 Still true, and unchanged by the audit: the determinism promise holds byte for
 byte, and `--public-safe` was verified shot by shot against the raw tags with
 no violations.
+
+## Closed after the audit: the publishing gate, the spine, the labels
+
+Three items this document carried as unscheduled, and what is left of each.
+
+### `--public-safe` now has two automated checks, not one
+
+It was: face tags non-empty and a subset of the allow-list. Tags say who was
+RECOGNISED, not who was present — Google labels only people you have named —
+so "tagged: you" is entirely consistent with a stranger beside you.
+
+Schema v7 stores what the face detector saw (`face_count`, `face_verdict`),
+`rekindle semantic facegate` writes it, and the gate refuses a photograph with
+more faces than its tags account for. **Measured over the whole reference
+library: 960 photographs passed the tag test; 440 of them (46%) contain more
+faces than the tags name. 520 survive.**
+
+Two things about that number. It is not the 77% the hand-checked sample gave,
+because the detector catches only what it can count — a person still removed
+41 more from a set the detector had passed. And 48 of the 520 survivors have
+never been through the detector at all; they are reported as unverified rather
+than assumed safe, on the summary line and in the `PUBLIC-SAFE` marker beside
+each memory.
+
+**A count that was never taken is not a count of zero**, and the first run over
+400 real photographs proved how easily that goes wrong: every one of the 223
+tagged rows came back `has_face` with `face_count == 0`, because `_examine`
+short-circuits a tag-blocked photograph without decoding it and its empty
+`boxes` reads as zero. Stored, that tells the gate the detector looked and saw
+nobody about a photograph it never opened. `Detection.examined` exists for
+that distinction and `counted_faces` returns None when it is False.
+
+### One of the three hydrating recipes is off the library
+
+`album_story.offers()` needed a count and two dates and got the dates by
+loading every photograph of every album. The month is on the spine now
+(0.33s → 0.004s on the reference index).
+
+Checking the new route against the old one found a bug in the old one:
+`span_subtitle` sorted `taken_at_local` values that carry their offset, so it
+compared instants rather than wall clocks and called `Photos from 2018`
+"August 2018 – December 2018" when its last photographs read 1 January 2019 on
+the clock the photographer was looking at.
+
+**The other three still read the library, and what each needs is now recorded
+in `tests/test_recipes.py` beside the test:** `then_and_now` needs the
+composition scalars per photograph or it advertises a memory `select()` cannot
+build; `recurring_event` derives its title from the photographs; `place_cluster`
+splits a cell into visits by timestamp gap. Putting the composition scalars on
+the spine means either a second implementation of the guardrail predicate — the
+thing this codebase has been bitten by repeatedly — or extracting the predicate
+so both routes call one function. That is the design decision, and it has not
+been made.
+
+### Cluster labels are inert by construction, not by convention
+
+The rule was a sentence in this document. `tests/test_cluster_labels_are_inert.py`
+walks the AST of every module and fails if anything outside the one display
+reads `.label`, with a stricter check for `rekindle.memory`, a test that the
+detector finds the legitimate reader, and one that fails if the attribute is
+renamed. The column header says "nearest phrase (cosmetic)" and the command
+prints what the phrase is worth.
