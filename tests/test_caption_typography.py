@@ -269,58 +269,28 @@ def test_the_title_card_still_folds_what_the_font_cannot_draw(monkeypatch, tmp_p
         frames._draws.cache_clear()
 
 
-def _a_font_with_bengali():
-    """Any font on this machine that draws Bengali. None if there is none.
-
-    Needed because the bundled Aileron has no Bengali glyph at all, so both
-    orderings below render as two identical boxes and the comparison would
-    pass for the wrong reason.
-    """
-    import sys
-    from pathlib import Path
-
-    roots = {
-        "win32": [Path("C:/Windows/Fonts")],
-        "darwin": [Path("/System/Library/Fonts"), Path("/Library/Fonts")],
-    }.get(sys.platform, [Path("/usr/share/fonts")])
-    for root in roots:
-        if not root.is_dir():
-            continue
-        for path in sorted(root.rglob("*.ttf")):
-            try:
-                font = ImageFont.truetype(str(path), 24)
-            except OSError:
-                continue
-            image = Image.new("L", (60, 46), 0)
-            ImageDraw.Draw(image).text((2, 2), "অ", font=font, fill=255)
-            probe = Image.new("L", (60, 46), 0)
-            ImageDraw.Draw(probe).text((2, 2), NOTDEF_PROBE, font=font, fill=255)
-            if image.tobytes() != probe.tobytes():
-                return font
-    return None
-
-
 def test_the_shaping_claim_is_measured_not_assumed():
-    """Pins the finding the warning rests on.
+    """Pins the finding the warning rests on, portably.
+
+    An earlier version of this rendered Bengali and compared the two glyph
+    orders. It passed here and failed on three CI legs, because it depended on
+    which fonts the runner happened to have - a face with partial Bengali
+    coverage renders both orders as the same pair of boxes and the comparison
+    means nothing. The property is about PILLOW, not about a font, so it is
+    asserted on Pillow.
+
+    `Layout.BASIC` is Pillow's own name for "lay the codepoints out in stored
+    order". Complex scripts need `Layout.RAQM`, which needs libraqm, which the
+    PyPI wheels do not carry. With BASIC, a Bengali vowel sign is drawn after
+    the consonant it belongs before.
 
     If a future Pillow ships libraqm this skips, and the warning it justifies
-    should be revisited rather than left in place saying something that
-    stopped being true.
+    should be revisited rather than left saying something that stopped being
+    true.
     """
     from PIL import features
 
     if features.check("raqm"):
-        pytest.skip("this Pillow HAS libraqm; the warning should be re-examined")
-    font = _a_font_with_bengali()
-    if font is None:
-        pytest.skip("no font with Bengali coverage on this machine")
+        pytest.skip("this Pillow HAS libraqm; the shaping warning should be re-examined")
 
-    def drawn(s):
-        image = Image.new("L", (140, 56), 0)
-        ImageDraw.Draw(image).text((6, 6), s, font=font, fill=255)
-        return image.tobytes()
-
-    # KA + vowel-sign-I. Correct Bengali draws the vowel FIRST, so a renderer
-    # that shapes would produce the same pixels as the manually reordered
-    # string. Without libraqm it does not: it draws them as stored.
-    assert drawn("কি") != drawn("ি" + "ক"), "this Pillow appears to be reordering glyphs after all"
+    assert ImageFont.load_default(size=20).layout_engine == ImageFont.Layout.BASIC
