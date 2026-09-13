@@ -104,6 +104,11 @@ def test_no_query_method_can_return_a_blocked_photo(tmp_path):
             "person_years": ("Paramita",),
             "pair_years": ("Abhik Maiti", "Paramita"),
             "album_years": ("Kashmir",),
+            # Reads the month spine for an album, so it must be swept like
+            # every other album query: it names a slice the blocked photo is
+            # in, and returning a span derived from that photo would leak the
+            # fact that it exists.
+            "album_span": ("Kashmir",),
             "get": (BLOCKED,),
             "resolve_many": ([BLOCKED, OK],),
             "by_date": (2020, 5, 1),
@@ -1019,3 +1024,81 @@ def test_a_dateless_photo_does_not_misalign_the_year_array(tmp_path):
     assert index.month_years(3) == {2011}
     assert index.month_years(5) == {2020}
     assert index.year_counts() == {2011: 1, 2020: 1}
+
+
+def test_album_span_reads_the_months_off_the_spine(tmp_path):
+    """`album_story.offers()` needs a count and a span to write a subtitle.
+
+    It used to get the span by hydrating every photograph of every album -
+    on a 300k library, the whole library, to produce two dates per album.
+    Measured on the reference index, that was 0.33s of the 2.60s offers phase
+    and is now 0.004s.
+    """
+    from rekindle.memory import captions
+
+    store = _store(
+        tmp_path,
+        [
+            _p("a", local=datetime(2024, 10, 1, 9, 0), albums=["Kashmir"]),
+            _p("b", local=datetime(2025, 1, 3, 9, 0), albums=["Kashmir"]),
+            _p("c", local=datetime(2024, 10, 20, 9, 0), albums=["Kashmir"]),
+            _p("d", local=datetime(2023, 5, 5, 9, 0), albums=["Puri"]),
+        ],
+    )
+    try:
+        index = MemoryIndex.open(store)
+        assert index.album_span("Kashmir") == ((2024, 10), (2025, 1))
+        assert index.album_span("Puri") == ((2023, 5), (2023, 5))
+        assert index.album_span("nothing at all") is None
+
+        # And it agrees with the route that walks the photographs.
+        for album in ("Kashmir", "Puri"):
+            photos = index.by_album(album)
+            assert captions.subtitle_for(photos) == captions.subtitle_of(
+                len(photos), index.album_span(album)
+            ), album
+    finally:
+        store.close()
+
+
+def test_the_month_spine_stays_aligned_with_the_rowids(tmp_path):
+    """`_yearmonths` is read by bisecting `_ids`, so a row that appends to one
+    and not the other silently shifts every later answer by one. Same
+    invariant `_years` has, and the reason both are appended in one place."""
+    store = _store(
+        tmp_path,
+        [_p(f"h{i}", local=datetime(2020 + i, (i % 12) + 1, 1, 9, 0)) for i in range(6)],
+    )
+    try:
+        index = MemoryIndex.open(store)
+        assert len(index._yearmonths) == len(index._ids) == len(index._years)
+        for position in range(len(index._ids)):
+            assert index._yearmonths[position] // 12 == index._years[position]
+    finally:
+        store.close()
+
+
+def test_a_blocked_photo_cannot_move_an_album_span(tmp_path):
+    """The sweep above passes `album_span` trivially - it returns integers, so
+    there is no photo in the result to find. This is the assertion that
+    matters: an excluded photograph must not shift the dates either.
+
+    It holds because `_by_album` is built from the scan, which yields only
+    allowed rows. That is worth pinning rather than assuming, because a span
+    is a fact ABOUT the excluded photograph - "this album reaches into January
+    2019" - and the exclusion report exists precisely so that counts leak
+    nothing.
+    """
+    store = _store(
+        tmp_path,
+        [
+            _p("keep", local=datetime(2024, 10, 1, 9, 0), albums=["Kashmir"]),
+            _p("also", local=datetime(2024, 10, 20, 9, 0), albums=["Kashmir"]),
+            _p("hidden", local=datetime(2019, 1, 1, 9, 0), albums=["Kashmir"], archived=True),
+        ],
+    )
+    try:
+        index = MemoryIndex.open(store)
+        assert index.album_span("Kashmir") == ((2024, 10), (2024, 10))
+    finally:
+        store.close()

@@ -84,9 +84,21 @@ def span_subtitle(photos: list[Photo]) -> str:
     """ "October 2024" for one month, "October 2024 - January 2025" across two.
 
     Empty when nothing is dated, never a guess.
+
+    SORTED ON THE WALL CLOCK, not on the instant. `taken_at_local` is stored
+    with its offset attached, so a bare `sorted()` compares absolute moments -
+    and a photograph taken at 00:00:54 on 1 January 2019 in IST is the instant
+    18:30:54 on 31 December 2018 UTC, which sorts BEFORE one taken at 18:39:15
+    UTC that same evening.
+
+    Found on the real library: the album `Photos from 2018` ends with New
+    Year's Eve photographs whose local clock reads January 2019, and this
+    function called the span "August 2018 - December 2018". The field is named
+    `local` because the wall clock is the thing the person lived through; that
+    is what a subtitle should name.
     """
     dated = sorted(
-        (p.meta.taken_at_local for p in photos if p.meta.taken_at_local),
+        p.meta.taken_at_local.replace(tzinfo=None) for p in photos if p.meta.taken_at_local
     )
     if not dated:
         return ""
@@ -105,6 +117,32 @@ def subtitle_for(photos: list[Photo]) -> str:
     span = span_subtitle(photos)
     count = count_subtitle(photos)
     return f"{count}, {span}" if span else count
+
+
+def span_subtitle_of(span: tuple[tuple[int, int], tuple[int, int]] | None) -> str:
+    """`span_subtitle` from two `(year, month)` pairs instead of photographs.
+
+    The same three cases and the same words - one month, two months, or
+    nothing at all - so a caller that already knows the span need not load a
+    library to get it. `MemoryIndex.album_span` reads it off the spine.
+
+    Both functions, one wording: `test_captions.py` asserts they agree on the
+    real shapes, because a subtitle that differs depending on which route
+    computed it is a determinism bug that would only show up as a diff.
+    """
+    if span is None:
+        return ""
+    (first_year, first_month), (last_year, last_month) = span
+    if (first_year, first_month) == (last_year, last_month):
+        return f"{month_name(first_month)} {first_year}"
+    return f"{month_name(first_month)} {first_year} - {month_name(last_month)} {last_year}"
+
+
+def subtitle_of(count: int, span: tuple[tuple[int, int], tuple[int, int]] | None) -> str:
+    """`subtitle_for` from a count and a span. See `span_subtitle_of`."""
+    counted = "1 photo" if count == 1 else f"{count} photos"
+    rendered = span_subtitle_of(span)
+    return f"{counted}, {rendered}" if rendered else counted
 
 
 def year_caption(photo: Photo) -> str:

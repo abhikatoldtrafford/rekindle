@@ -5,7 +5,7 @@ the ONLY thing the optional GPT layer ever sees - contains no filesystem path
 and no invented fact.
 """
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -241,6 +241,49 @@ def test_a_span_with_no_dates_is_empty_not_a_guess():
     photo = _p("a")
     photo.meta.taken_at_local = None
     assert captions.span_subtitle([photo]) == ""
+
+
+def test_a_span_is_sorted_on_the_WALL_CLOCK_not_the_instant():
+    """`taken_at_local` is stored with its offset attached.
+
+    A bare `sorted()` over those compares absolute moments, and a photograph
+    taken at 00:00:54 on 1 January 2019 in IST IS the instant 18:30:54 on 31
+    December 2018 UTC - so it sorts before one taken at 18:39:15 UTC that same
+    evening, and the album's span ends in December.
+
+    Found on the real library: `Photos from 2018` ends with New Year's Eve
+    photographs whose local clock reads January 2019, and the subtitle said
+    "August 2018 - December 2018". The field is called `local` because the
+    wall clock is what the person lived through.
+    """
+    ist = timezone(timedelta(hours=5, minutes=30))
+    new_year = _p("a", local=datetime(2019, 1, 1, 0, 0, 54, tzinfo=ist))
+    earlier = _p("b", local=datetime(2018, 12, 31, 18, 39, 15, tzinfo=UTC))
+
+    assert new_year.meta.taken_at_local < earlier.meta.taken_at_local, (
+        "the premise: as instants, the January photo comes first"
+    )
+    assert captions.span_subtitle([new_year, earlier]) == "December 2018 - January 2019"
+
+
+def test_the_two_routes_to_a_subtitle_agree():
+    """`subtitle_for` walks photographs; `subtitle_of` takes a count and a
+    span read off the index spine. A subtitle that differed by route would be
+    a determinism bug visible only as a diff, so they are checked against each
+    other - and were, over all 65 albums of the real library.
+    """
+    photos = [_p("a", local=datetime(2024, 10, 1)), _p("b", local=datetime(2025, 1, 3))]
+    assert captions.subtitle_of(2, ((2024, 10), (2025, 1))) == captions.subtitle_for(photos)
+
+    one = [_p("a", local=datetime(2024, 10, 1))]
+    assert captions.subtitle_of(1, ((2024, 10), (2024, 10))) == captions.subtitle_for(one)
+
+
+def test_a_subtitle_with_no_span_is_the_count_alone():
+    """`album_span` returns None for an empty slice rather than guessing, and
+    the subtitle must not invent a date from it."""
+    assert captions.subtitle_of(3, None) == "3 photos"
+    assert captions.span_subtitle_of(None) == ""
 
 
 def test_the_count_subtitle_gets_the_singular_right():

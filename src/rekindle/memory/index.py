@@ -361,6 +361,15 @@ class MemoryIndex:
         # - and it is what lets `offers()` answer "how many distinct years are
         # in this slice?" without loading the slice. See `_years_in`.
         self._years = array("i")
+        # Local capture YEAR-MONTH per row as `year * 12 + (month - 1)`,
+        # aligned with `_ids` exactly as `_years` is. Four more bytes a photo
+        # - 1.2 MB across a 300k library - and it is what lets `album_story`
+        # write its subtitle without loading an album.
+        #
+        # One integer rather than a (year, month) tuple because a tuple per
+        # photo is a Python object per photo, which is the cost this whole
+        # spine exists to avoid.
+        self._yearmonths = array("i")
         self._image_ids = array(_ROWID)
         self._by_year: dict[int, array] = defaultdict(_ids)
         self._by_month: dict[int, array] = defaultdict(_ids)
@@ -385,8 +394,10 @@ class MemoryIndex:
             # is unreachable and no index below points at it.
             if local is None:  # pragma: no cover
                 self._years.append(0)
+                self._yearmonths.append(0)
                 continue
             self._years.append(local.year)
+            self._yearmonths.append(local.year * 12 + local.month - 1)
             ymd = (local.year, local.month, local.day)
             self._by_year[local.year].append(row_id)
             self._by_month[local.month].append(row_id)
@@ -475,6 +486,21 @@ class MemoryIndex:
         """
         ids, years = self._ids, self._years
         return {years[bisect_left(ids, row_id)] for row_id in row_ids}
+
+    def _span_in(self, row_ids: Sequence[int]) -> tuple[tuple[int, int], tuple[int, int]] | None:
+        """Earliest and latest `(year, month)` of a slice, without loading it.
+
+        The same bisect trick as `_years_in`, against `_yearmonths`. Returns
+        None for an empty slice rather than a guessed span - `span_subtitle`
+        has always refused to invent a date and this must not be the place
+        that starts.
+        """
+        if not len(row_ids):
+            return None
+        ids, months = self._ids, self._yearmonths
+        packed = [months[bisect_left(ids, row_id)] for row_id in row_ids]
+        low, high = min(packed), max(packed)
+        return (low // 12, low % 12 + 1), (high // 12, high % 12 + 1)
 
     # ---- hydration. The ONLY route from a rowid to a Photo.
 
@@ -639,6 +665,16 @@ class MemoryIndex:
 
     def pair_counts(self) -> Counter[tuple[str, str]]:
         return Counter({pair: len(v) for pair, v in self._by_pair.items()})
+
+    def album_span(self, album: str) -> tuple[tuple[int, int], tuple[int, int]] | None:
+        """Earliest and latest `(year, month)` in an album, off the spine.
+
+        `album_story.offers()` needs a count and a span to write a subtitle,
+        and used to get the span by hydrating every photograph of every
+        album - on a 300k library, the whole library, to produce two dates per
+        album.
+        """
+        return self._span_in(self._by_album.get(album, ()))
 
     def album_counts(self) -> Counter[str]:
         return Counter({name: len(v) for name, v in self._by_album.items()})

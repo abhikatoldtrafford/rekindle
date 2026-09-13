@@ -61,13 +61,15 @@ class AlbumStory:
         for album, count in index.album_counts().items():
             if count < self.min_album or not _presentable_album(album):
                 continue
-            photos = index.by_album(album)
+            # Off the spine, not out of the library. This used to hydrate
+            # every photograph of every album to write two dates into a
+            # subtitle - on a 300k library, the whole library.
             out.append(
                 Offer(
                     recipe=self.name,
                     key=album,
                     title=album,
-                    subtitle=captions.subtitle_for(photos),
+                    subtitle=captions.subtitle_of(count, index.album_span(album)),
                     size=count,
                 )
             )

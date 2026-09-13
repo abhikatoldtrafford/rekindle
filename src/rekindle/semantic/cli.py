@@ -534,7 +534,13 @@ def semantic_cluster(
     table.add_column("n", justify="right")
     table.add_column("cohesion", justify="right")
     table.add_column("nearest", justify="right")
-    table.add_column("looks like")
+    # "nearest phrase", not "looks like". The column used to promise more than
+    # it delivers: these are cosine matches against a fixed vocabulary with
+    # scores of 0.127-0.282, and one landed on "a hospital or a clinic" over
+    # 270 photographs of a campus. Nothing in rekindle reads them - see
+    # `tests/test_cluster_labels_are_inert.py`, which enforces that - and a
+    # person reading this table should know what they are looking at.
+    table.add_column("nearest phrase (cosmetic)")
     for cluster in clustering.clusters[:show]:
         table.add_row(
             str(cluster.cluster_id),
@@ -544,6 +550,13 @@ def semantic_cluster(
             f"{cluster.label} ({cluster.label_score:.3f})" if cluster.label else "",
         )
     console.print(table)
+    if any(c.label for c in clustering.clusters[:show]):
+        console.print(
+            "[dim]The phrases are the nearest match from a fixed vocabulary, not a "
+            "classification. On the reference library one cluster of 270 campus "
+            "buildings came back as 'a hospital or a clinic'. Nothing in rekindle "
+            "reads them; do not either.[/dim]"
+        )
 
 
 # ------------------------------------------------------------------- aesthetic

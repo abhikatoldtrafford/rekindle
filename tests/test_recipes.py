@@ -759,7 +759,34 @@ def _dense_years():
     return out
 
 
-SPINE_ONLY_OFFERS = ("on_this_day", "on_this_month", "person_years", "pair_years", "year_in_review")
+#: Recipes whose `offers()` answers entirely from the index spine.
+#:
+#: `album_story` joined them when the month span moved onto the spine: it
+#: needs a count and two dates for its subtitle, and used to get the dates by
+#: hydrating every photograph of every album - on a 300k library, the whole
+#: library. Measured on the reference index, 0.33s of a 2.60s offers phase,
+#: now 0.004s.
+#:
+#: Three are deliberately absent and are expected to stay that way until the
+#: data they need is on the spine too. See `STILL_HYDRATES`.
+SPINE_ONLY_OFFERS = (
+    "album_story",
+    "on_this_day",
+    "on_this_month",
+    "person_years",
+    "pair_years",
+    "year_in_review",
+)
+
+#: The negative control for the test below, and a record of what is left.
+#:
+#: `then_and_now` picks exactly TWO photographs, so it has to know which would
+#: survive the composition guardrails - width, height, sharpness, brightness
+#: and media type per photograph - or it advertises a memory `select()` cannot
+#: build. `recurring_event` derives its TITLE from the photographs in the
+#: event. `place_cluster` splits a cell into visits by timestamp gap. None of
+#: those is a count or a year, which is all the spine carries.
+STILL_HYDRATES = "then_and_now"
 
 
 @pytest.mark.parametrize("name", SPINE_ONLY_OFFERS)
@@ -778,13 +805,18 @@ def test_offers_does_not_hydrate_a_single_photograph(name, tmp_path):
 
 
 def test_a_recipe_that_reads_the_slice_really_would_show_up(tmp_path):
-    """Guards the test above against being vacuous. `album_story` is one of
-    the three that still loads photographs in `offers()` - it needs a
-    subtitle - so it must fail the same assertion."""
+    """Guards the test above against being vacuous.
+
+    A "does not hydrate" assertion proves nothing unless a recipe that DOES
+    hydrate fails it on the same fixture. `album_story` used to be this
+    control and no longer hydrates, which is how this test caught the change -
+    exactly what a control is for. `then_and_now` needs the composition
+    scalars per photograph and cannot answer from the spine.
+    """
     photos = _across_years("a", people=["Amy", "Bob"], albums=["Kashmir"])
     store, index = _index(tmp_path, photos)
     try:
-        assert REGISTRY["album_story"].offers(index)
+        assert REGISTRY[STILL_HYDRATES].offers(index)
         assert len(index._cache) > 0, "the fixture never hydrates, so the test proves nothing"
     finally:
         index.close()
